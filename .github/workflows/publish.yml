@@ -44,17 +44,15 @@ jobs:
           echo "Package: $PACKAGE_NAME"
           echo "Version: $PACKAGE_VERSION"
           
-          # Check if version exists on crates.io
-          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "https://crates.io/api/v1/crates/$PACKAGE_NAME/$PACKAGE_VERSION")
+          # Check if version exists on crates.io using the public API
+          RESPONSE=$(curl -s "https://crates.io/api/v1/crates/$PACKAGE_NAME")
           
-          if [ "$HTTP_CODE" = "200" ]; then
+          if echo "$RESPONSE" | jq -e ".versions[] | select(.num == \"$PACKAGE_VERSION\")" > /dev/null 2>&1; then
             echo "❌ Version $PACKAGE_VERSION already exists on crates.io"
             echo "Please update the version in Cargo.toml before publishing"
             exit 1
-          elif [ "$HTTP_CODE" = "404" ]; then
-            echo "✅ Version $PACKAGE_VERSION is available for publishing"
           else
-            echo "⚠️  Unable to verify version status (HTTP $HTTP_CODE). Proceeding with caution."
+            echo "✅ Version $PACKAGE_VERSION is available for publishing"
           fi
 
       - name: Run all checks

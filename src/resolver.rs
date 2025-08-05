@@ -1,8 +1,8 @@
 //! Canonical URL resolution
 
+use crate::binary_storage::{BinaryStorage, PackageInfo, ResourceMetadata};
 use crate::error::{ResolutionError, Result};
 use crate::package::FhirResource;
-use crate::storage::{IndexedStorage, PackageInfo, ResourceMetadata};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -19,7 +19,7 @@ use url::Url;
 ///
 /// ```rust,no_run
 /// use octofhir_canonical_manager::resolver::CanonicalResolver;
-/// use octofhir_canonical_manager::storage::IndexedStorage;
+/// use octofhir_canonical_manager::binary_storage::BinaryStorage;
 /// use octofhir_canonical_manager::config::StorageConfig;
 /// use std::sync::Arc;
 /// use std::path::PathBuf;
@@ -31,7 +31,7 @@ use url::Url;
 ///     packages_dir: PathBuf::from("/tmp/packages"),
 ///     max_cache_size: "1GB".to_string(),
 /// };
-/// let storage = Arc::new(IndexedStorage::new(config).await?);
+/// let storage = Arc::new(BinaryStorage::new(config).await?);
 /// let resolver = CanonicalResolver::new(storage);
 ///
 /// let resolved = resolver.resolve("http://hl7.org/fhir/Patient").await?;
@@ -40,7 +40,7 @@ use url::Url;
 /// # }
 /// ```
 pub struct CanonicalResolver {
-    storage: Arc<IndexedStorage>,
+    storage: Arc<BinaryStorage>,
     resolution_config: ResolutionConfig,
 }
 
@@ -151,7 +151,7 @@ impl CanonicalResolver {
     ///
     /// ```rust,no_run
     /// use octofhir_canonical_manager::resolver::CanonicalResolver;
-    /// use octofhir_canonical_manager::storage::IndexedStorage;
+    /// use octofhir_canonical_manager::binary_storage::BinaryStorage;
     /// use octofhir_canonical_manager::config::StorageConfig;
     /// use std::sync::Arc;
     /// use std::path::PathBuf;
@@ -163,12 +163,12 @@ impl CanonicalResolver {
     ///     packages_dir: PathBuf::from("/tmp/packages"),
     ///     max_cache_size: "1GB".to_string(),
     /// };
-    /// let storage = Arc::new(IndexedStorage::new(config).await?);
+    /// let storage = Arc::new(BinaryStorage::new(config).await?);
     /// let resolver = CanonicalResolver::new(storage);
     /// # Ok(())
     /// # }
     /// ```
-    pub fn new(storage: Arc<IndexedStorage>) -> Self {
+    pub fn new(storage: Arc<BinaryStorage>) -> Self {
         Self {
             storage,
             resolution_config: ResolutionConfig::default(),
@@ -186,7 +186,7 @@ impl CanonicalResolver {
     ///
     /// ```rust,no_run
     /// use octofhir_canonical_manager::resolver::{CanonicalResolver, ResolutionConfig, VersionPreference};
-    /// use octofhir_canonical_manager::storage::IndexedStorage;
+    /// use octofhir_canonical_manager::binary_storage::BinaryStorage;
     /// use octofhir_canonical_manager::config::StorageConfig;
     /// use std::sync::Arc;
     /// use std::path::PathBuf;
@@ -198,7 +198,7 @@ impl CanonicalResolver {
     ///     packages_dir: PathBuf::from("/tmp/packages"),
     ///     max_cache_size: "1GB".to_string(),
     /// };
-    /// let storage = Arc::new(IndexedStorage::new(storage_config).await?);
+    /// let storage = Arc::new(BinaryStorage::new(storage_config).await?);
     ///
     /// let config = ResolutionConfig {
     ///     version_preference: VersionPreference::Latest,
@@ -210,7 +210,7 @@ impl CanonicalResolver {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn with_config(storage: Arc<IndexedStorage>, config: ResolutionConfig) -> Self {
+    pub fn with_config(storage: Arc<BinaryStorage>, config: ResolutionConfig) -> Self {
         Self {
             storage,
             resolution_config: config,
@@ -247,7 +247,7 @@ impl CanonicalResolver {
         info!("Resolving canonical URL: {}", canonical_url);
 
         // Step 1: Try exact match
-        if let Some(resource_index) = self.storage.find_by_canonical(canonical_url) {
+        if let Some(resource_index) = self.storage.find_resource(canonical_url).await? {
             debug!("Found exact match for canonical URL");
             return self
                 .build_resolved_resource(canonical_url, resource_index, ResolutionPath::ExactMatch)
@@ -344,7 +344,7 @@ impl CanonicalResolver {
         };
 
         // Try exact match with versioned URL
-        if let Some(resource_index) = self.storage.find_by_canonical(&versioned_url) {
+        if let Some(resource_index) = self.storage.find_resource(&versioned_url).await? {
             debug!("Found exact version match");
             return self
                 .build_resolved_resource(canonical_url, resource_index, ResolutionPath::ExactMatch)
@@ -457,7 +457,7 @@ impl CanonicalResolver {
     /// # }
     /// ```
     pub fn list_canonical_urls(&self) -> Vec<String> {
-        self.storage.get_all_canonical_urls()
+        self.storage.get_cache_entries().keys().cloned().collect()
     }
 
     /// Extract base URL by removing version components
@@ -499,7 +499,7 @@ impl CanonicalResolver {
     async fn find_latest_version(
         &self,
         base_url: &str,
-    ) -> Result<Option<crate::storage::ResourceIndex>> {
+    ) -> Result<Option<crate::binary_storage::ResourceIndex>> {
         let cache_entries = self.storage.get_cache_entries();
 
         let mut matching_resources = Vec::new();
@@ -568,7 +568,7 @@ impl CanonicalResolver {
     async fn get_resources_by_base_url(
         &self,
         base_url: &str,
-    ) -> Result<Vec<crate::storage::ResourceIndex>> {
+    ) -> Result<Vec<crate::binary_storage::ResourceIndex>> {
         let cache_entries = self.storage.get_cache_entries();
 
         let mut matching_resources = Vec::new();
@@ -585,7 +585,7 @@ impl CanonicalResolver {
     async fn fuzzy_match(
         &self,
         canonical_url: &str,
-    ) -> Result<Option<(crate::storage::ResourceIndex, f64)>> {
+    ) -> Result<Option<(crate::binary_storage::ResourceIndex, f64)>> {
         let cache_entries = self.storage.get_cache_entries();
 
         let mut best_match = None;
@@ -659,11 +659,11 @@ impl CanonicalResolver {
     async fn build_resolved_resource(
         &self,
         requested_url: &str,
-        resource_index: crate::storage::ResourceIndex,
+        resource_index: crate::binary_storage::ResourceIndex,
         resolution_path: ResolutionPath,
     ) -> Result<ResolvedResource> {
         // Get the full resource content
-        let resource = self.storage.get_resource(&resource_index).await?;
+        let resource = self.storage.get_resource(&resource_index)?;
 
         // Get package info
         let packages = self.storage.list_packages().await?;
@@ -705,7 +705,7 @@ mod tests {
             max_cache_size: "100MB".to_owned(),
         };
 
-        let storage = Arc::new(IndexedStorage::new(config).await.unwrap());
+        let storage = Arc::new(BinaryStorage::new(config).await.unwrap());
         let resolver = CanonicalResolver::new(storage);
 
         assert!(resolver.list_canonical_urls().is_empty());
@@ -721,7 +721,7 @@ mod tests {
             max_cache_size: "100MB".to_owned(),
         };
 
-        let storage = Arc::new(IndexedStorage::new(config).await.unwrap());
+        let storage = Arc::new(BinaryStorage::new(config).await.unwrap());
         let resolver = CanonicalResolver::new(storage);
 
         let result = resolver.resolve("http://example.com/missing").await;
@@ -738,7 +738,7 @@ mod tests {
             max_cache_size: "100MB".to_owned(),
         };
 
-        let storage = Arc::new(IndexedStorage::new(config).await.unwrap());
+        let storage = Arc::new(BinaryStorage::new(config).await.unwrap());
         let resolver = CanonicalResolver::new(storage);
 
         assert!(resolver.looks_like_version("1.0.0"));

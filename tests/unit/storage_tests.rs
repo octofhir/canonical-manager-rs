@@ -1,7 +1,7 @@
 //! Unit tests for storage module
 
+use octofhir_canonical_manager::binary_storage::BinaryStorage;
 use octofhir_canonical_manager::package::{ExtractedPackage, FhirResource, PackageManifest};
-use octofhir_canonical_manager::storage::IndexedStorage;
 use octofhir_canonical_manager::{StorageConfig, error::Validate};
 use serde_json::json;
 use std::collections::HashMap;
@@ -21,14 +21,14 @@ async fn test_indexed_storage_creation() {
         max_cache_size: "100MB".to_string(),
     };
 
-    let storage = IndexedStorage::new(config).await.unwrap();
+    let storage = BinaryStorage::new(config).await.unwrap();
 
     // Verify empty storage
     let packages = storage.list_packages().await.unwrap();
     assert_eq!(packages.len(), 0);
 
-    let urls = storage.get_all_canonical_urls();
-    assert_eq!(urls.len(), 0);
+    let cache_entries = storage.get_cache_entries();
+    assert_eq!(cache_entries.len(), 0);
 }
 
 /// Test storage configuration validation
@@ -67,13 +67,13 @@ async fn test_add_package_to_storage() {
         max_cache_size: "100MB".to_string(),
     };
 
-    let mut storage = IndexedStorage::new(config).await.unwrap();
+    let storage = BinaryStorage::new(config).await.unwrap();
 
     // Create test package
     let extracted_package = create_test_extracted_package(&temp_dir);
 
     // Add package
-    let result = storage.add_package(extracted_package).await;
+    let result = storage.add_package(&extracted_package).await;
     assert!(result.is_ok(), "Package addition should succeed");
 
     // Verify package is stored
@@ -84,10 +84,10 @@ async fn test_add_package_to_storage() {
     assert_eq!(packages[0].resource_count, 2);
 
     // Verify resources are indexed
-    let urls = storage.get_all_canonical_urls();
-    assert_eq!(urls.len(), 2);
-    assert!(urls.contains(&"http://example.com/StructureDefinition/test-patient".to_string()));
-    assert!(urls.contains(&"http://example.com/ValueSet/test-codes".to_string()));
+    let cache_entries = storage.get_cache_entries();
+    assert_eq!(cache_entries.len(), 2);
+    assert!(cache_entries.contains_key("http://example.com/StructureDefinition/test-patient"));
+    assert!(cache_entries.contains_key("http://example.com/ValueSet/test-codes"));
 }
 
 /// Test canonical URL lookup
@@ -101,18 +101,24 @@ async fn test_canonical_url_lookup() {
         max_cache_size: "100MB".to_string(),
     };
 
-    let mut storage = IndexedStorage::new(config).await.unwrap();
+    let storage = BinaryStorage::new(config).await.unwrap();
 
     // Test lookup on empty storage
-    let result = storage.find_by_canonical("http://example.com/missing");
+    let result = storage
+        .find_resource("http://example.com/missing")
+        .await
+        .unwrap();
     assert!(result.is_none());
 
     // Add package
     let extracted_package = create_test_extracted_package(&temp_dir);
-    storage.add_package(extracted_package).await.unwrap();
+    storage.add_package(&extracted_package).await.unwrap();
 
     // Test successful lookup
-    let result = storage.find_by_canonical("http://example.com/StructureDefinition/test-patient");
+    let result = storage
+        .find_resource("http://example.com/StructureDefinition/test-patient")
+        .await
+        .unwrap();
     assert!(result.is_some());
 
     let resource_index = result.unwrap();
@@ -136,17 +142,19 @@ async fn test_get_resource_content() {
         max_cache_size: "100MB".to_string(),
     };
 
-    let mut storage = IndexedStorage::new(config).await.unwrap();
+    let storage = BinaryStorage::new(config).await.unwrap();
     let extracted_package = create_test_extracted_package(&temp_dir);
-    storage.add_package(extracted_package).await.unwrap();
+    storage.add_package(&extracted_package).await.unwrap();
 
     // Get resource index
     let resource_index = storage
-        .find_by_canonical("http://example.com/StructureDefinition/test-patient")
+        .find_resource("http://example.com/StructureDefinition/test-patient")
+        .await
+        .unwrap()
         .unwrap();
 
     // Get resource content
-    let resource = storage.get_resource(&resource_index).await.unwrap();
+    let resource = storage.get_resource(&resource_index).unwrap();
 
     assert_eq!(resource.resource_type, "StructureDefinition");
     assert_eq!(resource.id, "test-patient");
@@ -169,12 +177,16 @@ async fn test_search_by_type() {
         max_cache_size: "100MB".to_string(),
     };
 
-    let mut storage = IndexedStorage::new(config).await.unwrap();
+    let storage = BinaryStorage::new(config).await.unwrap();
     let extracted_package = create_test_extracted_package(&temp_dir);
-    storage.add_package(extracted_package).await.unwrap();
+    storage.add_package(&extracted_package).await.unwrap();
 
     // Search for StructureDefinition resources
-    let structure_defs = storage.search_by_type("StructureDefinition");
+    let cache_entries = storage.get_cache_entries();
+    let structure_defs: Vec<_> = cache_entries
+        .values()
+        .filter(|entry| entry.resource_type == "StructureDefinition")
+        .collect();
     assert_eq!(structure_defs.len(), 1);
     assert_eq!(structure_defs[0].resource_type, "StructureDefinition");
     assert_eq!(
@@ -183,7 +195,10 @@ async fn test_search_by_type() {
     );
 
     // Search for ValueSet resources
-    let value_sets = storage.search_by_type("ValueSet");
+    let value_sets: Vec<_> = cache_entries
+        .values()
+        .filter(|entry| entry.resource_type == "ValueSet")
+        .collect();
     assert_eq!(value_sets.len(), 1);
     assert_eq!(value_sets[0].resource_type, "ValueSet");
     assert_eq!(
@@ -192,7 +207,10 @@ async fn test_search_by_type() {
     );
 
     // Search for non-existent type
-    let missing_type = storage.search_by_type("CodeSystem");
+    let missing_type: Vec<_> = cache_entries
+        .values()
+        .filter(|entry| entry.resource_type == "CodeSystem")
+        .collect();
     assert_eq!(missing_type.len(), 0);
 }
 

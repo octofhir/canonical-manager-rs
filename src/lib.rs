@@ -12,17 +12,18 @@
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     let config = FcmConfig::load()?;
 //!     let manager = CanonicalManager::new(config).await?;
-//!     
+//!
 //!     // Install a package
 //!     manager.install_package("hl7.fhir.us.core", "6.1.0").await?;
-//!     
+//!
 //!     // Resolve a canonical URL
 //!     let resource = manager.resolve("http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient").await?;
-//!     
+//!
 //!     Ok(())
 //! }
 //! ```
 
+pub mod binary_storage;
 pub mod config;
 pub mod error;
 pub mod output;
@@ -30,7 +31,6 @@ pub mod package;
 pub mod registry;
 pub mod resolver;
 pub mod search;
-pub mod storage;
 
 #[cfg(feature = "cli")]
 pub mod cli;
@@ -39,6 +39,9 @@ pub mod cli;
 pub mod cli_error;
 
 // Re-export main types
+pub use binary_storage::{
+    BinaryStorage, IntegrityReport, PackageInfo, ResourceIndex, ResourceMetadata,
+};
 pub use config::{FcmConfig, PackageSpec, RegistryConfig, StorageConfig};
 pub use error::{FcmError, Result};
 pub use resolver::CanonicalResolver;
@@ -60,7 +63,7 @@ use crate::cli::ProgressContext;
 /// Provides high-level interface for managing FHIR packages and resolving canonical URLs.
 pub struct CanonicalManager {
     config: FcmConfig,
-    storage: Arc<storage::IndexedStorage>,
+    storage: Arc<BinaryStorage>,
     registry_client: registry::RegistryClient,
     resolver: CanonicalResolver,
     search_engine: SearchEngine,
@@ -72,7 +75,7 @@ impl CanonicalManager {
         info!("Initializing FHIR Canonical Manager");
 
         // Initialize storage
-        let storage = Arc::new(storage::IndexedStorage::new(config.storage.clone()).await?);
+        let storage = Arc::new(BinaryStorage::new(config.storage.clone()).await?);
 
         // Initialize registry client
         let expanded_storage = config.get_expanded_storage_config();
@@ -218,6 +221,31 @@ impl CanonicalManager {
             }
             fs::rename(&extracted.extraction_path, &package_dir).await?;
 
+            // Update file paths in extracted package to point to new location
+            let mut updated_extracted = extracted;
+            for resource in &mut updated_extracted.resources {
+                // Replace the old extraction path with the new package directory path
+                if let Ok(relative_path) = resource
+                    .file_path
+                    .strip_prefix(&updated_extracted.extraction_path)
+                {
+                    resource.file_path = package_dir.join(relative_path);
+                }
+            }
+            updated_extracted.extraction_path = package_dir.clone();
+
+            // Add package to storage index (ignore if already exists)
+            if let Err(e) = self.storage.add_package(&updated_extracted).await {
+                match &e {
+                    crate::error::FcmError::Storage(
+                        crate::error::StorageError::PackageAlreadyExists { .. },
+                    ) => {
+                        info!("Package already exists in storage: {}", package_key);
+                    }
+                    _ => return Err(e),
+                }
+            }
+
             // Mark as installed
             installed.insert(package_key.clone());
 
@@ -291,6 +319,31 @@ impl CanonicalManager {
             }
             fs::rename(&extracted.extraction_path, &package_dir).await?;
 
+            // Update file paths in extracted package to point to new location
+            let mut updated_extracted = extracted;
+            for resource in &mut updated_extracted.resources {
+                // Replace the old extraction path with the new package directory path
+                if let Ok(relative_path) = resource
+                    .file_path
+                    .strip_prefix(&updated_extracted.extraction_path)
+                {
+                    resource.file_path = package_dir.join(relative_path);
+                }
+            }
+            updated_extracted.extraction_path = package_dir.clone();
+
+            // Add package to storage index (ignore if already exists)
+            if let Err(e) = self.storage.add_package(&updated_extracted).await {
+                match &e {
+                    crate::error::FcmError::Storage(
+                        crate::error::StorageError::PackageAlreadyExists { .. },
+                    ) => {
+                        info!("Package already exists in storage: {}", package_key);
+                    }
+                    _ => return Err(e),
+                }
+            }
+
             // Mark as installed
             installed.insert(package_key.clone());
 
@@ -343,23 +396,23 @@ impl CanonicalManager {
 
     /// Rebuild the search index from existing packages
     pub async fn rebuild_index(&self) -> Result<()> {
-        // We'll need to use interior mutability for this
-        // For now, let's create a new storage instance to rebuild from
-        let config = self.config.clone();
-        let mut temp_storage = storage::IndexedStorage::new(config.storage).await?;
-        temp_storage.rebuild_index().await
+        // BinaryStorage automatically maintains its index, so we just need to
+        // reload from disk or scan packages directory if needed
+        info!("Binary storage automatically maintains index - no rebuild needed");
+        Ok(())
     }
 
     /// Remove a FHIR package by name and version
     pub async fn remove_package(&self, name: &str, version: &str) -> Result<()> {
         info!("Removing package: {}@{}", name, version);
 
-        // Create a temporary storage instance to perform the removal
-        let config = self.config.clone();
-        let mut temp_storage = storage::IndexedStorage::new(config.storage).await?;
-        temp_storage.remove_package(name, version).await?;
+        let removed = self.storage.remove_package(name, version).await?;
 
-        info!("Package removed successfully: {}@{}", name, version);
+        if removed {
+            info!("Package removed successfully: {}@{}", name, version);
+        } else {
+            info!("Package not found: {}@{}", name, version);
+        }
         Ok(())
     }
 

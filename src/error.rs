@@ -62,9 +62,6 @@ pub enum FcmError {
     #[error("Network error: {0}")]
     Network(#[from] reqwest::Error),
 
-    #[error("Database error: {0}")]
-    Database(#[from] rusqlite::Error),
-
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 
@@ -212,6 +209,15 @@ pub enum StorageError {
 
     #[error("Invalid resource: {message}")]
     InvalidResource { message: String },
+
+    #[error("I/O error: {message}")]
+    IoError { message: String },
+
+    #[error("Serialization error: {message}")]
+    SerializationError { message: String },
+
+    #[error("Package already exists: {name}@{version}")]
+    PackageAlreadyExists { name: String, version: String },
 }
 
 /// Errors related to canonical URL resolution.
@@ -292,7 +298,7 @@ pub enum SearchError {
 ///
 /// impl Validate for MyConfig {
 ///     type Error = ConfigError;
-///     
+///
 ///     fn validate(&self) -> Result<(), Self::Error> {
 ///         if self.url.is_empty() {
 ///             Err(ConfigError::ValidationFailed {

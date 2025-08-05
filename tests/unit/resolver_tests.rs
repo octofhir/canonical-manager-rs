@@ -1,11 +1,11 @@
 //! Unit tests for resolver module
 
 use octofhir_canonical_manager::StorageConfig;
+use octofhir_canonical_manager::binary_storage::BinaryStorage;
 use octofhir_canonical_manager::package::{ExtractedPackage, FhirResource, PackageManifest};
 use octofhir_canonical_manager::resolver::{
     CanonicalResolver, ResolutionConfig, ResolutionPath, VersionPreference,
 };
-use octofhir_canonical_manager::storage::IndexedStorage;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -24,7 +24,7 @@ async fn test_resolver_creation() {
         max_cache_size: "100MB".to_string(),
     };
 
-    let storage = Arc::new(IndexedStorage::new(config).await.unwrap());
+    let storage = Arc::new(BinaryStorage::new(config).await.unwrap());
     let resolver = CanonicalResolver::new(storage.clone());
 
     // Test default configuration
@@ -53,9 +53,9 @@ async fn test_exact_canonical_resolution() {
         max_cache_size: "100MB".to_string(),
     };
 
-    let mut storage = IndexedStorage::new(config).await.unwrap();
+    let storage = BinaryStorage::new(config).await.unwrap();
     let extracted_package = create_test_extracted_package(&temp_dir);
-    storage.add_package(extracted_package).await.unwrap();
+    storage.add_package(&extracted_package).await.unwrap();
 
     let storage = Arc::new(storage);
     let resolver = CanonicalResolver::new(storage);
@@ -94,7 +94,7 @@ async fn test_canonical_url_not_found() {
         max_cache_size: "100MB".to_string(),
     };
 
-    let storage = Arc::new(IndexedStorage::new(config).await.unwrap());
+    let storage = Arc::new(BinaryStorage::new(config).await.unwrap());
     let resolver = CanonicalResolver::new(storage);
 
     // Test non-existent URL
@@ -115,11 +115,11 @@ async fn test_version_fallback_resolution() {
         max_cache_size: "100MB".to_string(),
     };
 
-    let mut storage = IndexedStorage::new(config).await.unwrap();
+    let storage = BinaryStorage::new(config).await.unwrap();
 
     // Create a resource with versioned URL
     let versioned_package = create_versioned_extracted_package(&temp_dir);
-    storage.add_package(versioned_package).await.unwrap();
+    storage.add_package(&versioned_package).await.unwrap();
 
     let storage = Arc::new(storage);
     let resolver = CanonicalResolver::new(storage);
@@ -159,14 +159,14 @@ async fn test_resolution_with_specific_version() {
         max_cache_size: "100MB".to_string(),
     };
 
-    let mut storage = IndexedStorage::new(config).await.unwrap();
+    let storage = BinaryStorage::new(config).await.unwrap();
 
     // Add multiple versions of the same resource
     let package_v1 = create_test_extracted_package(&temp_dir);
     let package_v2 = create_test_extracted_package_v2(&temp_dir);
 
-    storage.add_package(package_v1).await.unwrap();
-    storage.add_package(package_v2).await.unwrap();
+    storage.add_package(&package_v1).await.unwrap();
+    storage.add_package(&package_v2).await.unwrap();
 
     let storage = Arc::new(storage);
     let resolver = CanonicalResolver::new(storage);
@@ -197,9 +197,9 @@ async fn test_batch_resolution() {
         max_cache_size: "100MB".to_string(),
     };
 
-    let mut storage = IndexedStorage::new(config).await.unwrap();
+    let storage = BinaryStorage::new(config).await.unwrap();
     let extracted_package = create_test_extracted_package(&temp_dir);
-    storage.add_package(extracted_package).await.unwrap();
+    storage.add_package(&extracted_package).await.unwrap();
 
     let storage = Arc::new(storage);
     let resolver = CanonicalResolver::new(storage);
@@ -238,9 +238,9 @@ async fn test_fuzzy_matching() {
         max_cache_size: "100MB".to_string(),
     };
 
-    let mut storage = IndexedStorage::new(config).await.unwrap();
+    let storage = BinaryStorage::new(config).await.unwrap();
     let extracted_package = create_test_extracted_package(&temp_dir);
-    storage.add_package(extracted_package).await.unwrap();
+    storage.add_package(&extracted_package).await.unwrap();
 
     let storage = Arc::new(storage);
 
@@ -282,9 +282,9 @@ async fn test_fuzzy_matching_disabled() {
         max_cache_size: "100MB".to_string(),
     };
 
-    let mut storage = IndexedStorage::new(config).await.unwrap();
+    let storage = BinaryStorage::new(config).await.unwrap();
     let extracted_package = create_test_extracted_package(&temp_dir);
-    storage.add_package(extracted_package).await.unwrap();
+    storage.add_package(&extracted_package).await.unwrap();
 
     let storage = Arc::new(storage);
 
@@ -316,11 +316,11 @@ async fn test_version_detection_through_resolution() {
         max_cache_size: "100MB".to_string(),
     };
 
-    let mut storage = IndexedStorage::new(config).await.unwrap();
+    let storage = BinaryStorage::new(config).await.unwrap();
 
     // Add a versioned package
     let versioned_package = create_versioned_extracted_package(&temp_dir);
-    storage.add_package(versioned_package).await.unwrap();
+    storage.add_package(&versioned_package).await.unwrap();
 
     let storage = Arc::new(storage);
     let resolver = CanonicalResolver::new(storage);
@@ -354,9 +354,9 @@ async fn test_list_canonical_urls() {
         max_cache_size: "100MB".to_string(),
     };
 
-    let mut storage = IndexedStorage::new(config).await.unwrap();
+    let storage = BinaryStorage::new(config).await.unwrap();
     let extracted_package = create_test_extracted_package(&temp_dir);
-    storage.add_package(extracted_package).await.unwrap();
+    storage.add_package(&extracted_package).await.unwrap();
 
     let storage = Arc::new(storage);
     let resolver = CanonicalResolver::new(storage);

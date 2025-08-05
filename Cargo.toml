@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "FHIR Canonical Manager - Library-first FHIR package management"
 license = "MIT OR Apache-2.0"
+authors = ["OctoFHIR Team <funyloony@gmail.com"]
 repository = "https://github.com/octofhir/canonical-manager-rs"
 keywords = ["fhir", "healthcare", "canonical", "package-manager"]
 categories = ["science", "web-programming", "command-line-utilities"]
@@ -36,6 +37,7 @@ anyhow = "1.0"
 
 # CLI framework
 clap = { version = "4.0", features = ["derive"], optional = true }
+human-panic = "2.0.3"
 
 # Terminal UI
 colored = { version = "3", optional = true }
@@ -58,8 +60,9 @@ dirs = "6"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# Database
-rusqlite = { version = "0.37", features = ["bundled", "serde_json"] }
+# Binary serialization (replacing SQLite)
+bincode = "1.3"
+lz4_flex = "0.11"
 
 # Async file I/O
 tokio-util = { version = "0.7", features = ["io"] }

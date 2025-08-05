@@ -155,10 +155,12 @@ let results = manager.search()
 
 The canonical manager is optimized for speed:
 
-- **Indexed Storage**: SQLite-based indexing for fast lookups
+- **Binary Storage**: High-performance binary storage using bincode serialization and lz4_flex compression
+- **In-Memory Caching**: Fast lookups with intelligent caching for read-heavy workloads
+- **Atomic Operations**: Data integrity with atomic write operations and backup functionality
 - **Streaming Downloads**: Efficient package downloads with progress
 - **Dependency Resolution**: Automatic handling of package dependencies
-- **Caching**: Smart caching to minimize network requests
+- **Smart Caching**: Minimizes network requests and disk I/O
 
 ## Development
 

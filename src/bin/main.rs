@@ -4,6 +4,7 @@ use octofhir_canonical_manager::cli;
 
 #[tokio::main]
 async fn main() {
+    human_panic::setup_panic!();
     // Exit codes:
     // 0 - Success
     // 1 - General error

@@ -21,7 +21,6 @@ impl CliError for FcmError {
             FcmError::Search(e) => format!("{} Search Error: {}", "🔎".red(), e),
             FcmError::Io(e) => format!("{} File System Error: {}", "📁".red(), e),
             FcmError::Network(e) => format!("{} Network Error: {}", "🌐".red(), e),
-            FcmError::Database(e) => format!("{} Database Error: {}", "🗄️".red(), e),
             FcmError::Json(e) => format!("{} JSON Error: {}", "📝".red(), e),
             FcmError::TomlDe(e) => format!("{} TOML Parse Error: {}", "📝".red(), e),
             FcmError::TomlSer(e) => format!("{} TOML Write Error: {}", "📝".red(), e),
@@ -64,11 +63,6 @@ impl CliError for FcmError {
             }
             FcmError::Io(e) if e.kind() == std::io::ErrorKind::PermissionDenied => Some(format!(
                 "{} Check file permissions or run with appropriate privileges",
-                "💡".yellow()
-            )),
-            FcmError::Database(_) => Some(format!(
-                "{} Try running 'fcm update' to rebuild the index\n{} If the problem persists, delete the .fcm directory and reinstall packages",
-                "💡".yellow(),
                 "💡".yellow()
             )),
             _ => None,
@@ -301,7 +295,6 @@ fn log_error_details(error: &FcmError) {
         FcmError::Search(_) => "search",
         FcmError::Io(_) => "io",
         FcmError::Network(_) => "network",
-        FcmError::Database(_) => "database",
         FcmError::Json(_) => "json",
         FcmError::TomlDe(_) => "toml_deserialize",
         FcmError::TomlSer(_) => "toml_serialize",

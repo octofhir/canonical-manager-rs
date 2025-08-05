@@ -239,7 +239,7 @@ Types:
 Examples:
 ```
 feat(resolver): add version-specific canonical URL resolution
-fix(storage): handle concurrent access to SQLite database
+fix(storage): handle concurrent access to binary storage system
 docs: update README with new configuration options
 ```
 

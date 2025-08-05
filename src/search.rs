@@ -1,12 +1,12 @@
 //! Search engine for FHIR resources
 
+use crate::binary_storage::{BinaryStorage, ResourceIndex};
 use crate::error::Result;
 use crate::package::FhirResource;
-use crate::storage::{IndexedStorage, ResourceIndex};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use tracing::{debug, info};
 
@@ -20,7 +20,7 @@ use tracing::{debug, info};
 ///
 /// ```rust,no_run
 /// use octofhir_canonical_manager::search::{SearchEngine, SearchQuery};
-/// use octofhir_canonical_manager::storage::IndexedStorage;
+/// use octofhir_canonical_manager::binary_storage::BinaryStorage;
 /// use octofhir_canonical_manager::config::StorageConfig;
 /// use std::sync::Arc;
 /// use std::path::PathBuf;
@@ -32,7 +32,7 @@ use tracing::{debug, info};
 ///     packages_dir: PathBuf::from("/tmp/packages"),
 ///     max_cache_size: "1GB".to_string(),
 /// };
-/// let storage = Arc::new(IndexedStorage::new(config).await?);
+/// let storage = Arc::new(BinaryStorage::new(config).await?);
 /// let engine = SearchEngine::new(storage);
 ///
 /// let query = SearchQuery {
@@ -47,9 +47,12 @@ use tracing::{debug, info};
 /// # }
 /// ```
 pub struct SearchEngine {
-    storage: Arc<IndexedStorage>,
+    storage: Arc<BinaryStorage>,
     text_index: TextIndex,
     filters: FilterEngine,
+    // Simple LRU-style cache for search results
+    search_cache: RwLock<HashMap<String, (SearchResult, Instant)>>,
+    cache_ttl: Duration,
 }
 
 /// Inverted text index for fast full-text search.
@@ -57,6 +60,9 @@ pub struct SearchEngine {
 /// Maintains a mapping from search terms to the canonical URLs of resources
 /// that contain those terms. This enables efficient text-based queries
 /// across all indexed FHIR resources.
+///
+/// Uses HashSet for deduplication and RwLock for thread-safe concurrent access,
+/// optimized for high-load scenarios.
 ///
 /// # Example
 ///
@@ -69,10 +75,13 @@ pub struct SearchEngine {
 /// let results = index.search("patient");
 /// assert_eq!(results.len(), 1);
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct TextIndex {
-    // Simple inverted index: term -> list of resource URLs
-    index: HashMap<String, Vec<String>>,
+    // Memory-optimized inverted index: term -> set of resource URLs
+    // Using HashSet for deduplication and faster intersection operations
+    index: RwLock<HashMap<String, HashSet<String>>>,
+    // Stop words to filter out during tokenization
+    stop_words: HashSet<String>,
 }
 
 /// Engine for applying filters to search results.
@@ -119,7 +128,7 @@ pub struct SearchFacets {
 ///
 /// ```rust,no_run
 /// use octofhir_canonical_manager::search::SearchQueryBuilder;
-/// use octofhir_canonical_manager::storage::IndexedStorage;
+/// use octofhir_canonical_manager::binary_storage::BinaryStorage;
 /// use octofhir_canonical_manager::config::StorageConfig;
 /// use std::sync::Arc;
 /// use std::path::PathBuf;
@@ -131,7 +140,7 @@ pub struct SearchFacets {
 ///     packages_dir: PathBuf::from("/tmp/packages"),
 ///     max_cache_size: "1GB".to_string(),
 /// };
-/// let storage = Arc::new(IndexedStorage::new(config).await?);
+/// let storage = Arc::new(BinaryStorage::new(config).await?);
 ///
 /// let results = SearchQueryBuilder::new(storage)
 ///     .text("Patient")
@@ -144,7 +153,7 @@ pub struct SearchFacets {
 /// # }
 /// ```
 pub struct SearchQueryBuilder {
-    storage: Arc<IndexedStorage>,
+    storage: Arc<BinaryStorage>,
     query: SearchQuery,
 }
 
@@ -167,7 +176,7 @@ pub struct SearchQueryBuilder {
 ///     ..Default::default()
 /// };
 /// ```
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Hash, Serialize, Deserialize)]
 pub struct SearchQuery {
     pub text: Option<String>,
     pub resource_types: Vec<String>,
@@ -194,7 +203,7 @@ pub struct SearchQuery {
 ///     version: "6.1.0".to_string(),
 /// };
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Hash, Serialize, Deserialize)]
 pub struct VersionConstraint {
     pub package: String,
     pub version: String,
@@ -277,8 +286,18 @@ impl Default for TextIndex {
     }
 }
 
+impl Clone for TextIndex {
+    fn clone(&self) -> Self {
+        let index_guard = self.index.read().unwrap();
+        Self {
+            index: RwLock::new(index_guard.clone()),
+            stop_words: self.stop_words.clone(),
+        }
+    }
+}
+
 impl TextIndex {
-    /// Creates a new empty text index.
+    /// Creates a new empty text index with common stop words.
     ///
     /// # Example
     ///
@@ -288,8 +307,23 @@ impl TextIndex {
     /// let index = TextIndex::new();
     /// ```
     pub fn new() -> Self {
+        // Common English stop words for medical/FHIR context
+        let stop_words = [
+            "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "has", "he", "in",
+            "is", "it", "its", "of", "on", "that", "the", "to", "was", "will", "with", "the",
+            "this", "but", "they", "have", "had", "what", "said", "each", "which", "she", "do",
+            "how", "their", "if", "up", "out", "many", "then", "them", "these", "so", "some",
+            "her", "would", "make", "like", "into", "him", "time", "two", "more", "go", "no",
+            "way", "could", "my", "than", "first", "been", "call", "who", "oil", "sit", "now",
+            "find", "down", "day", "did", "get", "come", "made", "may", "part",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
         Self {
-            index: HashMap::new(),
+            index: RwLock::new(HashMap::new()),
+            stop_words,
         }
     }
 
@@ -297,6 +331,7 @@ impl TextIndex {
     ///
     /// Tokenizes the content and updates the inverted index to include
     /// the canonical URL for each term found in the content.
+    /// Thread-safe and optimized for concurrent access.
     ///
     /// # Arguments
     ///
@@ -314,13 +349,18 @@ impl TextIndex {
     ///     "Patient resource for John Doe"
     /// );
     /// ```
-    pub fn add_resource(&mut self, canonical_url: &str, content: &str) {
+    pub fn add_resource(&self, canonical_url: &str, content: &str) {
         let terms = self.tokenize(content);
+        if terms.is_empty() {
+            return;
+        }
+
+        let mut index = self.index.write().unwrap();
         for term in terms {
-            self.index
+            index
                 .entry(term)
                 .or_default()
-                .push(canonical_url.to_string());
+                .insert(canonical_url.to_string());
         }
     }
 
@@ -328,6 +368,7 @@ impl TextIndex {
     ///
     /// Returns canonical URLs of resources that contain all terms in the query.
     /// The search is case-insensitive and requires all terms to be present.
+    /// Uses efficient set intersection for optimal performance.
     ///
     /// # Arguments
     ///
@@ -354,34 +395,80 @@ impl TextIndex {
             return Vec::new();
         }
 
-        // Find intersection of all terms
-        let mut result: Option<Vec<String>> = None;
-        for term in terms {
-            if let Some(urls) = self.index.get(&term) {
-                match result {
-                    None => result = Some(urls.clone()),
-                    Some(ref mut current) => {
-                        current.retain(|url| urls.contains(url));
-                    }
-                }
+        let index = self.index.read().unwrap();
+
+        // Find the smallest set first for efficient intersection
+        let mut term_sets: Vec<&HashSet<String>> = Vec::new();
+        for term in &terms {
+            if let Some(urls) = index.get(term) {
+                term_sets.push(urls);
             } else {
                 // If any term is not found, no results
                 return Vec::new();
             }
         }
 
-        result.unwrap_or_default()
+        if term_sets.is_empty() {
+            return Vec::new();
+        }
+
+        // Sort by set size to start with smallest set for efficiency
+        term_sets.sort_by_key(|set| set.len());
+
+        // Start with the smallest set and intersect with others
+        let mut result: HashSet<String> = term_sets[0].clone();
+        for set in term_sets.iter().skip(1) {
+            result = result.intersection(set).cloned().collect();
+            if result.is_empty() {
+                break; // Early termination if no intersection
+            }
+        }
+
+        result.into_iter().collect()
     }
 
-    /// Tokenize text into searchable terms
+    /// Tokenize text into searchable terms with stop word filtering.
+    ///
+    /// Processes text by:
+    /// - Converting to lowercase
+    /// - Splitting on whitespace and punctuation
+    /// - Filtering out stop words
+    /// - Removing terms shorter than 3 characters
+    /// - Cleaning punctuation from term boundaries
     fn tokenize(&self, text: &str) -> Vec<String> {
         text.to_lowercase()
             .split_whitespace()
-            .filter(|s| s.len() > 2) // Only index terms longer than 2 characters
+            .flat_map(|word| {
+                // Split on common punctuation while preserving alphanumeric content
+                word.split(|c: char| !c.is_alphanumeric() && c != '-' && c != '_')
+            })
             .map(|s| s.trim_matches(|c: char| !c.is_alphanumeric()))
-            .filter(|s| !s.is_empty())
+            .filter(|s| s.len() >= 3) // Only index terms with 3+ characters
+            .filter(|s| !self.stop_words.contains(*s)) // Filter out stop words
+            .filter(|s| !s.chars().all(|c| c.is_numeric())) // Filter out pure numbers
             .map(|s| s.to_string())
             .collect()
+    }
+
+    /// Add a method to remove a resource from the index (for incremental updates)
+    pub fn remove_resource(&self, canonical_url: &str) {
+        let mut index = self.index.write().unwrap();
+
+        // Remove the URL from all term sets
+        for (_, url_set) in index.iter_mut() {
+            url_set.remove(canonical_url);
+        }
+
+        // Remove empty term entries to save memory
+        index.retain(|_, url_set| !url_set.is_empty());
+    }
+
+    /// Get index statistics for monitoring
+    pub fn get_stats(&self) -> (usize, usize) {
+        let index = self.index.read().unwrap();
+        let term_count = index.len();
+        let total_entries: usize = index.values().map(|set| set.len()).sum();
+        (term_count, total_entries)
     }
 }
 
@@ -423,7 +510,7 @@ impl FilterEngine {
     ///
     /// ```rust,no_run
     /// use octofhir_canonical_manager::search::{FilterEngine, SearchQuery};
-    /// use octofhir_canonical_manager::storage::ResourceIndex;
+    /// use octofhir_canonical_manager::binary_storage::ResourceIndex;
     ///
     /// # fn example(resources: Vec<ResourceIndex>) {
     /// let filter_engine = FilterEngine::new();
@@ -497,7 +584,7 @@ impl SearchEngine {
     ///
     /// ```rust,no_run
     /// use octofhir_canonical_manager::search::SearchEngine;
-    /// use octofhir_canonical_manager::storage::IndexedStorage;
+    /// use octofhir_canonical_manager::binary_storage::BinaryStorage;
     /// use octofhir_canonical_manager::config::StorageConfig;
     /// use std::sync::Arc;
     /// use std::path::PathBuf;
@@ -509,16 +596,18 @@ impl SearchEngine {
     ///     packages_dir: PathBuf::from("/tmp/packages"),
     ///     max_cache_size: "1GB".to_string(),
     /// };
-    /// let storage = Arc::new(IndexedStorage::new(config).await?);
+    /// let storage = Arc::new(BinaryStorage::new(config).await?);
     /// let engine = SearchEngine::new(storage);
     /// # Ok(())
     /// # }
     /// ```
-    pub fn new(storage: Arc<IndexedStorage>) -> Self {
+    pub fn new(storage: Arc<BinaryStorage>) -> Self {
         let mut engine = Self {
             storage,
             text_index: TextIndex::new(),
             filters: FilterEngine::new(),
+            search_cache: RwLock::new(HashMap::new()),
+            cache_ttl: Duration::from_secs(300), // 5 minutes cache TTL
         };
 
         // Build text index from storage
@@ -561,12 +650,160 @@ impl SearchEngine {
             if let Some(publisher) = &resource_index.metadata.publisher {
                 self.text_index.add_resource(&canonical_url, publisher);
             }
+
+            // Try to index actual FHIR resource content for full-text search
+            if let Ok(fhir_resource) = self.storage.get_resource(&resource_index) {
+                // Index the resource content as JSON string for full-text search
+                let content_str = serde_json::to_string(&fhir_resource.content).unwrap_or_default();
+                self.text_index.add_resource(&canonical_url, &content_str);
+
+                // Index specific FHIR fields if available
+                if let Some(description) = fhir_resource.content.get("description") {
+                    if let Some(desc_str) = description.as_str() {
+                        self.text_index.add_resource(&canonical_url, desc_str);
+                    }
+                }
+                if let Some(title) = fhir_resource.content.get("title") {
+                    if let Some(title_str) = title.as_str() {
+                        self.text_index.add_resource(&canonical_url, title_str);
+                    }
+                }
+                if let Some(name) = fhir_resource.content.get("name") {
+                    if let Some(name_str) = name.as_str() {
+                        self.text_index.add_resource(&canonical_url, name_str);
+                    }
+                }
+            }
         }
 
+        let (term_count, total_entries) = self.text_index.get_stats();
         debug!(
-            "Text index built with {} terms",
-            self.text_index.index.len()
+            "Text index built with {} terms and {} total entries",
+            term_count, total_entries
         );
+    }
+
+    /// Add a single resource to the text index (for incremental updates)
+    pub fn add_resource_to_index(&self, canonical_url: &str, resource_index: &ResourceIndex) {
+        // Index the canonical URL itself
+        self.text_index.add_resource(canonical_url, canonical_url);
+
+        // Index the resource type
+        self.text_index
+            .add_resource(canonical_url, &resource_index.resource_type);
+
+        // Index the resource ID
+        self.text_index
+            .add_resource(canonical_url, &resource_index.metadata.id);
+
+        // Index package information
+        let package_text = format!(
+            "{} {}",
+            resource_index.package_name, resource_index.package_version
+        );
+        self.text_index.add_resource(canonical_url, &package_text);
+
+        // Index metadata fields
+        if let Some(version) = &resource_index.metadata.version {
+            self.text_index.add_resource(canonical_url, version);
+        }
+        if let Some(status) = &resource_index.metadata.status {
+            self.text_index.add_resource(canonical_url, status);
+        }
+        if let Some(publisher) = &resource_index.metadata.publisher {
+            self.text_index.add_resource(canonical_url, publisher);
+        }
+
+        // Try to index actual FHIR resource content
+        if let Ok(fhir_resource) = self.storage.get_resource(resource_index) {
+            // Index the resource content as JSON string for full-text search
+            let content_str = serde_json::to_string(&fhir_resource.content).unwrap_or_default();
+            self.text_index.add_resource(canonical_url, &content_str);
+
+            // Index specific FHIR fields if available
+            if let Some(description) = fhir_resource.content.get("description") {
+                if let Some(desc_str) = description.as_str() {
+                    self.text_index.add_resource(canonical_url, desc_str);
+                }
+            }
+            if let Some(title) = fhir_resource.content.get("title") {
+                if let Some(title_str) = title.as_str() {
+                    self.text_index.add_resource(canonical_url, title_str);
+                }
+            }
+            if let Some(name) = fhir_resource.content.get("name") {
+                if let Some(name_str) = name.as_str() {
+                    self.text_index.add_resource(canonical_url, name_str);
+                }
+            }
+        }
+
+        debug!("Added resource {} to text index", canonical_url);
+    }
+
+    /// Remove a resource from the text index (for incremental updates)
+    pub fn remove_resource_from_index(&self, canonical_url: &str) {
+        self.text_index.remove_resource(canonical_url);
+        debug!("Removed resource {} from text index", canonical_url);
+    }
+
+    /// Get index statistics for monitoring
+    pub fn get_index_stats(&self) -> (usize, usize) {
+        self.text_index.get_stats()
+    }
+
+    /// Generate a cache key from a search query
+    fn generate_cache_key(&self, query: &SearchQuery) -> String {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+        query.text.hash(&mut hasher);
+        query.resource_types.hash(&mut hasher);
+        query.packages.hash(&mut hasher);
+        query.canonical_pattern.hash(&mut hasher);
+        query.limit.hash(&mut hasher);
+        query.offset.hash(&mut hasher);
+        query.version_constraints.hash(&mut hasher);
+
+        format!("search_{:x}", hasher.finish())
+    }
+
+    /// Get cached search result if available and not expired
+    fn get_cached_result(&self, cache_key: &str) -> Option<SearchResult> {
+        let cache = self.search_cache.read().unwrap();
+        if let Some((result, timestamp)) = cache.get(cache_key) {
+            if timestamp.elapsed() < self.cache_ttl {
+                return Some(result.clone());
+            }
+        }
+        None
+    }
+
+    /// Cache a search result
+    fn cache_result(&self, cache_key: &str, result: &SearchResult) {
+        let mut cache = self.search_cache.write().unwrap();
+
+        // Simple cache size management - remove oldest entries if cache gets too large
+        if cache.len() > 1000 {
+            let oldest_key = cache
+                .iter()
+                .min_by_key(|(_, (_, timestamp))| timestamp)
+                .map(|(key, _)| key.clone());
+
+            if let Some(key) = oldest_key {
+                cache.remove(&key);
+            }
+        }
+
+        cache.insert(cache_key.to_string(), (result.clone(), Instant::now()));
+    }
+
+    /// Clear the search cache
+    pub fn clear_cache(&self) {
+        let mut cache = self.search_cache.write().unwrap();
+        cache.clear();
+        debug!("Search cache cleared");
     }
 
     /// Executes a search query and returns matching resources.
@@ -604,6 +841,15 @@ impl SearchEngine {
         let start_time = Instant::now();
         info!("Executing search query: {:?}", query);
 
+        // Generate cache key from query
+        let cache_key = self.generate_cache_key(query);
+
+        // Check cache first
+        if let Some(cached_result) = self.get_cached_result(&cache_key) {
+            debug!("Returning cached search result for key: {}", cache_key);
+            return Ok(cached_result);
+        }
+
         // Get all resources from storage
         let mut candidate_resources = self.get_candidate_resources(query).await?;
 
@@ -636,11 +882,16 @@ impl SearchEngine {
             query_time, total_count
         );
 
-        Ok(SearchResult {
+        let result = SearchResult {
             resources: paginated_resources,
             total_count,
             query_time,
-        })
+        };
+
+        // Cache the result
+        self.cache_result(&cache_key, &result);
+
+        Ok(result)
     }
 
     /// Get candidate resources based on query
@@ -658,10 +909,7 @@ impl SearchEngine {
         } else {
             // No text search - return all resources
             let cache_entries = self.storage.get_cache_entries();
-            Ok(cache_entries
-                .into_iter()
-                .map(|(_, resource_index)| resource_index)
-                .collect())
+            Ok(cache_entries.into_values().collect())
         }
     }
 
@@ -678,7 +926,7 @@ impl SearchEngine {
             let highlights = self.generate_highlights(&resource_index, query).await?;
 
             // Load the full resource content
-            let resource = self.storage.get_resource(&resource_index).await?;
+            let resource = self.storage.get_resource(&resource_index)?;
 
             matches.push(ResourceMatch {
                 resource,
@@ -859,8 +1107,8 @@ impl SearchEngine {
         // Suggest resource types
         let cache_entries = self.storage.get_cache_entries();
         let mut resource_types: Vec<String> = cache_entries
-            .iter()
-            .map(|(_, index)| index.resource_type.clone())
+            .values()
+            .map(|index| index.resource_type.clone())
             .filter(|rt| rt.to_lowercase().starts_with(&prefix_lower))
             .collect();
         resource_types.sort();
@@ -869,8 +1117,8 @@ impl SearchEngine {
 
         // Suggest package names
         let mut package_names: Vec<String> = cache_entries
-            .iter()
-            .map(|(_, index)| index.package_name.clone())
+            .values()
+            .map(|index| index.package_name.clone())
             .filter(|pn| pn.to_lowercase().starts_with(&prefix_lower))
             .collect();
         package_names.sort();
@@ -881,6 +1129,8 @@ impl SearchEngine {
         let mut index_terms: Vec<String> = self
             .text_index
             .index
+            .read()
+            .unwrap()
             .keys()
             .filter(|term| term.starts_with(&prefix_lower))
             .cloned()
@@ -934,10 +1184,7 @@ impl SearchEngine {
                 .map(|(_, resource_index)| resource_index)
                 .collect()
         } else {
-            cache_entries
-                .into_iter()
-                .map(|(_, resource_index)| resource_index)
-                .collect()
+            cache_entries.into_values().collect()
         };
 
         // Apply existing filters (except the ones we're faceting on)
@@ -975,7 +1222,7 @@ impl SearchQueryBuilder {
     ///
     /// ```rust,no_run
     /// use octofhir_canonical_manager::search::SearchQueryBuilder;
-    /// use octofhir_canonical_manager::storage::IndexedStorage;
+    /// use octofhir_canonical_manager::binary_storage::BinaryStorage;
     /// use octofhir_canonical_manager::config::StorageConfig;
     /// use std::sync::Arc;
     /// use std::path::PathBuf;
@@ -987,12 +1234,12 @@ impl SearchQueryBuilder {
     ///     packages_dir: PathBuf::from("/tmp/packages"),
     ///     max_cache_size: "1GB".to_string(),
     /// };
-    /// let storage = Arc::new(IndexedStorage::new(config).await?);
+    /// let storage = Arc::new(BinaryStorage::new(config).await?);
     /// let builder = SearchQueryBuilder::new(storage);
     /// # Ok(())
     /// # }
     /// ```
-    pub fn new(storage: Arc<IndexedStorage>) -> Self {
+    pub fn new(storage: Arc<BinaryStorage>) -> Self {
         Self {
             storage,
             query: SearchQuery::default(),
@@ -1161,7 +1408,7 @@ impl SearchQueryBuilder {
     ///
     /// ```rust,no_run
     /// # use octofhir_canonical_manager::search::SearchQueryBuilder;
-    /// # use octofhir_canonical_manager::storage::IndexedStorage;
+    /// # use octofhir_canonical_manager::binary_storage::BinaryStorage;
     /// # use octofhir_canonical_manager::config::StorageConfig;
     /// # use std::sync::Arc;
     /// # use std::path::PathBuf;
@@ -1172,7 +1419,7 @@ impl SearchQueryBuilder {
     ///     packages_dir: PathBuf::from("/tmp/packages"),
     ///     max_cache_size: "1GB".to_string(),
     /// };
-    /// let storage = Arc::new(IndexedStorage::new(config).await?);
+    /// let storage = Arc::new(BinaryStorage::new(config).await?);
     ///
     /// let results = SearchQueryBuilder::new(storage)
     ///     .text("Patient")
@@ -1207,7 +1454,7 @@ mod tests {
             max_cache_size: "100MB".to_string(),
         };
 
-        let storage = Arc::new(IndexedStorage::new(config).await.unwrap());
+        let storage = Arc::new(BinaryStorage::new(config).await.unwrap());
         let engine = SearchEngine::new(storage);
 
         // Test basic search
@@ -1230,7 +1477,7 @@ mod tests {
             max_cache_size: "100MB".to_string(),
         };
 
-        let storage = Arc::new(IndexedStorage::new(config).await.unwrap());
+        let storage = Arc::new(BinaryStorage::new(config).await.unwrap());
         let engine = SearchEngine::new(storage);
 
         // Test text search
@@ -1253,7 +1500,7 @@ mod tests {
             max_cache_size: "100MB".to_string(),
         };
 
-        let storage = Arc::new(IndexedStorage::new(config).await.unwrap());
+        let storage = Arc::new(BinaryStorage::new(config).await.unwrap());
 
         // Test query builder
         let result = SearchQueryBuilder::new(storage)
@@ -1269,7 +1516,7 @@ mod tests {
 
     #[test]
     fn test_text_index() {
-        let mut index = TextIndex::new();
+        let index = TextIndex::new();
 
         // Add some test content
         index.add_resource(
@@ -1305,7 +1552,7 @@ mod tests {
                 package_name: "hl7.fhir.r4.core".to_string(),
                 package_version: "4.0.1".to_string(),
                 file_path: std::path::PathBuf::from("/test/Patient1.json"),
-                metadata: crate::storage::ResourceMetadata {
+                metadata: crate::binary_storage::ResourceMetadata {
                     id: "patient-1".to_string(),
                     version: Some("1.0.0".to_string()),
                     status: Some("active".to_string()),
@@ -1319,7 +1566,7 @@ mod tests {
                 package_name: "custom.package".to_string(),
                 package_version: "2.0.0".to_string(),
                 file_path: std::path::PathBuf::from("/test/Observation1.json"),
-                metadata: crate::storage::ResourceMetadata {
+                metadata: crate::binary_storage::ResourceMetadata {
                     id: "obs-1".to_string(),
                     version: Some("1.0.0".to_string()),
                     status: Some("final".to_string()),
@@ -1360,7 +1607,7 @@ mod tests {
             max_cache_size: "100MB".to_string(),
         };
 
-        let storage = Arc::new(IndexedStorage::new(config).await.unwrap());
+        let storage = Arc::new(BinaryStorage::new(config).await.unwrap());
         let engine = SearchEngine::new(storage);
 
         // Test suggestions - all Vec::len() values are >= 0 by definition

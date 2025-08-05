@@ -25,7 +25,7 @@ just run -- <args>      # Run CLI tool with arguments
 
 ### Testing
 ```bash
-cargo test --all        # All tests (29 unit + 19 integration + 63 additional + 118 doctests)
+cargo test --all        # All tests (26 unit + 19 integration + 63 additional + 103 doctests)
 cargo test --doc        # Run doctests only
 cargo test unit_tests   # Run unit tests only
 cargo test integration_tests  # Run integration tests only
@@ -61,10 +61,13 @@ just publish-dry-run    # Test packaging without publishing
 - Orchestrates package installation, resolution, and search
 - Manages dependencies between components
 
-**IndexedStorage** (`storage.rs`)
-- Dual storage: SQLite database + in-memory HashMap cache
-- Handles package metadata, resource indexing, and fast canonical URL lookups
-- Critical for performance: O(1) canonical URL resolution via cache
+**BinaryStorage** (`binary_storage.rs`)
+- High-performance binary storage system using bincode serialization + lz4 compression
+- In-memory cache with atomic disk persistence
+- Replaces SQLite for better read performance while maintaining data integrity
+- O(1) canonical URL resolution via in-memory HashMap cache
+- Automatic backup and atomic write operations for reliability
+
 
 **CanonicalResolver** (`resolver.rs`)
 - Multi-strategy resolution system:
@@ -89,9 +92,10 @@ just publish-dry-run    # Test packaging without publishing
 
 ### Key Data Flows
 
-1. **Package Installation**: Registry query → Download → Extract → Validate → Store → Index
-2. **URL Resolution**: Cache lookup → Version fallback → Fuzzy match → Resource load
-3. **Search**: Text index → Filter → Score → Paginate
+1. **Package Installation**: Registry query → Download → Extract → Validate → BinaryStorage.add_package() → Index + Cache update
+2. **URL Resolution**: In-memory cache lookup → Version fallback → Fuzzy match → BinaryStorage.get_resource() 
+3. **Search**: Text index → Filter → Score → Paginate → Resource loading from BinaryStorage
+4. **Cache Rebuild**: Package extraction → Resource indexing → Atomic in-memory cache update → Compressed binary serialization to disk
 
 ### Configuration
 
@@ -123,9 +127,12 @@ Environment variable overrides: `FCM_REGISTRY_URL`, `FCM_CACHE_DIR`, etc.
 - Registry fallbacks when primary registry fails
 
 ### Performance Considerations
-- In-memory cache for canonical URL resolution is critical
-- Streaming downloads for large packages
-- Incremental indexing when packages change
+- **BinaryStorage**: In-memory cache for O(1) canonical URL resolution
+- **Compression**: LZ4 compression reduces disk I/O while maintaining fast decompression
+- **Atomic Operations**: All cache updates are atomic to prevent inconsistent states
+- **Streaming Downloads**: Large package downloads use streaming to minimize memory usage
+- **Incremental Indexing**: Packages are indexed individually during installation
+- **Binary Serialization**: Bincode provides faster serialization than JSON for storage
 
 ### Code Conventions
 - All async operations use Tokio
@@ -141,9 +148,10 @@ Environment variable overrides: `FCM_REGISTRY_URL`, `FCM_CACHE_DIR`, etc.
 ## Key Files to Understand
 
 - `src/lib.rs` - Main API and component orchestration
-- `src/storage.rs` - Storage architecture with caching strategy
+- `src/binary_storage.rs` - High-performance binary storage with in-memory caching
 - `src/resolver.rs` - Resolution strategies and version handling
 - `src/registry.rs` - Network operations and registry interactions
+- `src/search.rs` - Full-text search engine with inverted index
 - `src/config.rs` - Configuration management and validation
 - `tests/common/mock_registry.rs` - Test infrastructure (creates proper tarballs)
 
@@ -152,6 +160,9 @@ Environment variable overrides: `FCM_REGISTRY_URL`, `FCM_CACHE_DIR`, etc.
 - **Doctest imports**: Always use `octofhir_canonical_manager::` crate name
 - **Test failures**: Check MockRegistry creates valid .tgz files, not JSON
 - **Version resolution**: Ensure base URL matching logic is precise
+- **Search not finding resources**: Verify cache rebuild after package installation - BinaryStorage.add_package() should update in-memory cache atomically
+- **Storage corruption**: Use BinaryStorage.integrity_check() to verify file consistency
+- **Performance issues**: Check if in-memory cache is properly loaded from binary storage file
 - **Clippy warnings**: Pay attention to unused variables and dead code flags
 
 ---

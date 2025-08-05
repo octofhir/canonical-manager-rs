@@ -400,3 +400,7 @@ Contributors will be acknowledged in:
 - GitHub contributor graph
 
 Thank you for contributing to FHIR Canonical Manager! 🎉
+
+---
+
+Made with ❤️ by OctoFHIR Team 🐙🦀

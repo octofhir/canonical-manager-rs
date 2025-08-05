@@ -7,7 +7,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/octofhir/canonical-manager-rs"
 keywords = ["fhir", "healthcare", "canonical", "package-manager"]
 categories = ["science", "web-programming", "command-line-utilities"]
-exclude = ["CLAUDE.md"]
+exclude = ["CLAUDE.md", ".github/", "rust-toolchain.toml"]
 
 [lib]
 name = "octofhir_canonical_manager"

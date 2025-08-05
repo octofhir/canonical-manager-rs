@@ -40,7 +40,7 @@ just publish-dry-run    # Test packaging without publishing
 
 ### GitHub Workflows
 - **CI** (`.github/workflows/ci.yml`): Runs on all PRs and pushes to main
-  - Tests on stable and beta Rust
+  - Tests on stable and beta Rust (with rustfmt and clippy components)
   - Clippy linting with warnings as errors
   - Format checking
   - Documentation building
@@ -100,6 +100,14 @@ just publish-dry-run    # Test packaging without publishing
 - `[[packages]]`: Package specs with name, version, priority
 - `[storage]`: Local directory paths and cache settings
 
+**rust-toolchain.toml**: Ensures consistent Rust toolchain across environments
+- Uses stable channel with rustfmt and clippy components
+- Supports common target platforms (Linux, macOS, Windows)
+
+**Licensing**: Dual-licensed under MIT OR Apache-2.0
+- `LICENSE-MIT` and `LICENSE-APACHE` files included in published package
+- `CLAUDE.md`, `.github/`, and `rust-toolchain.toml` excluded from crates.io
+
 Environment variable overrides: `FCM_REGISTRY_URL`, `FCM_CACHE_DIR`, etc.
 
 ## Important Implementation Details
@@ -145,3 +153,7 @@ Environment variable overrides: `FCM_REGISTRY_URL`, `FCM_CACHE_DIR`, etc.
 - **Test failures**: Check MockRegistry creates valid .tgz files, not JSON
 - **Version resolution**: Ensure base URL matching logic is precise
 - **Clippy warnings**: Pay attention to unused variables and dead code flags
+
+---
+
+Made with ❤️ by OctoFHIR Team 🐙🦀

@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/octofhir-canonical-manager.svg)](https://crates.io/crates/octofhir-canonical-manager)
 [![Documentation](https://docs.rs/octofhir-canonical-manager/badge.svg)](https://docs.rs/octofhir-canonical-manager)
-[![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](#license)
 
 A library-first solution for managing FHIR Implementation Guide packages, providing fast canonical URL resolution and resource search capabilities.
 
@@ -198,3 +198,7 @@ Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for gui
 - [Crates.io](https://crates.io/crates/octofhir-canonical-manager)
 - [Repository](https://github.com/octofhir/canonical-manager-rs)
 - [Issue Tracker](https://github.com/octofhir/canonical-manager-rs/issues)
+
+---
+
+Made with ❤️ by OctoFHIR Team 🐙🦀

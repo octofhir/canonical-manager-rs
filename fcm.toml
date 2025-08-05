@@ -1,0 +1,25 @@
+[registry]
+url = "https://build.fhir.org/ig/qas.json"
+timeout = 60
+retry_attempts = 5
+
+[[packages]]
+name = "hl7.fhir.us.core"
+version = "6.1.0"
+priority = 1
+
+[[packages]]
+name = "hl7.fhir.us.mcode"
+version = "3.0.0"
+priority = 1
+
+[[packages]]
+name = "hl7.fhir.r4.core"
+version = "4.0.1"
+priority = 2
+
+[storage]
+cache_dir = "/tmp/fcm-example/cache"
+index_dir = "/tmp/fcm-example/index"
+packages_dir = "/tmp/fcm-example/packages"
+max_cache_size = "2GB"

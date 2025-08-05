@@ -1,0 +1,82 @@
+[package]
+name = "octofhir-canonical-manager"
+version = "0.1.0"
+edition = "2024"
+description = "FHIR Canonical Manager - Library-first FHIR package management"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/octofhir/canonical-manager-rs"
+keywords = ["fhir", "healthcare", "canonical", "package-manager"]
+categories = ["science", "web-programming", "command-line-utilities"]
+exclude = ["CLAUDE.md"]
+
+[lib]
+name = "octofhir_canonical_manager"
+path = "src/lib.rs"
+
+[[bin]]
+name = "octofhir-fcm"
+path = "src/bin/main.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.0", features = ["full"] }
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "stream"] }
+futures-util = "0.3"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.9"
+
+# Error handling
+thiserror = "2"
+anyhow = "1.0"
+
+# CLI framework
+clap = { version = "4.0", features = ["derive"], optional = true }
+
+# Terminal UI
+colored = { version = "3", optional = true }
+
+# File handling
+zip = "4"
+flate2 = "1.0"
+tar = "0.4"
+
+# UUID generation
+uuid = { version = "1.0", features = ["v4", "serde"] }
+
+# URL handling
+url = { version = "2.5", features = ["serde"] }
+
+# Path utilities
+dirs = "6"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Database
+rusqlite = { version = "0.37", features = ["bundled", "serde_json"] }
+
+# Async file I/O
+tokio-util = { version = "0.7", features = ["io"] }
+
+# Date/time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Regular expressions
+regex = "1.0"
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = "3.0"
+wiremock = "0.6"
+assert_cmd = "2.0"
+predicates = "3.0"
+
+[features]
+default = ["cli"]
+cli = ["clap", "colored"]

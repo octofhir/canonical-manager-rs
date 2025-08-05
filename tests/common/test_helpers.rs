@@ -1,0 +1,171 @@
+//! Test helper functions and utilities
+
+use crate::common::{MockPackageData, MockRegistry};
+use octofhir_canonical_manager::{FcmConfig, RegistryConfig, StorageConfig};
+use std::path::Path;
+use tempfile::TempDir;
+
+/// Create a test configuration for testing
+pub fn create_test_config(temp_dir: &Path) -> FcmConfig {
+    FcmConfig {
+        registry: RegistryConfig {
+            url: "http://localhost:8080/".to_string(),
+            timeout: 30,
+            retry_attempts: 3,
+        },
+        packages: vec![],
+        storage: StorageConfig {
+            cache_dir: temp_dir.join("cache"),
+            index_dir: temp_dir.join("index"),
+            packages_dir: temp_dir.join("packages"),
+            max_cache_size: "100MB".to_string(),
+        },
+    }
+}
+
+/// Create a test configuration with mock registry URL
+pub fn create_test_config_with_registry(temp_dir: &Path, registry_url: &str) -> FcmConfig {
+    let mut config = create_test_config(temp_dir);
+    config.registry.url = registry_url.to_string();
+    config
+}
+
+/// Setup test directories and return temporary directory
+pub fn setup_test_env() -> TempDir {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+
+    // Create required subdirectories
+    std::fs::create_dir_all(temp_dir.path().join("cache")).unwrap();
+    std::fs::create_dir_all(temp_dir.path().join("index")).unwrap();
+    std::fs::create_dir_all(temp_dir.path().join("packages")).unwrap();
+
+    temp_dir
+}
+
+/// Assert that a path exists
+pub fn assert_path_exists(path: &Path) {
+    assert!(path.exists(), "Path should exist: {}", path.display());
+}
+
+/// Assert that a path doesn't exist
+pub fn assert_path_not_exists(path: &Path) {
+    assert!(!path.exists(), "Path should not exist: {}", path.display());
+}
+
+/// Create a minimal FHIR package structure for testing
+pub fn create_test_package_structure(
+    package_dir: &Path,
+    package_name: &str,
+    version: &str,
+) -> std::io::Result<()> {
+    let package_path = package_dir.join(format!("{package_name}-{version}"));
+    std::fs::create_dir_all(&package_path)?;
+
+    // Create package.json
+    let package_json = serde_json::json!({
+        "name": package_name,
+        "version": version,
+        "description": "Test package",
+        "fhirVersions": ["4.0.1"],
+        "dependencies": {},
+        "canonical": format!("http://example.com/{}", package_name)
+    });
+
+    std::fs::write(
+        package_path.join("package.json"),
+        serde_json::to_string_pretty(&package_json)?,
+    )?;
+
+    // Create package directory structure
+    std::fs::create_dir_all(package_path.join("package"))?;
+
+    // Create a test StructureDefinition resource
+    let test_resource = serde_json::json!({
+        "resourceType": "StructureDefinition",
+        "id": "test-structure",
+        "url": format!("http://example.com/{}/StructureDefinition/test-structure", package_name),
+        "name": "TestStructure",
+        "status": "active",
+        "kind": "resource",
+        "abstract": false,
+        "type": "Patient",
+        "baseDefinition": "http://hl7.org/fhir/StructureDefinition/Patient"
+    });
+
+    std::fs::write(
+        package_path
+            .join("package")
+            .join("StructureDefinition-test-structure.json"),
+        serde_json::to_string_pretty(&test_resource)?,
+    )?;
+
+    Ok(())
+}
+
+/// Wait for async operations to complete
+pub async fn wait_for_async() {
+    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+}
+
+/// Create a test registry with common packages for testing
+pub async fn create_test_registry_with_packages() -> MockRegistry {
+    let mut registry = MockRegistry::new().await;
+
+    // Add standard test packages
+    let test_package =
+        MockPackageData::new("test.package", "1.0.0").with_description("Test FHIR package");
+    registry.add_package(test_package);
+
+    let r4_core =
+        MockPackageData::new("hl7.fhir.r4.core", "4.0.1").with_description("FHIR R4 Core Package");
+    registry.add_package(r4_core);
+
+    let us_core = MockPackageData::new("hl7.fhir.us.core", "6.1.0")
+        .with_description("US Core Implementation Guide")
+        .with_dependencies({
+            let mut deps = std::collections::HashMap::new();
+            deps.insert("hl7.fhir.r4.core".to_string(), "4.0.1".to_string());
+            deps
+        });
+    registry.add_package(us_core);
+
+    registry.setup_mocks().await;
+    registry
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_create_test_config() {
+        let temp_dir = setup_test_env();
+        let config = create_test_config(temp_dir.path());
+
+        assert_eq!(config.registry.url, "http://localhost:8080/");
+        assert_eq!(config.registry.timeout, 30);
+        assert_eq!(config.registry.retry_attempts, 3);
+        assert!(config.packages.is_empty());
+        assert_eq!(config.storage.max_cache_size, "100MB");
+    }
+
+    #[test]
+    fn test_setup_test_env() {
+        let temp_dir = setup_test_env();
+
+        assert_path_exists(&temp_dir.path().join("cache"));
+        assert_path_exists(&temp_dir.path().join("index"));
+        assert_path_exists(&temp_dir.path().join("packages"));
+    }
+
+    #[test]
+    fn test_create_test_package_structure() {
+        let temp_dir = setup_test_env();
+        let result = create_test_package_structure(temp_dir.path(), "test.package", "1.0.0");
+
+        assert!(result.is_ok());
+        assert_path_exists(&temp_dir.path().join("test.package-1.0.0"));
+        assert_path_exists(&temp_dir.path().join("test.package-1.0.0/package.json"));
+        assert_path_exists(&temp_dir.path().join("test.package-1.0.0/package"));
+    }
+}

@@ -1,0 +1,73 @@
+name: Publish to crates.io
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "publish" to confirm'
+        required: true
+        default: ''
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    if: github.event.inputs.confirm == 'publish'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install just
+        uses: extractions/setup-just@v2
+
+      - name: Check if version already exists on crates.io
+        run: |
+          PACKAGE_NAME=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[0].name')
+          PACKAGE_VERSION=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[0].version')
+          
+          echo "Package: $PACKAGE_NAME"
+          echo "Version: $PACKAGE_VERSION"
+          
+          # Check if version exists on crates.io
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "https://crates.io/api/v1/crates/$PACKAGE_NAME/$PACKAGE_VERSION")
+          
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "❌ Version $PACKAGE_VERSION already exists on crates.io"
+            echo "Please update the version in Cargo.toml before publishing"
+            exit 1
+          elif [ "$HTTP_CODE" = "404" ]; then
+            echo "✅ Version $PACKAGE_VERSION is available for publishing"
+          else
+            echo "⚠️  Unable to verify version status (HTTP $HTTP_CODE). Proceeding with caution."
+          fi
+
+      - name: Run all checks
+        run: just prepare-publish
+
+      - name: Verify package can be built
+        run: cargo package --allow-dirty
+
+      - name: Publish to crates.io
+        run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Create release tag
+        run: |
+          PACKAGE_VERSION=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[0].version')
+          git tag "v$PACKAGE_VERSION"
+          git push origin "v$PACKAGE_VERSION"

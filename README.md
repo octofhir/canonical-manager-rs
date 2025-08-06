@@ -10,7 +10,8 @@ A library-first solution for managing FHIR Implementation Guide packages, provid
 
 - 📦 **Package Management**: Install, update, and remove FHIR packages from registries
 - 🔍 **Fast Resolution**: Lightning-fast canonical URL resolution with indexing
-- 🔎 **Advanced Search**: Query FHIR resources by type, package, and other criteria  
+- 🔎 **Advanced Search**: Query FHIR resources by type, package, and other criteria
+- 🔧 **Search Parameters**: Retrieve FHIR SearchParameter definitions by resource type
 - 🏗️ **Library First**: Clean API for embedding in your applications
 - 🖥️ **CLI Tool**: Optional command-line interface for interactive use
 - 🌐 **Registry Support**: Compatible with standard FHIR package registries
@@ -57,6 +58,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         
     println!("Found {} structure definitions", results.len());
     
+    // Get search parameters for a resource type
+    let search_params = manager.get_search_parameters("Patient").await?;
+    println!("Found {} search parameters for Patient", search_params.len());
+    
     Ok(())
 }
 ```
@@ -79,7 +84,12 @@ octofhir-fcm init
 octofhir-fcm install hl7.fhir.us.core@6.1.0
 
 # Search resources
-octofhir-fcm search "Patient" --type StructureDefinition
+octofhir-fcm search "Patient" --resource-type StructureDefinition
+
+# Get search parameters for a resource type
+octofhir-fcm search-params Patient
+octofhir-fcm search-params Patient --format json
+octofhir-fcm search-params Patient --format csv
 
 # Resolve canonical URLs
 octofhir-fcm resolve "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
@@ -137,6 +147,12 @@ let results = manager.search()
     .package("hl7.fhir.us.core")
     .canonical_url_contains("Patient")
     .execute().await?;
+
+// Search parameter retrieval
+let search_params = manager.get_search_parameters("Patient").await?;
+for param in search_params {
+    println!("{}: {} ({})", param.code, param.name, param.type_field);
+}
 ```
 
 ## CLI Commands
@@ -148,8 +164,9 @@ let results = manager.search()
 | `remove <package>[@version]` | Remove FHIR package |
 | `list` | List installed packages |
 | `search <query>` | Search for resources |
+| `search-params <resource-type>` | Get search parameters for a resource type |
 | `resolve <url>` | Resolve canonical URL |
-| `rebuild-index` | Rebuild search index |
+| `update` | Update package indexes |
 
 ## Performance
 
@@ -179,6 +196,9 @@ just prepare-publish
 
 # Generate documentation
 just docs
+
+# Run examples
+cargo run --example search_parameters
 ```
 
 ## License

@@ -97,6 +97,7 @@ pub fn create_sample_package_manifest(name: &str, version: &str) -> serde_json::
 }
 
 /// Create a sample FHIR SearchParameter resource
+#[allow(dead_code)]
 pub fn create_sample_search_parameter(
     id: &str,
     url: &str,

@@ -18,6 +18,10 @@ path = "src/lib.rs"
 name = "octofhir-fcm"
 path = "src/bin/main.rs"
 
+[[example]]
+name = "search_parameters"
+path = "examples/search_parameters.rs"
+
 [dependencies]
 # Async runtime
 tokio = { version = "1.0", features = ["full"] }

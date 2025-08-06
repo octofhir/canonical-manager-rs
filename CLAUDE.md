@@ -21,15 +21,19 @@ just lint               # Run clippy with -D warnings
 just fmt-check          # Check formatting without fixing
 just build              # Standard cargo build
 just run -- <args>      # Run CLI tool with arguments
+# Examples:
+# just run search-params Patient --format json  # Get Patient search parameters as JSON
+# just run search-params Patient --format csv   # Get Patient search parameters as CSV
 ```
 
 ### Testing
 ```bash
-cargo test --all        # All tests (26 unit + 19 integration + 63 additional + 103 doctests)
+cargo test --all        # All tests (unit, integration, doctests)
 cargo test --doc        # Run doctests only
 cargo test unit_tests   # Run unit tests only
 cargo test integration_tests  # Run integration tests only
 cargo test <test_name>  # Run specific test
+cargo test test_search_parameter_retrieval  # Test search parameter functionality
 ```
 
 ### Publishing
@@ -58,8 +62,9 @@ just publish-dry-run    # Test packaging without publishing
 
 **CanonicalManager** (`lib.rs`)
 - Main facade providing unified API for all operations
-- Orchestrates package installation, resolution, and search
+- Orchestrates package installation, resolution, search, and search parameter retrieval
 - Manages dependencies between components
+- Provides `get_search_parameters()` method for FHIR SearchParameter resource filtering
 
 **BinaryStorage** (`binary_storage.rs`)
 - High-performance binary storage system using bincode serialization + lz4 compression
@@ -84,6 +89,7 @@ just publish-dry-run    # Test packaging without publishing
 - Inverted text index for full-text search
 - Fluent query builder API with filters (type, package, URL patterns)
 - Faceted search with relevance scoring and suggestions
+- Supports SearchParameter resource queries for FHIR metadata
 
 **PackageExtractor** (`package.rs`)
 - Extracts .tgz FHIR packages and validates structure
@@ -144,6 +150,13 @@ Environment variable overrides: `FCM_REGISTRY_URL`, `FCM_CACHE_DIR`, etc.
 - Library functionality is always available
 - CLI features gated behind `#[cfg(feature = "cli")]`
 - Progress tracking and colored output only in CLI mode
+- New `search-params` command supports table, JSON, and CSV output formats
+
+### Search Parameter Support
+- **SearchParameterInfo** struct (`lib.rs:100-172`) for typed FHIR SearchParameter data
+- **CLI Command**: `search-params <resource-type> [--format table|json|csv]`
+- **Library Method**: `manager.get_search_parameters("ResourceType").await?`
+- Filters SearchParameter resources by `base` field matching the target resource type
 
 ## Key Files to Understand
 
@@ -153,7 +166,9 @@ Environment variable overrides: `FCM_REGISTRY_URL`, `FCM_CACHE_DIR`, etc.
 - `src/registry.rs` - Network operations and registry interactions
 - `src/search.rs` - Full-text search engine with inverted index
 - `src/config.rs` - Configuration management and validation
+- `src/cli.rs` - CLI interface including search-params command and output formatters
 - `tests/common/mock_registry.rs` - Test infrastructure (creates proper tarballs)
+- `tests/common/fixtures.rs` - Test fixtures including FHIR resource samples
 
 ## Common Issues
 

@@ -19,6 +19,12 @@
 //!     // Resolve a canonical URL
 //!     let resource = manager.resolve("http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient").await?;
 //!
+//!     // Get search parameters for a resource type
+//!     let search_params = manager.get_search_parameters("Patient").await?;
+//!     for param in search_params {
+//!         println!("{}: {} ({})", param.code, param.name, param.type_field);
+//!     }
+//!
 //!     Ok(())
 //! }
 //! ```

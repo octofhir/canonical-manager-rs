@@ -23,6 +23,8 @@ pub struct FcmConfig {
     pub registry: RegistryConfig,
     pub packages: Vec<PackageSpec>,
     pub storage: StorageConfig,
+    #[serde(default)]
+    pub optimization: OptimizationConfig,
 }
 
 /// Configuration for FHIR package registry connection.
@@ -102,6 +104,85 @@ pub struct StorageConfig {
     pub max_cache_size: String,
 }
 
+/// Configuration for performance optimization settings.
+///
+/// Controls various optimization features including incremental indexing,
+/// parallel processing, change detection, and storage optimization.
+///
+/// # Example
+///
+/// ```rust
+/// use octofhir_canonical_manager::config::OptimizationConfig;
+///
+/// let mut config = OptimizationConfig::default();
+/// config.incremental_indexing = true;
+/// config.parallel_workers = 8;
+/// config.batch_size = 100;
+/// config.enable_checksums = true;
+/// config.full_rebuild_threshold = 0.3;
+/// config.compression_level = 3;
+/// config.use_mmap = true;
+/// config.enable_metrics = true;
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OptimizationConfig {
+    /// Enable incremental indexing instead of full rebuilds
+    #[serde(default = "default_incremental_indexing")]
+    pub incremental_indexing: bool,
+
+    /// Number of parallel workers for package processing
+    #[serde(default = "default_parallel_workers")]
+    pub parallel_workers: usize,
+
+    /// Batch size for parallel processing
+    #[serde(default = "default_batch_size")]
+    pub batch_size: usize,
+
+    /// Enable package checksum calculation for change detection
+    #[serde(default = "default_enable_checksums")]
+    pub enable_checksums: bool,
+
+    /// Checksum algorithm to use (blake3, sha256, etc.)
+    #[serde(default = "default_checksum_algorithm")]
+    pub checksum_algorithm: String,
+
+    /// Size of the checksum cache (number of entries)
+    #[serde(default = "default_checksum_cache_size")]
+    pub checksum_cache_size: usize,
+
+    /// Threshold for triggering full rebuild (0.0-1.0, percentage of packages changed)
+    #[serde(default = "default_full_rebuild_threshold")]
+    pub full_rebuild_threshold: f64,
+
+    /// Batch size for incremental rebuilds
+    #[serde(default = "default_incremental_batch_size")]
+    pub incremental_batch_size: usize,
+
+    /// Compression algorithm for storage (zstd, lz4, none)
+    #[serde(default = "default_compression")]
+    pub compression: String,
+
+    /// Compression level (1-22 for zstd, 1-12 for lz4)
+    #[serde(default = "default_compression_level")]
+    pub compression_level: i32,
+
+    /// Use memory-mapped files for large indexes
+    #[serde(default = "default_use_mmap")]
+    pub use_mmap: bool,
+
+    /// Maximum index size before splitting ("2GB", "1GB", etc.)
+    #[serde(default = "default_max_index_size")]
+    pub max_index_size: String,
+
+    /// Enable performance metrics collection
+    #[serde(default = "default_enable_metrics")]
+    pub enable_metrics: bool,
+
+    /// Metrics collection interval
+    #[serde(default = "default_metrics_interval")]
+    pub metrics_interval: String,
+}
+
 impl Default for RegistryConfig {
     fn default() -> Self {
         Self {
@@ -122,6 +203,27 @@ impl Default for StorageConfig {
             index_dir: fcm_dir.join("index"),
             packages_dir: fcm_dir.join("packages"),
             max_cache_size: default_max_cache_size(),
+        }
+    }
+}
+
+impl Default for OptimizationConfig {
+    fn default() -> Self {
+        Self {
+            incremental_indexing: default_incremental_indexing(),
+            parallel_workers: default_parallel_workers(),
+            batch_size: default_batch_size(),
+            enable_checksums: default_enable_checksums(),
+            checksum_algorithm: default_checksum_algorithm(),
+            checksum_cache_size: default_checksum_cache_size(),
+            full_rebuild_threshold: default_full_rebuild_threshold(),
+            incremental_batch_size: default_incremental_batch_size(),
+            compression: default_compression(),
+            compression_level: default_compression_level(),
+            use_mmap: default_use_mmap(),
+            max_index_size: default_max_index_size(),
+            enable_metrics: default_enable_metrics(),
+            metrics_interval: default_metrics_interval(),
         }
     }
 }
@@ -388,6 +490,7 @@ impl FcmConfig {
                 packages_dir: temp_dir.join("packages"),
                 max_cache_size: "100MB".to_string(),
             },
+            optimization: OptimizationConfig::default(),
         }
     }
 }
@@ -524,6 +627,50 @@ fn default_max_cache_size() -> String {
     "1GB".to_string()
 }
 
+// Optimization config defaults
+fn default_incremental_indexing() -> bool {
+    true
+}
+fn default_parallel_workers() -> usize {
+    rayon::current_num_threads()
+}
+fn default_batch_size() -> usize {
+    100
+}
+fn default_enable_checksums() -> bool {
+    true
+}
+fn default_checksum_algorithm() -> String {
+    "blake3".to_string()
+}
+fn default_checksum_cache_size() -> usize {
+    10000
+}
+fn default_full_rebuild_threshold() -> f64 {
+    0.3
+}
+fn default_incremental_batch_size() -> usize {
+    50
+}
+fn default_compression() -> String {
+    "zstd".to_string()
+}
+fn default_compression_level() -> i32 {
+    3
+}
+fn default_use_mmap() -> bool {
+    true
+}
+fn default_max_index_size() -> String {
+    "2GB".to_string()
+}
+fn default_enable_metrics() -> bool {
+    true
+}
+fn default_metrics_interval() -> String {
+    "30s".to_string()
+}
+
 /// Implement the Validate trait for FcmConfig
 impl Validate for FcmConfig {
     type Error = ConfigError;
@@ -600,6 +747,9 @@ impl Validate for FcmConfig {
 
         // Validate storage configuration
         self.storage.validate()?;
+
+        // Validate optimization configuration
+        self.optimization.validate()?;
 
         Ok(())
     }
@@ -680,6 +830,102 @@ impl Validate for StorageConfig {
                     ),
                 });
             }
+        }
+
+        Ok(())
+    }
+}
+
+/// Implement the Validate trait for OptimizationConfig
+impl Validate for OptimizationConfig {
+    type Error = ConfigError;
+
+    fn validate(&self) -> std::result::Result<(), Self::Error> {
+        // Validate parallel workers
+        if self.parallel_workers == 0 {
+            return Err(ConfigError::ValidationFailed {
+                message: "Parallel workers must be greater than 0".to_string(),
+            });
+        }
+
+        if self.parallel_workers > 128 {
+            return Err(ConfigError::ValidationFailed {
+                message: "Parallel workers should not exceed 128".to_string(),
+            });
+        }
+
+        // Validate batch size
+        if self.batch_size == 0 {
+            return Err(ConfigError::ValidationFailed {
+                message: "Batch size must be greater than 0".to_string(),
+            });
+        }
+
+        // Validate full rebuild threshold
+        if self.full_rebuild_threshold < 0.0 || self.full_rebuild_threshold > 1.0 {
+            return Err(ConfigError::ValidationFailed {
+                message: "Full rebuild threshold must be between 0.0 and 1.0".to_string(),
+            });
+        }
+
+        // Validate checksum algorithm
+        let valid_algorithms = ["blake3", "sha256", "sha1"];
+        if !valid_algorithms.contains(&self.checksum_algorithm.as_str()) {
+            return Err(ConfigError::ValidationFailed {
+                message: format!(
+                    "Invalid checksum algorithm: '{}'. Valid options: {:?}",
+                    self.checksum_algorithm, valid_algorithms
+                ),
+            });
+        }
+
+        // Validate compression algorithm
+        let valid_compression = ["zstd", "lz4", "none"];
+        if !valid_compression.contains(&self.compression.as_str()) {
+            return Err(ConfigError::ValidationFailed {
+                message: format!(
+                    "Invalid compression algorithm: '{}'. Valid options: {:?}",
+                    self.compression, valid_compression
+                ),
+            });
+        }
+
+        // Validate compression level based on algorithm
+        match self.compression.as_str() {
+            "zstd" => {
+                if self.compression_level < 1 || self.compression_level > 22 {
+                    return Err(ConfigError::ValidationFailed {
+                        message: "ZSTD compression level must be between 1 and 22".to_string(),
+                    });
+                }
+            }
+            "lz4" => {
+                if self.compression_level < 1 || self.compression_level > 12 {
+                    return Err(ConfigError::ValidationFailed {
+                        message: "LZ4 compression level must be between 1 and 12".to_string(),
+                    });
+                }
+            }
+            "none" => {
+                // No validation needed for no compression
+            }
+            _ => {} // Already validated above
+        }
+
+        // Validate max index size format
+        let size_str = self.max_index_size.to_lowercase();
+        let valid_suffixes = ["b", "kb", "mb", "gb", "tb"];
+        let has_valid_suffix = valid_suffixes
+            .iter()
+            .any(|&suffix| size_str.ends_with(suffix));
+
+        if !has_valid_suffix {
+            return Err(ConfigError::ValidationFailed {
+                message: format!(
+                    "Invalid max index size format: '{}'. Use formats like '2GB', '1GB', etc.",
+                    self.max_index_size
+                ),
+            });
         }
 
         Ok(())

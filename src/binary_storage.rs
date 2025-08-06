@@ -1,7 +1,6 @@
 use crate::config::StorageConfig;
 use crate::error::{Result, StorageError};
 use crate::package::{ExtractedPackage, FhirResource};
-use bincode;
 use chrono::{DateTime, Utc};
 use lz4_flex;
 use serde::{Deserialize, Serialize};
@@ -10,7 +9,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use tokio::fs;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Index entry for a FHIR resource in storage.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -417,34 +416,105 @@ impl BinaryStorage {
             return Ok(());
         }
 
+        // Try to decompress and deserialize data with recovery
+        match self.try_load_data(&compressed_data).await {
+            Ok(storage_data) => {
+                // Update cache
+                let mut cache = self.in_memory_cache.write().unwrap();
+                *cache = storage_data;
+                debug!("Successfully loaded storage data from disk");
+                Ok(())
+            }
+            Err(e) => {
+                warn!("Failed to load storage data: {}. Attempting recovery...", e);
+
+                // Try to load from backup
+                if let Ok(backup_data) = self.try_load_backup().await {
+                    let mut cache = self.in_memory_cache.write().unwrap();
+                    *cache = backup_data;
+                    warn!("Recovered storage data from backup");
+                    Ok(())
+                } else {
+                    // If both primary and backup fail, start fresh but preserve the corrupted file
+                    warn!(
+                        "Both primary storage and backup are corrupted. Starting with empty storage."
+                    );
+                    warn!(
+                        "Corrupted file preserved as: {:?}.corrupted",
+                        self.storage_path
+                    );
+
+                    // Rename corrupted file
+                    if let Err(rename_err) = fs::rename(
+                        &self.storage_path,
+                        self.storage_path.with_extension("storage.corrupted"),
+                    )
+                    .await
+                    {
+                        warn!("Failed to preserve corrupted file: {}", rename_err);
+                    }
+
+                    // Start with empty storage
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    /// Try to load and decompress storage data
+    async fn try_load_data(&self, compressed_data: &[u8]) -> Result<StorageData> {
         // Decompress data
         let serialized_data =
-            lz4_flex::decompress_size_prepended(&compressed_data).map_err(|e| {
+            lz4_flex::decompress_size_prepended(compressed_data).map_err(|e| {
                 StorageError::SerializationError {
                     message: format!("Failed to decompress storage data: {e}"),
                 }
             })?;
 
+        // Check if decompressed data is empty or invalid
+        if serialized_data.is_empty() {
+            return Err(crate::error::FcmError::Storage(
+                StorageError::SerializationError {
+                    message: "Decompressed data is empty".to_string(),
+                },
+            ));
+        }
+
         // Deserialize data
-        let storage_data: StorageData = bincode::deserialize(&serialized_data).map_err(|e| {
+        let storage_data: StorageData = serde_json::from_slice(&serialized_data).map_err(|e| {
             StorageError::SerializationError {
                 message: format!("Failed to deserialize storage data: {e}"),
             }
         })?;
 
-        // Update cache
-        {
-            let mut cache = self.in_memory_cache.write().unwrap();
-            *cache = storage_data;
+        Ok(storage_data)
+    }
+
+    /// Try to load data from backup file
+    async fn try_load_backup(&self) -> Result<StorageData> {
+        if !self.backup_path.exists() {
+            return Err(crate::error::FcmError::Storage(
+                StorageError::SerializationError {
+                    message: "Backup file does not exist".to_string(),
+                },
+            ));
         }
 
-        let cache = self.in_memory_cache.read().unwrap();
-        info!(
-            "Loaded storage with {} packages and {} resources",
-            cache.metadata.package_count, cache.metadata.resource_count
-        );
+        let backup_data = fs::read(&self.backup_path)
+            .await
+            .map_err(|e| StorageError::IoError {
+                message: format!("Failed to read backup file: {e}"),
+            })?;
 
-        Ok(())
+        if backup_data.is_empty() {
+            return Err(crate::error::FcmError::Storage(
+                StorageError::SerializationError {
+                    message: "Backup file is empty".to_string(),
+                },
+            ));
+        }
+
+        self.try_load_data(&backup_data).await
     }
 
     /// Saves storage data to disk with atomic write operation.
@@ -456,7 +526,7 @@ impl BinaryStorage {
 
         // Serialize data
         let serialized_data =
-            bincode::serialize(&storage_data).map_err(|e| StorageError::SerializationError {
+            serde_json::to_vec(&storage_data).map_err(|e| StorageError::SerializationError {
                 message: format!("Failed to serialize storage data: {e}"),
             })?;
 

@@ -70,6 +70,30 @@ pub enum FcmError {
 
     #[error("TOML serialize error: {0}")]
     TomlSer(#[from] toml::ser::Error),
+
+    #[error("Generic error: {0}")]
+    Generic(String),
+}
+
+// Manual Clone implementation for types that can be cloned
+impl Clone for FcmError {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Config(e) => Self::Config(e.clone()),
+            Self::Registry(e) => Self::Registry(e.clone()),
+            Self::Package(e) => Self::Package(e.clone()),
+            Self::Storage(e) => Self::Storage(e.clone()),
+            Self::Resolution(e) => Self::Resolution(e.clone()),
+            Self::Search(e) => Self::Search(e.clone()),
+            Self::Generic(msg) => Self::Generic(msg.clone()),
+            // For non-cloneable types, convert to generic error
+            Self::Io(e) => Self::Generic(format!("IO error: {e}")),
+            Self::Network(e) => Self::Generic(format!("Network error: {e}")),
+            Self::Json(e) => Self::Generic(format!("JSON error: {e}")),
+            Self::TomlDe(e) => Self::Generic(format!("TOML deserialize error: {e}")),
+            Self::TomlSer(e) => Self::Generic(format!("TOML serialize error: {e}")),
+        }
+    }
 }
 
 /// Errors related to configuration loading, parsing, and validation.
@@ -87,7 +111,7 @@ pub enum FcmError {
 /// };
 /// println!("Configuration error: {}", error);
 /// ```
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone)]
 pub enum ConfigError {
     #[error("Invalid configuration file: {path}")]
     InvalidFile { path: std::path::PathBuf },
@@ -124,7 +148,7 @@ pub enum ConfigError {
 /// };
 /// println!("Registry error: {}", error);
 /// ```
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone)]
 pub enum RegistryError {
     #[error("Package not found: {name}@{version}")]
     PackageNotFound { name: String, version: String },
@@ -157,7 +181,7 @@ pub enum RegistryError {
 /// };
 /// println!("Package error: {}", error);
 /// ```
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone)]
 pub enum PackageError {
     #[error("Invalid package format: {message}")]
     InvalidFormat { message: String },
@@ -190,7 +214,7 @@ pub enum PackageError {
 /// };
 /// println!("Storage error: {}", error);
 /// ```
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone)]
 pub enum StorageError {
     #[error("Index corruption detected: {message}")]
     IndexCorruption { message: String },
@@ -236,7 +260,7 @@ pub enum StorageError {
 /// };
 /// println!("Resolution error: {}", error);
 /// ```
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone)]
 pub enum ResolutionError {
     #[error("Canonical URL not found: {url}")]
     CanonicalUrlNotFound { url: String },
@@ -266,7 +290,7 @@ pub enum ResolutionError {
 /// };
 /// println!("Search error: {}", error);
 /// ```
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone)]
 pub enum SearchError {
     #[error("Invalid search query: {message}")]
     InvalidQuery { message: String },

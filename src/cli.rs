@@ -1,6 +1,7 @@
 //! CLI interface for FCM
 
 use crate::CanonicalManager;
+use crate::SearchParameterInfo;
 use crate::output::{Output, Progress, format_package};
 use crate::search::SearchResult;
 use clap::{Parser, Subcommand};
@@ -135,6 +136,8 @@ pub enum Commands {
     List,
     /// Search for resources
     Search(SearchCommand),
+    /// Get search parameters for a resource type
+    SearchParams(SearchParamsCommand),
     /// Resolve canonical URLs
     Resolve(ResolveCommand),
     /// Update package indexes
@@ -185,6 +188,17 @@ pub struct SearchCommand {
 
     /// Output format (text, json)
     #[arg(long, default_value = "text")]
+    pub format: String,
+}
+
+/// Search parameters command
+#[derive(Parser, Debug)]
+pub struct SearchParamsCommand {
+    /// Resource type to get search parameters for
+    pub resource_type: String,
+
+    /// Output format (json, table, csv)
+    #[arg(long, default_value = "table")]
     pub format: String,
 }
 
@@ -257,6 +271,7 @@ pub async fn run() -> crate::Result<()> {
         Commands::Remove(ref cmd) => handle_remove(&cli, cmd).await,
         Commands::List => handle_list(&cli).await,
         Commands::Search(ref cmd) => handle_search(&cli, cmd).await,
+        Commands::SearchParams(ref cmd) => handle_search_params(&cli, cmd).await,
         Commands::Resolve(ref cmd) => handle_resolve(&cli, cmd).await,
         Commands::Update => handle_update(&cli).await,
         Commands::Config(ref cmd) => handle_config(&cli, cmd).await,
@@ -472,6 +487,29 @@ async fn handle_search(cli: &Cli, cmd: &SearchCommand) -> crate::Result<()> {
     match cmd.format.as_str() {
         "json" => print_search_results_json(&results)?,
         _ => print_search_results_text(&results),
+    }
+
+    Ok(())
+}
+
+/// Handle search params command
+async fn handle_search_params(cli: &Cli, cmd: &SearchParamsCommand) -> crate::Result<()> {
+    let config = load_config(cli)?;
+    let manager = CanonicalManager::new(config).await?;
+
+    Progress::start(&format!(
+        "Getting search parameters for resource type: {}",
+        cmd.resource_type
+    ));
+
+    let search_params = manager.get_search_parameters(&cmd.resource_type).await?;
+
+    Progress::complete(&format!("Found {} search parameters", search_params.len()));
+
+    match cmd.format.as_str() {
+        "json" => print_search_params_json(&search_params)?,
+        "csv" => print_search_params_csv(&search_params)?,
+        _ => print_search_params_table(&search_params),
     }
 
     Ok(())
@@ -800,5 +838,136 @@ fn print_resolve_result_json(
 ) -> crate::Result<()> {
     let json = serde_json::to_string_pretty(result)?;
     Output::result(&json);
+    Ok(())
+}
+
+/// Print search parameters in table format
+fn print_search_params_table(params: &[SearchParameterInfo]) {
+    use colored::Colorize;
+
+    if params.is_empty() {
+        Output::info("No search parameters found for this resource type");
+        return;
+    }
+
+    // Calculate column widths
+    let max_code = params
+        .iter()
+        .map(|p| p.code.len())
+        .max()
+        .unwrap_or(4)
+        .max(4);
+    let max_name = params
+        .iter()
+        .map(|p| p.name.len())
+        .max()
+        .unwrap_or(4)
+        .max(4);
+    let max_type = params
+        .iter()
+        .map(|p| p.type_field.len())
+        .max()
+        .unwrap_or(4)
+        .max(4);
+
+    // Print header
+    Output::section("Search Parameters:");
+    Output::result(&format!(
+        "{:width_code$}  {:width_name$}  {:width_type$}  {}",
+        "Code".bright_white().bold(),
+        "Name".bright_white().bold(),
+        "Type".bright_white().bold(),
+        "Description".bright_white().bold(),
+        width_code = max_code,
+        width_name = max_name,
+        width_type = max_type
+    ));
+    Output::result(&format!(
+        "{:width_code$}  {:width_name$}  {:width_type$}  {}",
+        "-".repeat(max_code).dimmed(),
+        "-".repeat(max_name).dimmed(),
+        "-".repeat(max_type).dimmed(),
+        "-".repeat(40).dimmed(),
+        width_code = max_code,
+        width_name = max_name,
+        width_type = max_type
+    ));
+
+    // Print rows
+    for param in params {
+        let description = param
+            .description
+            .as_ref()
+            .map(|d| {
+                if d.len() > 60 {
+                    format!("{}...", &d[..57])
+                } else {
+                    d.clone()
+                }
+            })
+            .unwrap_or_else(|| "".to_string());
+
+        Output::result(&format!(
+            "{:width_code$}  {:width_name$}  {:width_type$}  {}",
+            param.code.cyan(),
+            param.name.bright_white(),
+            param.type_field.yellow(),
+            description.dimmed(),
+            width_code = max_code,
+            width_name = max_name,
+            width_type = max_type
+        ));
+    }
+
+    Output::result(&format!(
+        "\n{} search parameters found",
+        params.len().to_string().bright_green()
+    ));
+}
+
+/// Print search parameters in JSON format
+fn print_search_params_json(params: &[SearchParameterInfo]) -> crate::Result<()> {
+    let json = serde_json::to_string_pretty(params)?;
+    Output::result(&json);
+    Ok(())
+}
+
+/// Print search parameters in CSV format
+fn print_search_params_csv(params: &[SearchParameterInfo]) -> crate::Result<()> {
+    // Print CSV header
+    Output::result("code,name,type,base,description,expression,xpath,url,status");
+
+    // Print rows
+    for param in params {
+        let base = param.base.join(";");
+        let description = param.description.as_deref().unwrap_or("");
+        let expression = param.expression.as_deref().unwrap_or("");
+        let xpath = param.xpath.as_deref().unwrap_or("");
+        let url = param.url.as_deref().unwrap_or("");
+        let status = param.status.as_deref().unwrap_or("");
+
+        // Escape CSV fields that contain commas, quotes, or newlines
+        let escape_csv = |s: &str| -> String {
+            if s.contains(',') || s.contains('"') || s.contains('\n') {
+                format!("\"{}\"", s.replace('"', "\"\""))
+            } else {
+                s.to_string()
+            }
+        };
+
+        Output::result(&format!(
+            "{},{},{},{},{},{},{},{},{}",
+            escape_csv(&param.code),
+            escape_csv(&param.name),
+            escape_csv(&param.type_field),
+            escape_csv(&base),
+            escape_csv(description),
+            escape_csv(expression),
+            escape_csv(xpath),
+            escape_csv(url),
+            escape_csv(status)
+        ));
+    }
+
     Ok(())
 }

@@ -4,7 +4,7 @@ use serde_json::json;
 use std::collections::HashMap;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
-    matchers::{method, path, path_regex},
+    matchers::{method, path},
 };
 
 /// Mock package data for testing
@@ -39,11 +39,6 @@ impl MockPackageData {
         self
     }
 
-    pub fn with_content(mut self, content: Vec<u8>) -> Self {
-        self.content = Some(content);
-        self
-    }
-
     pub fn with_description(mut self, description: &str) -> Self {
         self.description = Some(description.to_string());
         self
@@ -55,7 +50,6 @@ pub struct MockRegistry {
     server: MockServer,
     packages: HashMap<String, MockPackageData>,
     should_fail: bool,
-    failure_count: usize,
     response_delay: Option<std::time::Duration>,
 }
 
@@ -68,7 +62,6 @@ impl MockRegistry {
             server,
             packages: HashMap::new(),
             should_fail: false,
-            failure_count: 0,
             response_delay: None,
         }
     }
@@ -94,21 +87,6 @@ impl MockRegistry {
         }
 
         self.packages.insert(package_key, package);
-    }
-
-    /// Configure the registry to simulate network failures
-    pub fn simulate_network_error(&mut self) {
-        self.should_fail = true;
-    }
-
-    /// Configure the registry to fail for a specific number of requests
-    pub fn simulate_temporary_failure(&mut self, failure_count: usize) {
-        self.failure_count = failure_count;
-    }
-
-    /// Add response delay to simulate slow network
-    pub fn with_delay(&mut self, delay: std::time::Duration) {
-        self.response_delay = Some(delay);
     }
 
     /// Setup mock endpoints for all registered packages
@@ -271,27 +249,22 @@ impl MockRegistry {
         buf
     }
 
-    /// Add a custom mock response
-    pub async fn add_custom_mock(&self, path_pattern: &str, response: ResponseTemplate) {
-        Mock::given(method("GET"))
-            .and(path_regex(path_pattern))
-            .respond_with(response)
-            .mount(&self.server)
-            .await;
+    /// Simulate network error on next request (for backward compatibility)
+    #[allow(dead_code)]
+    pub fn simulate_network_error(&mut self) {
+        self.should_fail = true;
     }
 
-    /// Reset all mocks
-    pub async fn reset(&self) {
-        self.server.reset().await;
+    /// Simulate temporary failure (for backward compatibility)
+    #[allow(dead_code)]
+    pub fn simulate_temporary_failure(&mut self, _count: usize) {
+        self.should_fail = true;
     }
 
-    /// Verify that a request was made
-    pub async fn verify_request_made(&self, method: &str, path: &str) {
-        let requests = self.server.received_requests().await.unwrap();
-        let found = requests
-            .iter()
-            .any(|req| req.method.as_str() == method && req.url.path() == path);
-        assert!(found, "Expected request {method} {path} was not made");
+    /// Add delay to responses (for backward compatibility)
+    #[allow(dead_code)]
+    pub fn with_delay(&mut self, duration: std::time::Duration) {
+        self.response_delay = Some(duration);
     }
 }
 

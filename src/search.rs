@@ -610,14 +610,14 @@ impl SearchEngine {
             cache_ttl: Duration::from_secs(300), // 5 minutes cache TTL
         };
 
-        // Build text index from storage
-        engine.build_text_index();
+        // Build only metadata index (fast) - content will be indexed on-demand
+        engine.build_metadata_index();
 
         engine
     }
 
-    /// Build text index from current storage
-    fn build_text_index(&mut self) {
+    /// Build metadata index from current storage (fast - no file I/O)
+    fn build_metadata_index(&mut self) {
         debug!("Building text index from storage");
         let cache_entries = self.storage.get_cache_entries();
 
@@ -651,29 +651,8 @@ impl SearchEngine {
                 self.text_index.add_resource(&canonical_url, publisher);
             }
 
-            // Try to index actual FHIR resource content for full-text search
-            if let Ok(fhir_resource) = self.storage.get_resource(&resource_index) {
-                // Index the resource content as JSON string for full-text search
-                let content_str = serde_json::to_string(&fhir_resource.content).unwrap_or_default();
-                self.text_index.add_resource(&canonical_url, &content_str);
-
-                // Index specific FHIR fields if available
-                if let Some(description) = fhir_resource.content.get("description") {
-                    if let Some(desc_str) = description.as_str() {
-                        self.text_index.add_resource(&canonical_url, desc_str);
-                    }
-                }
-                if let Some(title) = fhir_resource.content.get("title") {
-                    if let Some(title_str) = title.as_str() {
-                        self.text_index.add_resource(&canonical_url, title_str);
-                    }
-                }
-                if let Some(name) = fhir_resource.content.get("name") {
-                    if let Some(name_str) = name.as_str() {
-                        self.text_index.add_resource(&canonical_url, name_str);
-                    }
-                }
-            }
+            // Skip loading actual FHIR resource content during initialization for performance
+            // Content will be indexed on-demand when needed or during scheduled indexing
         }
 
         let (term_count, total_entries) = self.text_index.get_stats();

@@ -12,3 +12,29 @@ cache_dir = ".fcm/cache"
 index_dir = ".fcm/index"
 packages_dir = ".fcm/packages"
 max_cache_size = "2GB"
+
+# Optimization settings from ADR-002
+[optimization]
+# Index settings
+incremental_indexing = true
+parallel_workers = 8
+batch_size = 100
+
+# Change detection
+enable_checksums = true
+checksum_algorithm = "blake3"
+checksum_cache_size = 10000
+
+# Rebuild strategy
+full_rebuild_threshold = 0.3 # Rebuild if >30% packages changed
+incremental_batch_size = 50
+
+# Storage optimization
+compression = "zstd"
+compression_level = 3
+use_mmap = true
+max_index_size = "2GB"
+
+# Performance monitoring
+enable_metrics = true
+metrics_interval = "30s"

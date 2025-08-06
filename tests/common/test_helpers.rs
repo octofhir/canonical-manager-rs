@@ -1,7 +1,7 @@
 //! Test helper functions and utilities
 
 use crate::common::{MockPackageData, MockRegistry};
-use octofhir_canonical_manager::{FcmConfig, RegistryConfig, StorageConfig};
+use octofhir_canonical_manager::{FcmConfig, OptimizationConfig, RegistryConfig, StorageConfig};
 use std::path::Path;
 use tempfile::TempDir;
 
@@ -20,14 +20,8 @@ pub fn create_test_config(temp_dir: &Path) -> FcmConfig {
             packages_dir: temp_dir.join("packages"),
             max_cache_size: "100MB".to_string(),
         },
+        optimization: OptimizationConfig::default(),
     }
-}
-
-/// Create a test configuration with mock registry URL
-pub fn create_test_config_with_registry(temp_dir: &Path, registry_url: &str) -> FcmConfig {
-    let mut config = create_test_config(temp_dir);
-    config.registry.url = registry_url.to_string();
-    config
 }
 
 /// Setup test directories and return temporary directory
@@ -45,11 +39,6 @@ pub fn setup_test_env() -> TempDir {
 /// Assert that a path exists
 pub fn assert_path_exists(path: &Path) {
     assert!(path.exists(), "Path should exist: {}", path.display());
-}
-
-/// Assert that a path doesn't exist
-pub fn assert_path_not_exists(path: &Path) {
-    assert!(!path.exists(), "Path should not exist: {}", path.display());
 }
 
 /// Create a minimal FHIR package structure for testing
@@ -102,11 +91,6 @@ pub fn create_test_package_structure(
     Ok(())
 }
 
-/// Wait for async operations to complete
-pub async fn wait_for_async() {
-    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-}
-
 /// Create a test registry with common packages for testing
 pub async fn create_test_registry_with_packages() -> MockRegistry {
     let mut registry = MockRegistry::new().await;
@@ -131,6 +115,12 @@ pub async fn create_test_registry_with_packages() -> MockRegistry {
 
     registry.setup_mocks().await;
     registry
+}
+
+/// Wait for async operations to complete (for test compatibility)
+#[allow(dead_code)]
+pub async fn wait_for_async() {
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 }
 
 #[cfg(test)]

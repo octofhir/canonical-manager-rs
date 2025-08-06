@@ -96,6 +96,29 @@ pub fn create_sample_package_manifest(name: &str, version: &str) -> serde_json::
     })
 }
 
+/// Create a sample FHIR SearchParameter resource
+pub fn create_sample_search_parameter(
+    id: &str,
+    url: &str,
+    code: &str,
+    base: &str,
+    param_type: &str,
+) -> serde_json::Value {
+    json!({
+        "resourceType": "SearchParameter",
+        "id": id,
+        "url": url,
+        "name": format!("{}SearchParam", id.replace("-", "")),
+        "status": "active",
+        "code": code,
+        "base": [base],
+        "type": param_type,
+        "description": format!("Search parameter for {} on {}", code, base),
+        "expression": format!("{}.{}", base, code),
+        "xpath": format!("f:{}/f:{}", base, code)
+    })
+}
+
 /// Create sample configuration files
 pub fn create_sample_config() -> String {
     r#"# FHIR Canonical Manager Test Configuration
@@ -200,27 +223,6 @@ pub fn setup_test_fixtures(fixtures_dir: &Path) -> std::io::Result<()> {
     )?;
 
     Ok(())
-}
-
-/// Get path to test fixture file
-pub fn get_fixture_path(fixture_name: &str) -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("fixtures")
-        .join(fixture_name)
-}
-
-/// Load a fixture file as string
-pub fn load_fixture(fixture_name: &str) -> std::io::Result<String> {
-    let path = get_fixture_path(fixture_name);
-    std::fs::read_to_string(path)
-}
-
-/// Load a fixture file as JSON
-pub fn load_fixture_json(fixture_name: &str) -> std::io::Result<serde_json::Value> {
-    let content = load_fixture(fixture_name)?;
-    serde_json::from_str(&content)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
 #[cfg(test)]

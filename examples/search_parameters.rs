@@ -42,10 +42,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 param.type_field
             );
             if let Some(description) = &param.description {
-                println!("     Description: {}", description);
+                println!("     Description: {description}");
             }
             if let Some(expression) = &param.expression {
-                println!("     Expression: {}", expression);
+                println!("     Expression: {expression}");
             }
             println!();
         }
@@ -75,7 +75,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         println!("Parameter types distribution:");
         for (param_type, count) in type_counts {
-            println!("  {}: {} parameters", param_type, count);
+            println!("  {param_type}: {count} parameters");
         }
     }
 

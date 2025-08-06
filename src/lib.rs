@@ -203,7 +203,8 @@ impl CanonicalManager {
 
         // Validate and optimize configuration before initialization
         // Skip optimization for test configurations (parallel_workers=1 and enable_metrics=false)
-        let skip_optimization = config.optimization.parallel_workers == 1 && !config.optimization.enable_metrics;
+        let skip_optimization =
+            config.optimization.parallel_workers == 1 && !config.optimization.enable_metrics;
         let validation = if skip_optimization {
             debug!("Skipping config optimization for test mode");
             crate::config_validator::ConfigValidator::validate_config(&config)
@@ -345,7 +346,9 @@ impl CanonicalManager {
     /// Enhanced with optimization components for faster installation
     pub async fn install_package(&self, name: &str, version: &str) -> Result<()> {
         // Check if we should use simplified installation for testing
-        if self.config.optimization.parallel_workers == 1 && !self.config.optimization.enable_metrics {
+        if self.config.optimization.parallel_workers == 1
+            && !self.config.optimization.enable_metrics
+        {
             debug!("Using simplified installation for testing mode");
             return self.install_package_simple(name, version).await;
         }
@@ -389,69 +392,88 @@ impl CanonicalManager {
     /// Simplified package installation for testing (bypasses complex optimizations)
     async fn install_package_simple(&self, name: &str, version: &str) -> Result<()> {
         debug!("Installing package {}@{} in simplified mode", name, version);
-        
+
         // Use a simple set to track what we've installed to avoid infinite recursion
         let mut installed = std::collections::HashSet::new();
-        self.install_package_simple_recursive(name, version, &mut installed).await
+        self.install_package_simple_recursive(name, version, &mut installed)
+            .await
     }
-    
+
     /// Recursive helper for simplified installation with dependency handling
     fn install_package_simple_recursive<'a>(
-        &'a self, 
-        name: &'a str, 
-        version: &'a str, 
-        installed: &'a mut std::collections::HashSet<String>
+        &'a self,
+        name: &'a str,
+        version: &'a str,
+        installed: &'a mut std::collections::HashSet<String>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + 'a>> {
         Box::pin(async move {
-        let package_key = format!("{}@{}", name, version);
-        
-        // Skip if already processed
-        if installed.contains(&package_key) {
-            debug!("Package {} already processed", package_key);
-            return Ok(());
-        }
+            let package_key = format!("{name}@{version}");
 
-        // Check if package already exists in storage
-        debug!("Checking if package {} already exists in storage...", package_key);
-        let packages = self.storage.list_packages().await?;
-        if packages.iter().any(|p| p.name == name && p.version == version) {
-            debug!("Package {} already installed in storage", package_key);
-            installed.insert(package_key);
-            return Ok(());
-        }
-        debug!("Package {} not found in storage, proceeding with installation", package_key);
+            // Skip if already processed
+            if installed.contains(&package_key) {
+                debug!("Package {} already processed", package_key);
+                return Ok(());
+            }
 
-        let spec = crate::config::PackageSpec {
-            name: name.to_string(),
-            version: version.to_string(),
-            priority: 1,
-        };
+            // Check if package already exists in storage
+            debug!(
+                "Checking if package {} already exists in storage...",
+                package_key
+            );
+            let packages = self.storage.list_packages().await?;
+            if packages
+                .iter()
+                .any(|p| p.name == name && p.version == version)
+            {
+                debug!("Package {} already installed in storage", package_key);
+                installed.insert(package_key);
+                return Ok(());
+            }
+            debug!(
+                "Package {} not found in storage, proceeding with installation",
+                package_key
+            );
 
-        // Download package and get metadata (includes dependencies)
-        debug!("Downloading package {}...", package_key);
-        let download = self.registry_client.download_package(&spec).await?;
-        let dependencies = download.metadata.dependencies.clone();
-        debug!("Package {} downloaded successfully, found {} dependencies", package_key, dependencies.len());
-        
-        // Install dependencies first
-        for (dep_name, dep_version) in dependencies {
-            debug!("Installing dependency: {}@{}", dep_name, dep_version);
-            self.install_package_simple_recursive(&dep_name, &dep_version, installed).await?;
-        }
-        
-        debug!("Extracting package {}...", package_key);
-        let extractor = crate::package::PackageExtractor::new(self.config.storage.packages_dir.clone());
-        let extracted = extractor.extract_package(download).await?;
-        debug!("Package {} extracted successfully", package_key);
+            let spec = crate::config::PackageSpec {
+                name: name.to_string(),
+                version: version.to_string(),
+                priority: 1,
+            };
 
-        // Add to storage (simplified - no complex indexing)
-        debug!("Adding package {} to storage...", package_key);
-        self.storage.add_package(&extracted).await?;
-        debug!("Package {} added to storage successfully", package_key);
+            // Download package and get metadata (includes dependencies)
+            debug!("Downloading package {}...", package_key);
+            let download = self.registry_client.download_package(&spec).await?;
+            let dependencies = download.metadata.dependencies.clone();
+            debug!(
+                "Package {} downloaded successfully, found {} dependencies",
+                package_key,
+                dependencies.len()
+            );
 
-        installed.insert(package_key.clone());
-        info!("Package {} installed successfully (simplified mode)", package_key);
-        Ok(())
+            // Install dependencies first
+            for (dep_name, dep_version) in dependencies {
+                debug!("Installing dependency: {}@{}", dep_name, dep_version);
+                self.install_package_simple_recursive(&dep_name, &dep_version, installed)
+                    .await?;
+            }
+
+            debug!("Extracting package {}...", package_key);
+            let extractor =
+                crate::package::PackageExtractor::new(self.config.storage.packages_dir.clone());
+            let extracted = extractor.extract_package(download).await?;
+            debug!("Package {} extracted successfully", package_key);
+
+            // Add to storage (simplified - no complex indexing)
+            debug!("Adding package {} to storage...", package_key);
+            self.storage.add_package(&extracted).await?;
+            debug!("Package {} added to storage successfully", package_key);
+
+            installed.insert(package_key.clone());
+            info!(
+                "Package {} installed successfully (simplified mode)",
+                package_key
+            );
+            Ok(())
         })
     }
 

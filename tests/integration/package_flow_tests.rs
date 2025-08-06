@@ -12,7 +12,7 @@ async fn test_canonical_manager_creation_simple() {
     println!("Starting test_canonical_manager_creation_simple");
     let temp_dir = setup_test_env();
     println!("Created temp dir: {:?}", temp_dir.path());
-    
+
     let config = FcmConfig {
         registry: RegistryConfig {
             url: "https://packages.fhir.org/".to_string(),
@@ -22,7 +22,7 @@ async fn test_canonical_manager_creation_simple() {
         packages: vec![],
         storage: StorageConfig {
             cache_dir: temp_dir.path().join("cache"),
-            index_dir: temp_dir.path().join("index"),  
+            index_dir: temp_dir.path().join("index"),
             packages_dir: temp_dir.path().join("packages"),
             max_cache_size: "10MB".to_string(),
         },
@@ -45,13 +45,14 @@ async fn test_canonical_manager_creation_simple() {
     };
 
     println!("About to create CanonicalManager...");
-    
+
     // Use timeout to prevent hanging
     let manager_result = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        CanonicalManager::new(config)
-    ).await;
-    
+        CanonicalManager::new(config),
+    )
+    .await;
+
     match manager_result {
         Ok(Ok(manager)) => {
             println!("CanonicalManager created successfully");
@@ -60,8 +61,8 @@ async fn test_canonical_manager_creation_simple() {
             assert!(packages.is_empty(), "Should start with no packages");
         }
         Ok(Err(e)) => {
-            println!("CanonicalManager creation failed: {:?}", e);
-            panic!("Failed to create CanonicalManager: {:?}", e);
+            println!("CanonicalManager creation failed: {e:?}");
+            panic!("Failed to create CanonicalManager: {e:?}");
         }
         Err(_) => {
             println!("CanonicalManager creation timed out after 5 seconds");
@@ -76,7 +77,7 @@ async fn test_package_installation_with_timeout() {
     println!("Setting up test...");
     let temp_dir = setup_test_env();
     println!("Created temp directory");
-    
+
     println!("Creating mock registry...");
     let registry = create_test_registry_with_packages().await;
     println!("Mock registry created at: {}", registry.url());
@@ -114,16 +115,18 @@ async fn test_package_installation_with_timeout() {
 
     println!("Creating CanonicalManager...");
     let manager = match tokio::time::timeout(
-        std::time::Duration::from_secs(5), 
-        CanonicalManager::new(config)
-    ).await {
+        std::time::Duration::from_secs(5),
+        CanonicalManager::new(config),
+    )
+    .await
+    {
         Ok(Ok(m)) => {
             println!("CanonicalManager created successfully");
             m
-        },
+        }
         Ok(Err(e)) => {
-            println!("Failed to create manager: {:?}", e);
-            panic!("Manager creation failed: {:?}", e);
+            println!("Failed to create manager: {e:?}");
+            panic!("Manager creation failed: {e:?}");
         }
         Err(_) => {
             println!("Manager creation timed out");
@@ -134,17 +137,17 @@ async fn test_package_installation_with_timeout() {
     println!("Testing package installation with timeout...");
     let install_future = manager.install_package("test.package", "1.0.0");
     let result = tokio::time::timeout(std::time::Duration::from_secs(10), install_future).await;
-    
+
     match result {
         Ok(install_result) => {
-            println!("Install completed: {:?}", install_result);
+            println!("Install completed: {install_result:?}");
             if install_result.is_ok() {
                 println!("Installation succeeded!");
                 // Verify package was actually installed
                 let packages = manager.list_packages().await.unwrap();
-                println!("Installed packages: {:?}", packages);
+                println!("Installed packages: {packages:?}");
             } else {
-                println!("Installation failed, but didn't hang: {:?}", install_result);
+                println!("Installation failed, but didn't hang: {install_result:?}");
             }
         }
         Err(_) => {
@@ -159,7 +162,7 @@ async fn test_package_installation_with_timeout() {
 async fn test_full_package_installation_original() {
     println!("🔧 Setting up test environment...");
     let temp_dir = setup_test_env();
-    
+
     println!("🌐 Creating mock registry...");
     let registry = create_test_registry_with_packages().await;
 
@@ -202,8 +205,8 @@ async fn test_full_package_installation_original() {
             m
         }
         Err(e) => {
-            println!("❌ Failed to create CanonicalManager: {:?}", e);
-            panic!("Failed to create CanonicalManager: {:?}", e);
+            println!("❌ Failed to create CanonicalManager: {e:?}");
+            panic!("Failed to create CanonicalManager: {e:?}");
         }
     };
 
@@ -211,14 +214,17 @@ async fn test_full_package_installation_original() {
     println!("📦 Installing package test.package@1.0.0...");
     let install_future = manager.install_package("test.package", "1.0.0");
     let result = tokio::time::timeout(std::time::Duration::from_secs(10), install_future).await;
-    
+
     match result {
         Ok(install_result) => {
             println!("📦 Install completed: {:?}", install_result.is_ok());
             if let Err(e) = &install_result {
-                println!("📦 Install error: {:?}", e);
+                println!("📦 Install error: {e:?}");
             }
-            assert!(install_result.is_ok(), "Package installation should succeed");
+            assert!(
+                install_result.is_ok(),
+                "Package installation should succeed"
+            );
         }
         Err(_) => {
             println!("📦 Install timed out after 10 seconds");
@@ -796,15 +802,25 @@ async fn test_search_parameter_retrieval_simple() {
 
     // Test search parameters retrieval with empty storage (should return empty list)
     let search_params = manager.get_search_parameters("Patient").await;
-    
+
     // This should succeed and return an empty list since no packages are installed
-    assert!(search_params.is_ok(), "get_search_parameters should not error");
-    
+    assert!(
+        search_params.is_ok(),
+        "get_search_parameters should not error"
+    );
+
     let params = search_params.unwrap();
-    println!("Found {} search parameters for Patient (expected: 0)", params.len());
-    
+    println!(
+        "Found {} search parameters for Patient (expected: 0)",
+        params.len()
+    );
+
     // Should be empty since no packages are installed
-    assert_eq!(params.len(), 0, "Should have no search parameters when no packages installed");
+    assert_eq!(
+        params.len(),
+        0,
+        "Should have no search parameters when no packages installed"
+    );
 }
 
 /// Test search parameter retrieval

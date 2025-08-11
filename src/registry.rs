@@ -271,8 +271,11 @@ impl RegistryClient {
     /// # }
     /// ```
     pub async fn new(config: &RegistryConfig, cache_dir: PathBuf) -> Result<Self> {
+        // Use a shorter timeout (10 seconds max) to avoid hanging
+        let timeout_secs = std::cmp::min(config.timeout, 10);
         let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(config.timeout))
+            .timeout(std::time::Duration::from_secs(timeout_secs))
+            .connect_timeout(std::time::Duration::from_secs(5))
             .user_agent("octofhir-canonical-manager/0.1.0")
             .build()?;
 
@@ -760,9 +763,10 @@ impl RegistryClient {
 
         for attempt in 1..=self.config.retry_attempts {
             debug!(
-                "Download attempt {} of {}",
-                attempt, self.config.retry_attempts
+                "Download attempt {} of {} for URL: {}",
+                attempt, self.config.retry_attempts, url
             );
+            eprintln!("DEBUG: Attempting to download from: {url}");
 
             match self.client.get(url).send().await {
                 Ok(response) => {

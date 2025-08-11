@@ -1,6 +1,6 @@
+use crate::RebuildPackageInfo as PackageInfo;
 use crate::change_detection::{PackageChangeDetector, PackageChecksum};
 use crate::error::Result;
-use crate::parallel_processor::PackageInfo;
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -408,12 +408,7 @@ mod tests {
 
         fs::write(package_dir.join("resource.json"), content).unwrap();
 
-        PackageInfo::new(
-            id.to_string(),
-            id.to_string(),
-            "1.0.0".to_string(),
-            package_dir,
-        )
+        PackageInfo::new(id.to_string(), package_dir)
     }
 
     #[tokio::test]

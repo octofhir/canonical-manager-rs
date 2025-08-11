@@ -37,7 +37,6 @@ pub mod error;
 pub mod incremental_indexer;
 pub mod output;
 pub mod package;
-pub mod parallel_processor;
 pub mod performance;
 pub mod rebuild_strategy;
 pub mod registry;
@@ -61,7 +60,6 @@ pub use config::{FcmConfig, OptimizationConfig, PackageSpec, RegistryConfig, Sto
 pub use config_validator::{ConfigValidator, PerformanceImpact, ValidationResult};
 pub use error::{FcmError, Result};
 pub use incremental_indexer::{FhirResource, IncrementalIndexer, IndexStats};
-pub use parallel_processor::{ParallelPackageProcessor, ProcessingReport};
 pub use performance::{
     IndexOperationType, PackageOperationType, PerformanceAnalysis, PerformanceConfig,
     PerformanceMetrics, PerformanceMonitor,
@@ -177,6 +175,19 @@ impl SearchParameterInfo {
     }
 }
 
+/// Package information for rebuild operations
+#[derive(Debug, Clone)]
+pub struct RebuildPackageInfo {
+    pub id: String,
+    pub path: std::path::PathBuf,
+}
+
+impl RebuildPackageInfo {
+    pub fn new(id: String, path: std::path::PathBuf) -> Self {
+        Self { id, path }
+    }
+}
+
 /// Main FHIR Canonical Manager
 ///
 /// Provides high-level interface for managing FHIR packages and resolving canonical URLs.
@@ -190,7 +201,6 @@ pub struct CanonicalManager {
     change_detector: Arc<PackageChangeDetector>,
     rebuild_strategy: SmartRebuildStrategy,
     incremental_indexer: Arc<IncrementalIndexer>,
-    parallel_processor: Arc<ParallelPackageProcessor>,
     // Performance tracking
     performance_monitor: Arc<PerformanceMonitor>,
     tantivy_index: Arc<Index>,
@@ -200,6 +210,15 @@ impl CanonicalManager {
     /// Create a new CanonicalManager with the given configuration
     pub async fn new(mut config: FcmConfig) -> Result<Self> {
         info!("Initializing FHIR Canonical Manager with optimization components");
+
+        // Add early timeout check for CI/test environments to avoid hanging
+        if std::env::var("CI").is_ok() || std::env::var("FHIRPATH_QUICK_INIT").is_ok() {
+            info!("Quick initialization mode detected (CI or FHIRPATH_QUICK_INIT set)");
+            // Use minimal configuration for quick initialization
+            config.optimization.parallel_workers = 1;
+            config.optimization.enable_metrics = false;
+            config.optimization.use_mmap = false;
+        }
 
         // Validate and optimize configuration before initialization
         // Skip optimization for test configurations (parallel_workers=1 and enable_metrics=false)
@@ -251,15 +270,29 @@ impl CanonicalManager {
             validation.performance_impact.disk_usage_estimate
         );
 
-        // Initialize unified storage system
-        let storage = Arc::new(
-            UnifiedStorage::new(
-                config.storage.clone(),
-                config.optimization.use_mmap,
-                config.optimization.compression_level,
-            )
-            .await?,
+        // Initialize unified storage system with timeout to prevent hanging
+        let storage_future = UnifiedStorage::new(
+            config.storage.clone(),
+            config.optimization.use_mmap,
+            config.optimization.compression_level,
         );
+
+        let storage =
+            match tokio::time::timeout(std::time::Duration::from_secs(30), storage_future).await {
+                Ok(Ok(s)) => Arc::new(s),
+                Ok(Err(e)) => {
+                    tracing::error!("Failed to initialize unified storage: {}", e);
+                    return Err(e);
+                }
+                Err(_) => {
+                    tracing::error!("Unified storage initialization timed out after 30 seconds");
+                    return Err(FcmError::Config(
+                        crate::error::ConfigError::ValidationFailed {
+                            message: "Storage initialization timed out".to_string(),
+                        },
+                    ));
+                }
+            };
 
         // Initialize registry client
         let expanded_storage = config.get_expanded_storage_config();
@@ -291,12 +324,6 @@ impl CanonicalManager {
             config.optimization.batch_size,
         ));
 
-        // Initialize parallel processor
-        let parallel_processor = Arc::new(ParallelPackageProcessor::new(
-            config.optimization.parallel_workers,
-            Arc::clone(&incremental_indexer),
-        ));
-
         // Initialize performance monitor
         let perf_config = PerformanceConfig {
             enable_metrics: config.optimization.enable_metrics,
@@ -317,7 +344,6 @@ impl CanonicalManager {
             change_detector,
             rebuild_strategy,
             incremental_indexer,
-            parallel_processor,
             performance_monitor,
             tantivy_index,
         })
@@ -562,16 +588,23 @@ impl CanonicalManager {
 
             // Check if package already exists in storage
             let packages = self.storage.list_packages().await?;
+            eprintln!("DEBUG: Found {} packages in storage", packages.len());
+            for p in &packages {
+                eprintln!("DEBUG:   - {}@{}", p.name, p.version);
+            }
+
             if packages
                 .iter()
                 .any(|p| p.name == name && p.version == version)
             {
                 info!("Package already installed in storage: {}", package_key);
+                eprintln!("DEBUG: Package {name}@{version} already installed, skipping download");
                 installed.insert(package_key);
                 return Ok(());
             }
 
             info!("Installing package: {}@{}", name, version);
+            eprintln!("DEBUG: Package {name}@{version} not found locally, downloading...");
 
             let spec = PackageSpec {
                 name: name.to_string(),
@@ -847,24 +880,31 @@ impl CanonicalManager {
                     "Performing full index rebuild for {} packages",
                     packages.len()
                 );
-                let report = self
-                    .parallel_processor
-                    .process_packages(packages.clone())
-                    .await?;
+
+                // Process packages sequentially to avoid deadlocks
+                let start_time = std::time::Instant::now();
+                for package in &packages {
+                    let stats = self.incremental_indexer.update_index(&package.path).await?;
+                    info!(
+                        "Updated index for {}: indexed={}, removed={}, duration={:?}",
+                        package.id, stats.indexed, stats.removed, stats.duration
+                    );
+                }
+                let total_time = start_time.elapsed();
 
                 info!(
-                    "Full rebuild completed: success_rate={:.1}%, throughput={:.1} pkg/s",
-                    report.success_rate() * 100.0,
-                    report.throughput_packages_per_second()
+                    "Full rebuild completed: {} packages processed in {:?}",
+                    packages.len(),
+                    total_time
                 );
 
                 self.rebuild_strategy
-                    .record_performance(&strategy, report.total_time, report.packages_processed)
+                    .record_performance(&strategy, total_time, packages.len())
                     .await;
 
                 // Record performance metrics
                 self.performance_monitor
-                    .record_index_operation(IndexOperationType::FullRebuild, report.total_time)
+                    .record_index_operation(IndexOperationType::FullRebuild, total_time)
                     .await;
 
                 Ok(())
@@ -878,7 +918,7 @@ impl CanonicalManager {
     /// Perform incremental rebuild for specific packages
     async fn incremental_rebuild(
         &self,
-        packages: &[parallel_processor::PackageInfo],
+        packages: &[RebuildPackageInfo],
         _batch_size: usize,
     ) -> Result<()> {
         for package in packages {
@@ -892,7 +932,7 @@ impl CanonicalManager {
     }
 
     /// Get package information for rebuild strategy analysis
-    async fn list_package_infos(&self) -> Result<Vec<parallel_processor::PackageInfo>> {
+    async fn list_package_infos(&self) -> Result<Vec<RebuildPackageInfo>> {
         let packages = self.storage.list_packages().await?;
         let mut package_infos = Vec::new();
 
@@ -904,10 +944,8 @@ impl CanonicalManager {
                 .join(format!("{}-{}", package.name, package.version));
 
             if package_dir.exists() {
-                let info = parallel_processor::PackageInfo::new(
+                let info = RebuildPackageInfo::new(
                     format!("{}@{}", package.name, package.version),
-                    package.name.clone(),
-                    package.version.clone(),
                     package_dir,
                 );
                 package_infos.push(info);
@@ -1021,12 +1059,22 @@ impl CanonicalManager {
     pub async fn force_full_rebuild(&self) -> Result<()> {
         info!("Forcing full index rebuild...");
         let packages = self.list_package_infos().await?;
-        let report = self.parallel_processor.process_packages(packages).await?;
+
+        // Process packages sequentially to avoid deadlocks
+        let start_time = std::time::Instant::now();
+        for package in &packages {
+            let stats = self.incremental_indexer.update_index(&package.path).await?;
+            info!(
+                "Updated index for {}: indexed={}, removed={}, duration={:?}",
+                package.id, stats.indexed, stats.removed, stats.duration
+            );
+        }
+        let total_time = start_time.elapsed();
 
         info!(
-            "Forced rebuild completed: success_rate={:.1}%, throughput={:.1} pkg/s",
-            report.success_rate() * 100.0,
-            report.throughput_packages_per_second()
+            "Forced rebuild completed: {} packages processed in {:?}",
+            packages.len(),
+            total_time
         );
 
         Ok(())

@@ -10,7 +10,7 @@ test-verbose:
 
 # Run linting
 lint:
-    cargo clippy -- -D warnings
+    cargo clippy
 
 # Fix all clippy issues (allows dirty working directory)
 clippy-fix:

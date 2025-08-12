@@ -766,8 +766,6 @@ impl RegistryClient {
                 "Download attempt {} of {} for URL: {}",
                 attempt, self.config.retry_attempts, url
             );
-            eprintln!("DEBUG: Attempting to download from: {url}");
-
             match self.client.get(url).send().await {
                 Ok(response) => {
                     if response.status().is_success() {

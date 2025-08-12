@@ -137,7 +137,7 @@ Environment variable overrides: `FCM_REGISTRY_URL`, `FCM_CACHE_DIR`, etc.
 - **Compression**: LZ4 compression reduces disk I/O while maintaining fast decompression
 - **Atomic Operations**: All cache updates are atomic to prevent inconsistent states
 - **Streaming Downloads**: Large package downloads use streaming to minimize memory usage
-- **Incremental Indexing**: Packages are indexed individually during installation
+- **Sequential Processing**: Package installation and indexing is done sequentially to prevent deadlocks
 - **Binary Serialization**: Bincode provides faster serialization than JSON for storage
 
 ### Code Conventions
@@ -178,6 +178,7 @@ Environment variable overrides: `FCM_REGISTRY_URL`, `FCM_CACHE_DIR`, etc.
 - **Search not finding resources**: Verify cache rebuild after package installation - BinaryStorage.add_package() should update in-memory cache atomically
 - **Storage corruption**: Use BinaryStorage.integrity_check() to verify file consistency
 - **Performance issues**: Check if in-memory cache is properly loaded from binary storage file
+- **Package installation deadlocks**: System uses sequential processing to prevent deadlocks - parallel workers have been removed
 - **Clippy warnings**: Pay attention to unused variables and dead code flags
 
 ---

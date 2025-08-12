@@ -588,9 +588,8 @@ impl CanonicalManager {
 
             // Check if package already exists in storage
             let packages = self.storage.list_packages().await?;
-            eprintln!("DEBUG: Found {} packages in storage", packages.len());
             for p in &packages {
-                eprintln!("DEBUG:   - {}@{}", p.name, p.version);
+                debug!("- {}@{}", p.name, p.version);
             }
 
             if packages
@@ -598,13 +597,11 @@ impl CanonicalManager {
                 .any(|p| p.name == name && p.version == version)
             {
                 info!("Package already installed in storage: {}", package_key);
-                eprintln!("DEBUG: Package {name}@{version} already installed, skipping download");
                 installed.insert(package_key);
                 return Ok(());
             }
 
             info!("Installing package: {}@{}", name, version);
-            eprintln!("DEBUG: Package {name}@{version} not found locally, downloading...");
 
             let spec = PackageSpec {
                 name: name.to_string(),

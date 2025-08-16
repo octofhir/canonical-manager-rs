@@ -431,7 +431,7 @@ impl CanonicalManager {
         name: &'a str,
         version: &'a str,
         installed: &'a mut std::collections::HashSet<String>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + 'a>> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
         Box::pin(async move {
             let package_key = format!("{name}@{version}");
 
@@ -518,7 +518,7 @@ impl CanonicalManager {
         name: &'a str,
         version: &'a str,
         visited: &'a mut HashSet<String>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<usize>> + 'a>> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<usize>> + Send + 'a>> {
         Box::pin(async move {
             let package_key = format!("{name}@{version}");
 
@@ -576,7 +576,7 @@ impl CanonicalManager {
         name: &'a str,
         version: &'a str,
         installed: &'a mut HashSet<String>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + 'a>> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
         Box::pin(async move {
             let package_key = format!("{name}@{version}");
 
@@ -679,7 +679,7 @@ impl CanonicalManager {
         version: &'a str,
         installed: &'a mut HashSet<String>,
         progress: &'a mut ProgressContext,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + 'a>> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
         Box::pin(async move {
             let package_key = format!("{name}@{version}");
 

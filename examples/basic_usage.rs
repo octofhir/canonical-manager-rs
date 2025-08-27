@@ -17,7 +17,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!("🔧 Loading FCM configuration...");
 
     // Load configuration from fcm.toml or use defaults
-    let config = match FcmConfig::load() {
+    let config = match FcmConfig::load().await {
         Ok(config) => {
             println!("✅ Loaded configuration from fcm.toml");
             config

@@ -8,7 +8,7 @@ use octofhir_canonical_manager::{CanonicalManager, FcmConfig};
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load configuration
-    let config = FcmConfig::load().unwrap_or_else(|_| {
+    let config = FcmConfig::load().await.unwrap_or_else(|_| {
         // Use default configuration if none exists
         FcmConfig::default()
     });

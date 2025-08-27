@@ -663,7 +663,7 @@ impl CanonicalResolver {
         resolution_path: ResolutionPath,
     ) -> Result<ResolvedResource> {
         // Get the full resource content
-        let resource = self.storage.get_resource(&resource_index)?;
+        let resource = self.storage.get_resource(&resource_index).await?;
 
         // Get package info
         let packages = self.storage.list_packages().await?;

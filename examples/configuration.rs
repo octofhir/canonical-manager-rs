@@ -85,7 +85,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Save the configuration
     println!("\n💾 Saving configuration to fcm.toml...");
-    match config.save() {
+    match config.save().await {
         Ok(_) => {
             println!("✅ Configuration saved successfully");
             println!("   File: fcm.toml");
@@ -97,7 +97,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Load configuration back
     println!("\n📖 Loading configuration from file...");
-    match FcmConfig::load() {
+    match FcmConfig::load().await {
         Ok(loaded_config) => {
             println!("✅ Configuration loaded successfully");
             println!("   Registry: {}", loaded_config.registry.url);
@@ -110,7 +110,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Load from a specific file
     println!("\n📁 Loading configuration from specific file...");
-    match FcmConfig::from_file(std::path::Path::new("fcm.toml")) {
+    match FcmConfig::from_file(std::path::Path::new("fcm.toml")).await {
         Ok(file_config) => {
             println!("✅ Configuration loaded from fcm.toml");
             println!(

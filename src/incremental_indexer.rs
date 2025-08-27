@@ -1,6 +1,5 @@
 use crate::change_detection::PackageChangeDetector;
 use crate::error::Result;
-use rayon::prelude::*;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -73,14 +72,9 @@ impl IncrementalIndexer {
             .collect();
 
         if !files_to_process.is_empty() {
-            // Parallel processing with batching
-            let results: Vec<Result<BatchStats>> = files_to_process
-                .par_chunks(self.batch_size)
-                .map(|batch| self.process_batch(batch, package_path))
-                .collect();
-
-            for result in results {
-                let batch_stats = result?;
+            // Sequential processing to avoid blocking runtime
+            for batch in files_to_process.chunks(self.batch_size) {
+                let batch_stats = self.process_batch(batch, package_path).await?;
                 stats.merge(batch_stats);
             }
         }
@@ -92,22 +86,22 @@ impl IncrementalIndexer {
         Ok(stats)
     }
 
-    fn process_batch(&self, files: &[PathBuf], package_path: &Path) -> Result<BatchStats> {
+    async fn process_batch(&self, files: &[PathBuf], package_path: &Path) -> Result<BatchStats> {
         let mut stats = BatchStats::default();
 
-        // Parse files in parallel
-        let resources: Vec<_> = files
-            .par_iter()
-            .filter_map(|path| {
-                let full_path = if path.is_absolute() {
-                    path.clone()
-                } else {
-                    package_path.join(path)
-                };
+        // Parse files sequentially to avoid blocking the runtime with parallel blocking operations
+        let mut resources = Vec::new();
+        for path in files {
+            let full_path = if path.is_absolute() {
+                path.clone()
+            } else {
+                package_path.join(path)
+            };
 
-                self.parse_resource(&full_path).ok()
-            })
-            .collect();
+            if let Ok(resource) = self.parse_resource(&full_path).await {
+                resources.push(resource);
+            }
+        }
 
         // Index parsed resources
         for resource in resources {
@@ -143,8 +137,10 @@ impl IncrementalIndexer {
         Ok(removed_count)
     }
 
-    fn parse_resource(&self, path: &Path) -> Result<FhirResource> {
-        let content = std::fs::read_to_string(path)?;
+    async fn parse_resource(&self, path: &Path) -> Result<FhirResource> {
+        let path_clone = path.to_path_buf();
+        let content =
+            tokio::task::spawn_blocking(move || std::fs::read_to_string(&path_clone)).await??;
         let json: serde_json::Value = serde_json::from_str(&content)?;
 
         // Extract key fields from FHIR resource
@@ -325,8 +321,8 @@ mod tests {
         assert_eq!(stats.removed, 0);
     }
 
-    #[test]
-    fn test_fhir_resource_parsing() {
+    #[tokio::test]
+    async fn test_fhir_resource_parsing() {
         let temp_dir = TempDir::new().unwrap();
         let resource_path = temp_dir.path().join("test.json");
 
@@ -348,7 +344,7 @@ mod tests {
         let change_detector = Arc::new(PackageChangeDetector::new());
         let indexer = IncrementalIndexer::new(index, change_detector, 10);
 
-        let resource = indexer.parse_resource(&resource_path).unwrap();
+        let resource = indexer.parse_resource(&resource_path).await.unwrap();
 
         assert_eq!(resource.resource_type, "StructureDefinition");
         assert_eq!(resource.id, "test-profile");

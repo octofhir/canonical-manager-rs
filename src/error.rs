@@ -71,6 +71,9 @@ pub enum FcmError {
     #[error("TOML serialize error: {0}")]
     TomlSer(#[from] toml::ser::Error),
 
+    #[error("Task join error: {0}")]
+    TaskJoin(#[from] tokio::task::JoinError),
+
     #[error("Generic error: {0}")]
     Generic(String),
 }
@@ -92,6 +95,7 @@ impl Clone for FcmError {
             Self::Json(e) => Self::Generic(format!("JSON error: {e}")),
             Self::TomlDe(e) => Self::Generic(format!("TOML deserialize error: {e}")),
             Self::TomlSer(e) => Self::Generic(format!("TOML serialize error: {e}")),
+            Self::TaskJoin(e) => Self::Generic(format!("Task join error: {e}")),
         }
     }
 }

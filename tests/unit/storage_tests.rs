@@ -154,7 +154,7 @@ async fn test_get_resource_content() {
         .unwrap();
 
     // Get resource content
-    let resource = storage.get_resource(&resource_index).unwrap();
+    let resource = storage.get_resource(&resource_index).await.unwrap();
 
     assert_eq!(resource.resource_type, "StructureDefinition");
     assert_eq!(resource.id, "test-patient");

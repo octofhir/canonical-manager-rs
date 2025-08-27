@@ -16,7 +16,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     println!("🔧 Setting up FHIR Canonical Manager...");
 
-    let config = FcmConfig::load().unwrap_or_else(|_| {
+    let config = FcmConfig::load().await.unwrap_or_else(|_| {
         println!("Using default configuration");
         FcmConfig::default()
     });

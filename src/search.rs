@@ -663,7 +663,7 @@ impl SearchEngine {
     }
 
     /// Add a single resource to the text index (for incremental updates)
-    pub fn add_resource_to_index(&self, canonical_url: &str, resource_index: &ResourceIndex) {
+    pub async fn add_resource_to_index(&self, canonical_url: &str, resource_index: &ResourceIndex) {
         // Index the canonical URL itself
         self.text_index.add_resource(canonical_url, canonical_url);
 
@@ -694,7 +694,7 @@ impl SearchEngine {
         }
 
         // Try to index actual FHIR resource content
-        if let Ok(fhir_resource) = self.storage.get_resource(resource_index) {
+        if let Ok(fhir_resource) = self.storage.get_resource(resource_index).await {
             // Index the resource content as JSON string for full-text search
             let content_str = serde_json::to_string(&fhir_resource.content).unwrap_or_default();
             self.text_index.add_resource(canonical_url, &content_str);
@@ -905,7 +905,7 @@ impl SearchEngine {
             let highlights = self.generate_highlights(&resource_index, query).await?;
 
             // Load the full resource content
-            let resource = self.storage.get_resource(&resource_index)?;
+            let resource = self.storage.get_resource(&resource_index).await?;
 
             matches.push(ResourceMatch {
                 resource,

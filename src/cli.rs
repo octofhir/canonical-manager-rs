@@ -336,12 +336,12 @@ max_cache_size = "1GB"
 
 /// Handle install command
 async fn handle_install(cli: &Cli, cmd: &InstallCommand) -> crate::Result<()> {
-    let config = load_config(cli)?;
+    let config = load_config(cli).await?;
     let manager = CanonicalManager::new(config).await?;
 
     if cmd.all {
         Progress::start("Installing all packages from configuration");
-        let config = load_config(cli)?;
+        let config = load_config(cli).await?;
 
         let mut current = 0;
         let total = config.packages.len();
@@ -417,7 +417,7 @@ async fn handle_install(cli: &Cli, cmd: &InstallCommand) -> crate::Result<()> {
 
 /// Handle remove command
 async fn handle_remove(cli: &Cli, cmd: &RemoveCommand) -> crate::Result<()> {
-    let config = load_config(cli)?;
+    let config = load_config(cli).await?;
     let manager = CanonicalManager::new(config).await?;
 
     Progress::start(&format!("Removing package: {}", cmd.package.cyan()));
@@ -436,7 +436,7 @@ async fn handle_remove(cli: &Cli, cmd: &RemoveCommand) -> crate::Result<()> {
 
 /// Handle list command
 async fn handle_list(cli: &Cli) -> crate::Result<()> {
-    let config = load_config(cli)?;
+    let config = load_config(cli).await?;
     let manager = CanonicalManager::new(config).await?;
 
     Output::section("Installed packages:");
@@ -457,7 +457,7 @@ async fn handle_list(cli: &Cli) -> crate::Result<()> {
 
 /// Handle search command
 async fn handle_search(cli: &Cli, cmd: &SearchCommand) -> crate::Result<()> {
-    let config = load_config(cli)?;
+    let config = load_config(cli).await?;
     let manager = CanonicalManager::new(config).await?;
 
     Progress::start("Searching for resources");
@@ -494,7 +494,7 @@ async fn handle_search(cli: &Cli, cmd: &SearchCommand) -> crate::Result<()> {
 
 /// Handle search params command
 async fn handle_search_params(cli: &Cli, cmd: &SearchParamsCommand) -> crate::Result<()> {
-    let config = load_config(cli)?;
+    let config = load_config(cli).await?;
     let manager = CanonicalManager::new(config).await?;
 
     Progress::start(&format!(
@@ -517,7 +517,7 @@ async fn handle_search_params(cli: &Cli, cmd: &SearchParamsCommand) -> crate::Re
 
 /// Handle resolve command
 async fn handle_resolve(cli: &Cli, cmd: &ResolveCommand) -> crate::Result<()> {
-    let config = load_config(cli)?;
+    let config = load_config(cli).await?;
     let manager = CanonicalManager::new(config).await?;
 
     if let Some(batch_file) = &cmd.batch {
@@ -558,7 +558,7 @@ async fn handle_resolve(cli: &Cli, cmd: &ResolveCommand) -> crate::Result<()> {
 
 /// Handle update command
 async fn handle_update(cli: &Cli) -> crate::Result<()> {
-    let config = load_config(cli)?;
+    let config = load_config(cli).await?;
 
     Progress::start("Updating package indexes");
     Progress::step("Rebuilding search indexes");
@@ -579,7 +579,7 @@ async fn handle_config(cli: &Cli, cmd: &ConfigCommand) -> crate::Result<()> {
         ConfigAction::Show => {
             Output::section("Current configuration:");
 
-            let config = load_config(cli)?;
+            let config = load_config(cli).await?;
             let config_toml = toml::to_string_pretty(&config)?;
             Output::result(&config_toml.bright_white().to_string());
         }
@@ -611,7 +611,7 @@ async fn handle_config_set(cli: &Cli, key: &str, value: &str) -> crate::Result<(
     }
 
     // Load current config
-    let mut config = load_config(cli)?;
+    let mut config = load_config(cli).await?;
 
     // Parse and set the configuration value
     match key {
@@ -680,11 +680,11 @@ async fn handle_config_reset(cli: &Cli) -> crate::Result<()> {
 }
 
 /// Load configuration from file or default location
-fn load_config(cli: &Cli) -> crate::Result<crate::FcmConfig> {
+async fn load_config(cli: &Cli) -> crate::Result<crate::FcmConfig> {
     if let Some(config_path) = &cli.config {
-        crate::FcmConfig::from_file(config_path)
+        crate::FcmConfig::from_file(config_path).await
     } else {
-        crate::FcmConfig::load()
+        crate::FcmConfig::load().await
     }
 }
 

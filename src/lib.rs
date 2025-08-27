@@ -10,7 +10,7 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     let config = FcmConfig::load()?;
+//!     let config = FcmConfig::load().await?;
 //!     let manager = CanonicalManager::new(config).await?;
 //!
 //!     // Install a package

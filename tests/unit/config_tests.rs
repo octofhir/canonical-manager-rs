@@ -162,8 +162,8 @@ fn test_package_spec_validation() {
 }
 
 /// Test configuration file loading and parsing
-#[test]
-fn test_config_file_loading() {
+#[tokio::test]
+async fn test_config_file_loading() {
     let temp_dir = TempDir::new().unwrap();
     let config_path = temp_dir.path().join("fcm.toml");
 
@@ -187,7 +187,7 @@ max_cache_size = "500MB"
 
     std::fs::write(&config_path, config_content).unwrap();
 
-    let config = FcmConfig::from_file(&config_path).unwrap();
+    let config = FcmConfig::from_file(&config_path).await.unwrap();
 
     assert_eq!(config.registry.url, "https://test-registry.com/");
     assert_eq!(config.registry.timeout, 60);
@@ -199,8 +199,8 @@ max_cache_size = "500MB"
 }
 
 /// Test configuration file loading with invalid content
-#[test]
-fn test_invalid_config_file_loading() {
+#[tokio::test]
+async fn test_invalid_config_file_loading() {
     let temp_dir = TempDir::new().unwrap();
     let config_path = temp_dir.path().join("invalid.toml");
 
@@ -216,7 +216,7 @@ version = ""
 
     std::fs::write(&config_path, invalid_config).unwrap();
 
-    let result = FcmConfig::from_file(&config_path);
+    let result = FcmConfig::from_file(&config_path).await;
     assert!(result.is_err(), "Invalid config should fail to load");
 }
 

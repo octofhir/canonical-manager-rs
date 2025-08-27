@@ -18,7 +18,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!("=============================\n");
 
     // Load or create configuration
-    let mut config = match FcmConfig::load() {
+    let mut config = match FcmConfig::load().await {
         Ok(config) => {
             println!("✅ Loaded existing configuration");
             config
@@ -35,7 +35,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     config.add_package("hl7.fhir.r4.core", "4.0.1", Some(2));
 
     // Save configuration
-    match config.save() {
+    match config.save().await {
         Ok(_) => println!("✅ Configuration saved to fcm.toml"),
         Err(e) => println!("⚠️  Could not save configuration: {e}"),
     }

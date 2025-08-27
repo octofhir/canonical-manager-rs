@@ -24,6 +24,7 @@ impl CliError for FcmError {
             FcmError::Json(e) => format!("{} JSON Error: {}", "📝".red(), e),
             FcmError::TomlDe(e) => format!("{} TOML Parse Error: {}", "📝".red(), e),
             FcmError::TomlSer(e) => format!("{} TOML Write Error: {}", "📝".red(), e),
+            FcmError::TaskJoin(e) => format!("{} Task Error: {}", "⚠️".red(), e),
             FcmError::Generic(msg) => format!("{} Generic Error: {}", "⚠️".red(), msg),
         }
     }
@@ -299,6 +300,7 @@ fn log_error_details(error: &FcmError) {
         FcmError::Json(_) => "json",
         FcmError::TomlDe(_) => "toml_deserialize",
         FcmError::TomlSer(_) => "toml_serialize",
+        FcmError::TaskJoin(_) => "task_join",
         FcmError::Generic(_) => "generic",
     };
 

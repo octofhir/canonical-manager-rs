@@ -14,9 +14,13 @@ use std::path::{Path, PathBuf};
 /// ```rust,no_run
 /// use octofhir_canonical_manager::config::FcmConfig;
 ///
+/// # #[tokio::main]
+/// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// // Load configuration from default location
-/// let config = FcmConfig::load().unwrap();
+/// let config = FcmConfig::load().await.unwrap();
 /// println!("Registry URL: {}", config.registry.url);
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FcmConfig {
@@ -244,14 +248,17 @@ impl FcmConfig {
     /// ```rust,no_run
     /// use octofhir_canonical_manager::config::FcmConfig;
     ///
-    /// let config = FcmConfig::load()?;
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let config = FcmConfig::load().await?;
     /// println!("Loaded {} packages", config.packages.len());
-    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// # Ok(())
+    /// # }
     /// ```
-    pub fn load() -> Result<Self> {
+    pub async fn load() -> Result<Self> {
         let config_path = Self::default_config_path();
         if config_path.exists() {
-            let mut config = Self::from_file(&config_path)?;
+            let mut config = Self::from_file(&config_path).await?;
             config.apply_env_overrides();
             Ok(config)
         } else {
@@ -281,13 +288,19 @@ impl FcmConfig {
     /// use octofhir_canonical_manager::config::FcmConfig;
     /// use std::path::Path;
     ///
-    /// let config = FcmConfig::from_file(Path::new("custom-config.toml"))?;
-    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let config = FcmConfig::from_file(Path::new("custom-config.toml")).await?;
+    /// # Ok(())
+    /// # }
     /// ```
-    pub fn from_file(path: &std::path::Path) -> Result<Self> {
-        let content = std::fs::read_to_string(path).map_err(|_| ConfigError::InvalidFile {
-            path: path.to_path_buf(),
-        })?;
+    pub async fn from_file(path: &std::path::Path) -> Result<Self> {
+        let path_clone = path.to_path_buf();
+        let content = tokio::task::spawn_blocking(move || {
+            std::fs::read_to_string(&path_clone)
+                .map_err(|_| ConfigError::InvalidFile { path: path_clone })
+        })
+        .await??;
 
         let config: Self = toml::from_str(&content)?;
         config.validate()?;
@@ -329,10 +342,13 @@ impl FcmConfig {
     /// ```rust,no_run
     /// use octofhir_canonical_manager::config::FcmConfig;
     ///
-    /// let config = FcmConfig::load()?;
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let config = FcmConfig::load().await?;
     /// config.validate()?;
     /// println!("Configuration is valid");
-    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn validate(&self) -> Result<()> {
         // Use the Validate trait implementation
@@ -395,11 +411,14 @@ impl FcmConfig {
     /// ```rust,no_run
     /// use octofhir_canonical_manager::config::FcmConfig;
     ///
-    /// FcmConfig::create_default_config()?;
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// FcmConfig::create_default_config().await?;
     /// println!("Default configuration created");
-    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// # Ok(())
+    /// # }
     /// ```
-    pub fn create_default_config() -> Result<()> {
+    pub async fn create_default_config() -> Result<()> {
         let config_path = Self::default_config_path();
         if config_path.exists() {
             return Err(ConfigError::ValidationFailed {
@@ -411,7 +430,7 @@ impl FcmConfig {
         let default_config = Self::default();
         let toml_content = toml::to_string_pretty(&default_config)?;
 
-        std::fs::write(&config_path, toml_content)?;
+        tokio::task::spawn_blocking(move || std::fs::write(&config_path, toml_content)).await??;
         Ok(())
     }
 
@@ -427,15 +446,18 @@ impl FcmConfig {
     /// ```rust,no_run
     /// use octofhir_canonical_manager::config::FcmConfig;
     ///
-    /// let mut config = FcmConfig::load()?;
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut config = FcmConfig::load().await?;
     /// config.add_package("hl7.fhir.us.core", "6.1.0", Some(1));
-    /// config.save()?;
-    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// config.save().await?;
+    /// # Ok(())
+    /// # }
     /// ```
-    pub fn save(&self) -> Result<()> {
+    pub async fn save(&self) -> Result<()> {
         let config_path = Self::default_config_path();
         let toml_content = toml::to_string_pretty(self)?;
-        std::fs::write(&config_path, toml_content)?;
+        tokio::task::spawn_blocking(move || std::fs::write(&config_path, toml_content)).await??;
         Ok(())
     }
 
@@ -464,10 +486,13 @@ impl FcmConfig {
     /// ```rust,no_run
     /// use octofhir_canonical_manager::config::FcmConfig;
     ///
-    /// let config = FcmConfig::load()?;
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let config = FcmConfig::load().await?;
     /// let storage = config.get_expanded_storage_config();
     /// println!("Cache dir: {}", storage.cache_dir.display());
-    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn get_expanded_storage_config(&self) -> StorageConfig {
         StorageConfig {
@@ -579,11 +604,14 @@ impl FcmConfig {
     /// ```rust,no_run
     /// use octofhir_canonical_manager::config::FcmConfig;
     ///
-    /// let config = FcmConfig::load()?;
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let config = FcmConfig::load().await?;
     /// if let Some(package) = config.get_package("hl7.fhir.us.core") {
     ///     println!("Found package version: {}", package.version);
     /// }
-    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn get_package(&self, name: &str) -> Option<&PackageSpec> {
         self.packages.iter().find(|p| p.name == name)
@@ -600,10 +628,13 @@ impl FcmConfig {
     /// ```rust,no_run
     /// use octofhir_canonical_manager::config::FcmConfig;
     ///
-    /// let config = FcmConfig::load()?;
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let config = FcmConfig::load().await?;
     /// let names = config.list_package_names();
     /// println!("Configured packages: {:?}", names);
-    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn list_package_names(&self) -> Vec<String> {
         self.packages.iter().map(|p| p.name.clone()).collect()
@@ -1078,8 +1109,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_config_file_operations() {
+    #[tokio::test]
+    async fn test_config_file_operations() {
         let temp_dir = TempDir::new().unwrap();
         let config_path = temp_dir.path().join("fcm.toml");
 
@@ -1092,7 +1123,7 @@ mod tests {
         fs::write(&config_path, toml_content).unwrap();
 
         // Load from file
-        let loaded_config = FcmConfig::from_file(&config_path).unwrap();
+        let loaded_config = FcmConfig::from_file(&config_path).await.unwrap();
         assert_eq!(loaded_config.packages.len(), 1);
         assert_eq!(loaded_config.packages[0].name, "test.package");
     }

@@ -337,17 +337,26 @@ impl BinaryStorage {
     /// # Returns
     ///
     /// The loaded FHIR resource with its content.
-    pub fn get_resource(&self, resource_index: &ResourceIndex) -> Result<FhirResource> {
-        let file_path = &resource_index.file_path;
+    pub async fn get_resource(&self, resource_index: &ResourceIndex) -> Result<FhirResource> {
+        let file_path = resource_index.file_path.clone();
 
-        // Read file synchronously (this is typically fast for individual files)
-        let content = std::fs::read_to_string(file_path).map_err(|e| StorageError::IoError {
-            message: format!("Failed to read resource file {file_path:?}: {e}"),
-        })?;
+        // Use spawn_blocking to avoid blocking the async runtime
+        let content = tokio::task::spawn_blocking(move || {
+            std::fs::read_to_string(&file_path).map_err(|e| StorageError::IoError {
+                message: format!("Failed to read resource file {file_path:?}: {e}"),
+            })
+        })
+        .await
+        .map_err(|e| StorageError::IoError {
+            message: format!("Task join error: {e}"),
+        })??;
 
         let json_content: serde_json::Value =
             serde_json::from_str(&content).map_err(|e| StorageError::SerializationError {
-                message: format!("Failed to parse JSON from {file_path:?}: {e}"),
+                message: format!(
+                    "Failed to parse JSON from {}: {e}",
+                    resource_index.file_path.display()
+                ),
             })?;
 
         Ok(FhirResource {
@@ -356,7 +365,7 @@ impl BinaryStorage {
             url: Some(resource_index.canonical_url.clone()),
             version: resource_index.metadata.version.clone(),
             content: json_content,
-            file_path: file_path.clone(),
+            file_path: resource_index.file_path.clone(),
         })
     }
 
@@ -585,22 +594,26 @@ impl BinaryStorage {
 
         // Check each resource file
         for (canonical_url, resource_index) in &cache.resources {
-            let file_path = &resource_index.file_path;
+            let file_path = resource_index.file_path.clone();
 
             if !file_path.exists() {
                 report.missing_files.push(canonical_url.clone());
                 continue;
             }
 
-            // Try to read and parse the file
-            match std::fs::read_to_string(file_path) {
-                Ok(content) => {
+            // Try to read and parse the file using spawn_blocking
+            let canonical_url_clone = canonical_url.clone();
+            let read_result =
+                tokio::task::spawn_blocking(move || std::fs::read_to_string(&file_path)).await;
+
+            match read_result {
+                Ok(Ok(content)) => {
                     if serde_json::from_str::<serde_json::Value>(&content).is_err() {
-                        report.corrupted_files.push(canonical_url.clone());
+                        report.corrupted_files.push(canonical_url_clone);
                     }
                 }
-                Err(_) => {
-                    report.missing_files.push(canonical_url.clone());
+                Ok(Err(_)) | Err(_) => {
+                    report.missing_files.push(canonical_url_clone);
                 }
             }
 

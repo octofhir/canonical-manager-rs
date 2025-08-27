@@ -2,7 +2,6 @@ use crate::error::Result;
 use blake3;
 use dashmap::DashMap;
 use lru::LruCache;
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -85,7 +84,7 @@ impl PackageChangeDetector {
     }
 
     pub async fn detect_changes(&self, package_path: &Path) -> Result<ChangeSet> {
-        let package_id = extract_package_id(package_path)?;
+        let package_id = extract_package_id(package_path).await?;
         let new_checksum = self.compute_package_checksum(package_path).await?;
 
         if let Some(old_checksum) = self.checksum_store.get(&package_id) {
@@ -119,16 +118,18 @@ impl PackageChangeDetector {
             .filter(|e| e.path().extension() == Some(std::ffi::OsStr::new("json")))
             .collect();
 
-        let checksums: Result<Vec<_>> = entries
-            .par_iter()
-            .map(|entry| {
-                let content = std::fs::read(entry.path())?;
+        // Process files sequentially to avoid blocking the async runtime with parallel blocking ops
+        let mut checksums = Vec::new();
+        for entry in entries {
+            let path = entry.path().to_owned();
+            let (path_clone, hash) = tokio::task::spawn_blocking(move || {
+                let content = std::fs::read(&path)?;
                 let file_hash = blake3::hash(&content);
-                Ok((entry.path().to_owned(), file_hash))
+                Ok::<_, crate::error::FcmError>((path, file_hash))
             })
-            .collect();
-
-        let checksums = checksums?;
+            .await??;
+            checksums.push((path_clone, hash));
+        }
 
         for (path, hash) in checksums {
             let relative_path = path
@@ -139,8 +140,8 @@ impl PackageChangeDetector {
         }
 
         Ok(PackageChecksum {
-            package_id: extract_package_id(package_path)?,
-            version: extract_version(package_path)?,
+            package_id: extract_package_id(package_path).await?,
+            version: extract_version(package_path).await?,
             content_hash: hasher.finalize().into(),
             structure_hash: self.compute_structure_hash(&file_checksums),
             file_checksums,
@@ -221,11 +222,14 @@ impl PackageChangeDetector {
     }
 }
 
-fn extract_package_id(package_path: &Path) -> Result<String> {
+async fn extract_package_id(package_path: &Path) -> Result<String> {
     // Try to read package.json for package ID
     let package_json_path = package_path.join("package.json");
     if package_json_path.exists() {
-        let content = std::fs::read_to_string(&package_json_path)?;
+        let package_json_path_clone = package_json_path.clone();
+        let content =
+            tokio::task::spawn_blocking(move || std::fs::read_to_string(&package_json_path_clone))
+                .await??;
         let json: serde_json::Value = serde_json::from_str(&content)?;
         if let Some(name) = json.get("name").and_then(|n| n.as_str()) {
             return Ok(name.to_string());
@@ -240,11 +244,14 @@ fn extract_package_id(package_path: &Path) -> Result<String> {
         .ok_or_else(|| crate::error::FcmError::Generic("Unable to extract package ID".to_string()))
 }
 
-fn extract_version(package_path: &Path) -> Result<String> {
+async fn extract_version(package_path: &Path) -> Result<String> {
     // Try to read package.json for version
     let package_json_path = package_path.join("package.json");
     if package_json_path.exists() {
-        let content = std::fs::read_to_string(&package_json_path)?;
+        let package_json_path_clone = package_json_path.clone();
+        let content =
+            tokio::task::spawn_blocking(move || std::fs::read_to_string(&package_json_path_clone))
+                .await??;
         let json: serde_json::Value = serde_json::from_str(&content)?;
         if let Some(version) = json.get("version").and_then(|v| v.as_str()) {
             return Ok(version.to_string());

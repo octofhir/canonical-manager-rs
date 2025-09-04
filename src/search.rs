@@ -1,12 +1,13 @@
 //! Search engine for FHIR resources
 
 use crate::binary_storage::{BinaryStorage, ResourceIndex};
+use crate::concurrency::ConcurrentMap;
 use crate::error::Result;
 use crate::package::FhirResource;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info};
 
@@ -51,8 +52,11 @@ pub struct SearchEngine {
     text_index: TextIndex,
     filters: FilterEngine,
     // Simple LRU-style cache for search results
-    search_cache: RwLock<HashMap<String, (SearchResult, Instant)>>,
+    search_cache: ConcurrentMap<String, (SearchResult, Instant)>,
     cache_ttl: Duration,
+    // Lazily build the text index only when needed
+    index_built: std::sync::atomic::AtomicBool,
+    index_build_lock: std::sync::Mutex<()>,
 }
 
 /// Inverted text index for fast full-text search.
@@ -79,7 +83,7 @@ pub struct SearchEngine {
 pub struct TextIndex {
     // Memory-optimized inverted index: term -> set of resource URLs
     // Using HashSet for deduplication and faster intersection operations
-    index: RwLock<HashMap<String, HashSet<String>>>,
+    index: ConcurrentMap<String, HashSet<String>>,
     // Stop words to filter out during tokenization
     stop_words: HashSet<String>,
 }
@@ -288,9 +292,13 @@ impl Default for TextIndex {
 
 impl Clone for TextIndex {
     fn clone(&self) -> Self {
-        let index_guard = self.index.read().unwrap();
+        let cloned = self.index.iter_cloned();
+        let new_map = ConcurrentMap::new();
+        for (k, v) in cloned {
+            new_map.insert(k, v);
+        }
         Self {
-            index: RwLock::new(index_guard.clone()),
+            index: new_map,
             stop_words: self.stop_words.clone(),
         }
     }
@@ -322,7 +330,7 @@ impl TextIndex {
         .collect();
 
         Self {
-            index: RwLock::new(HashMap::new()),
+            index: ConcurrentMap::new(),
             stop_words,
         }
     }
@@ -355,12 +363,10 @@ impl TextIndex {
             return;
         }
 
-        let mut index = self.index.write().unwrap();
         for term in terms {
-            index
-                .entry(term)
-                .or_default()
-                .insert(canonical_url.to_string());
+            let mut set = self.index.get_cloned(&term).unwrap_or_default();
+            set.insert(canonical_url.to_string());
+            self.index.insert(term, set);
         }
     }
 
@@ -395,12 +401,10 @@ impl TextIndex {
             return Vec::new();
         }
 
-        let index = self.index.read().unwrap();
-
         // Find the smallest set first for efficient intersection
-        let mut term_sets: Vec<&HashSet<String>> = Vec::new();
+        let mut term_sets: Vec<HashSet<String>> = Vec::new();
         for term in &terms {
-            if let Some(urls) = index.get(term) {
+            if let Some(urls) = self.index.get_cloned(term) {
                 term_sets.push(urls);
             } else {
                 // If any term is not found, no results
@@ -416,8 +420,8 @@ impl TextIndex {
         term_sets.sort_by_key(|set| set.len());
 
         // Start with the smallest set and intersect with others
-        let mut result: HashSet<String> = term_sets[0].clone();
-        for set in term_sets.iter().skip(1) {
+        let mut result: HashSet<String> = term_sets.remove(0);
+        for set in term_sets.iter() {
             result = result.intersection(set).cloned().collect();
             if result.is_empty() {
                 break; // Early termination if no intersection
@@ -452,22 +456,29 @@ impl TextIndex {
 
     /// Add a method to remove a resource from the index (for incremental updates)
     pub fn remove_resource(&self, canonical_url: &str) {
-        let mut index = self.index.write().unwrap();
-
         // Remove the URL from all term sets
-        for (_, url_set) in index.iter_mut() {
-            url_set.remove(canonical_url);
+        let keys = self.index.keys();
+        for term in keys.iter() {
+            if let Some(mut set) = self.index.get_cloned(term) {
+                set.remove(canonical_url);
+                if set.is_empty() {
+                    self.index.remove(term);
+                } else {
+                    self.index.insert(term.clone(), set);
+                }
+            }
         }
-
-        // Remove empty term entries to save memory
-        index.retain(|_, url_set| !url_set.is_empty());
     }
 
     /// Get index statistics for monitoring
     pub fn get_stats(&self) -> (usize, usize) {
-        let index = self.index.read().unwrap();
-        let term_count = index.len();
-        let total_entries: usize = index.values().map(|set| set.len()).sum();
+        let term_count = self.index.len();
+        let total_entries: usize = self
+            .index
+            .iter_cloned()
+            .into_iter()
+            .map(|(_, v)| v.len())
+            .sum();
         (term_count, total_entries)
     }
 }
@@ -529,9 +540,27 @@ impl FilterEngine {
     ) -> Vec<ResourceIndex> {
         let mut filtered = resources;
 
-        // Filter by resource types
+        // Filter by resource types (with StructureDefinition type heuristic)
         if !query.resource_types.is_empty() {
-            filtered.retain(|r| query.resource_types.contains(&r.resource_type));
+            let types = &query.resource_types;
+            filtered.retain(|r| {
+                if types.contains(&r.resource_type) {
+                    return true;
+                }
+                // Heuristic: allow matching StructureDefinition whose canonical URL basename
+                // equals the requested type (e.g., .../StructureDefinition/Patient -> "Patient").
+                if r.resource_type == "StructureDefinition" {
+                    let last = r
+                        .canonical_url
+                        .trim_end_matches('/')
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or("")
+                        .to_string();
+                    return types.iter().any(|t| t == &last);
+                }
+                false
+            });
         }
 
         // Filter by packages
@@ -602,22 +631,19 @@ impl SearchEngine {
     /// # }
     /// ```
     pub fn new(storage: Arc<BinaryStorage>) -> Self {
-        let mut engine = Self {
+        Self {
             storage,
             text_index: TextIndex::new(),
             filters: FilterEngine::new(),
-            search_cache: RwLock::new(HashMap::new()),
+            search_cache: ConcurrentMap::new(),
             cache_ttl: Duration::from_secs(300), // 5 minutes cache TTL
-        };
-
-        // Build only metadata index (fast) - content will be indexed on-demand
-        engine.build_metadata_index();
-
-        engine
+            index_built: std::sync::atomic::AtomicBool::new(false),
+            index_build_lock: std::sync::Mutex::new(()),
+        }
     }
 
     /// Build metadata index from current storage (fast - no file I/O)
-    fn build_metadata_index(&mut self) {
+    fn build_metadata_index(&self) {
         debug!("Building text index from storage");
         let cache_entries = self.storage.get_cache_entries();
 
@@ -750,10 +776,9 @@ impl SearchEngine {
 
     /// Get cached search result if available and not expired
     fn get_cached_result(&self, cache_key: &str) -> Option<SearchResult> {
-        let cache = self.search_cache.read().unwrap();
-        if let Some((result, timestamp)) = cache.get(cache_key) {
+        if let Some((result, timestamp)) = self.search_cache.get_cloned(&cache_key.to_string()) {
             if timestamp.elapsed() < self.cache_ttl {
-                return Some(result.clone());
+                return Some(result);
             }
         }
         None
@@ -761,27 +786,25 @@ impl SearchEngine {
 
     /// Cache a search result
     fn cache_result(&self, cache_key: &str, result: &SearchResult) {
-        let mut cache = self.search_cache.write().unwrap();
-
         // Simple cache size management - remove oldest entries if cache gets too large
-        if cache.len() > 1000 {
-            let oldest_key = cache
-                .iter()
-                .min_by_key(|(_, (_, timestamp))| timestamp)
-                .map(|(key, _)| key.clone());
-
-            if let Some(key) = oldest_key {
-                cache.remove(&key);
+        if self.search_cache.len() > 1000 {
+            let oldest_key = self
+                .search_cache
+                .iter_cloned()
+                .into_iter()
+                .min_by_key(|(_, (_, ts))| *ts)
+                .map(|(k, _)| k);
+            if let Some(k) = oldest_key {
+                self.search_cache.remove(&k);
             }
         }
-
-        cache.insert(cache_key.to_string(), (result.clone(), Instant::now()));
+        self.search_cache
+            .insert(cache_key.to_string(), (result.clone(), Instant::now()));
     }
 
     /// Clear the search cache
     pub fn clear_cache(&self) {
-        let mut cache = self.search_cache.write().unwrap();
-        cache.clear();
+        self.search_cache.clear();
         debug!("Search cache cleared");
     }
 
@@ -816,6 +839,7 @@ impl SearchEngine {
     /// # Ok(())
     /// # }
     /// ```
+    #[tracing::instrument(name = "search.execute", skip(self, query))]
     pub async fn search(&self, query: &SearchQuery) -> Result<SearchResult> {
         let start_time = Instant::now();
         info!("Executing search query: {:?}", query);
@@ -835,13 +859,9 @@ impl SearchEngine {
         // Apply filters
         candidate_resources = self.filters.apply_filters(candidate_resources, query);
 
-        // Calculate scores and sort
+        // Calculate scores and sort (no file I/O here)
         let mut scored_resources = self.score_resources(candidate_resources, query).await?;
-        scored_resources.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        scored_resources.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         let total_count = scored_resources.len();
 
@@ -849,11 +869,17 @@ impl SearchEngine {
         let offset = query.offset.unwrap_or(0);
         let limit = query.limit.unwrap_or(50).min(1000); // Max 1000 results
 
-        let paginated_resources = scored_resources
-            .into_iter()
-            .skip(offset)
-            .take(limit)
-            .collect();
+        // Load only the resources for the current page
+        let mut paginated_resources = Vec::new();
+        for (index, score, highlights) in scored_resources.into_iter().skip(offset).take(limit) {
+            let resource = self.storage.get_resource(&index).await?;
+            paginated_resources.push(ResourceMatch {
+                resource,
+                index,
+                score,
+                highlights,
+            });
+        }
 
         let query_time = start_time.elapsed();
         debug!(
@@ -876,6 +902,8 @@ impl SearchEngine {
     /// Get candidate resources based on query
     async fn get_candidate_resources(&self, query: &SearchQuery) -> Result<Vec<ResourceIndex>> {
         if let Some(text) = &query.text {
+            // Ensure the text index is ready only when text search is requested
+            self.ensure_text_index_built();
             // Text search - use text index
             let matching_urls = self.text_index.search(text);
             let cache_entries = self.storage.get_cache_entries();
@@ -886,9 +914,28 @@ impl SearchEngine {
                 .map(|(_, resource_index)| resource_index)
                 .collect())
         } else {
-            // No text search - return all resources
+            // No text search - prefilter by cheap criteria to reduce work
             let cache_entries = self.storage.get_cache_entries();
-            Ok(cache_entries.into_values().collect())
+            if !query.resource_types.is_empty() {
+                Ok(cache_entries
+                    .into_values()
+                    .filter(|ri| query.resource_types.contains(&ri.resource_type))
+                    .collect())
+            } else {
+                Ok(cache_entries.into_values().collect())
+            }
+        }
+    }
+
+    fn ensure_text_index_built(&self) {
+        if self.index_built.load(std::sync::atomic::Ordering::Acquire) {
+            return;
+        }
+        let _guard = self.index_build_lock.lock().unwrap();
+        if !self.index_built.load(std::sync::atomic::Ordering::Acquire) {
+            self.build_metadata_index();
+            self.index_built
+                .store(true, std::sync::atomic::Ordering::Release);
         }
     }
 
@@ -897,25 +944,14 @@ impl SearchEngine {
         &self,
         resources: Vec<ResourceIndex>,
         query: &SearchQuery,
-    ) -> Result<Vec<ResourceMatch>> {
-        let mut matches = Vec::new();
-
+    ) -> Result<Vec<(ResourceIndex, f64, Vec<SearchHighlight>)>> {
+        let mut scored = Vec::with_capacity(resources.len());
         for resource_index in resources {
             let score = self.calculate_score(&resource_index, query);
             let highlights = self.generate_highlights(&resource_index, query).await?;
-
-            // Load the full resource content
-            let resource = self.storage.get_resource(&resource_index).await?;
-
-            matches.push(ResourceMatch {
-                resource,
-                index: resource_index,
-                score,
-                highlights,
-            });
+            scored.push((resource_index, score, highlights));
         }
-
-        Ok(matches)
+        Ok(scored)
     }
 
     /// Calculate relevance score for a resource
@@ -1108,11 +1144,9 @@ impl SearchEngine {
         let mut index_terms: Vec<String> = self
             .text_index
             .index
-            .read()
-            .unwrap()
             .keys()
+            .into_iter()
             .filter(|term| term.starts_with(&prefix_lower))
-            .cloned()
             .collect();
         index_terms.sort();
         suggestions.extend(index_terms.into_iter().take(5));

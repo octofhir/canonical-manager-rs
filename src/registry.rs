@@ -2,9 +2,12 @@
 
 use crate::config::{PackageSpec, RegistryConfig};
 use crate::error::{RegistryError, Result};
+use base64::Engine;
+use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize};
+use sha2::digest::Digest;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio::fs;
@@ -83,6 +86,26 @@ pub struct RegistryClient {
     config: RegistryConfig,
     cache_dir: PathBuf,
     fallback_registries: Vec<String>,
+    // In-memory metadata cache keyed by metadata URL
+    metadata_cache: std::sync::Mutex<std::collections::HashMap<String, CachedResponse>>,
+    // Persisted validators (etag/last-modified) across runs
+    persisted_validators: std::sync::Mutex<std::collections::HashMap<String, PersistedValidators>>,
+    validators_path: PathBuf,
+    last_save: std::sync::Mutex<std::time::Instant>,
+}
+
+#[derive(Clone, Debug)]
+struct CachedResponse {
+    etag: Option<String>,
+    last_modified: Option<String>,
+    npm: NpmPackageResponse,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct PersistedValidators {
+    etag: Option<String>,
+    last_modified: Option<String>,
+    updated_at: DateTime<Utc>,
 }
 
 /// Information about a package available in a registry.
@@ -111,14 +134,14 @@ pub struct PackageInfo {
 }
 
 /// Registry catalog response
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[allow(dead_code)]
 struct CatalogResponse {
     packages: Vec<CatalogPackage>,
 }
 
 /// Package in catalog
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[allow(dead_code)]
 struct CatalogPackage {
     name: String,
@@ -127,7 +150,7 @@ struct CatalogPackage {
 }
 
 /// NPM-style package metadata response
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[allow(dead_code)]
 struct NpmPackageResponse {
     name: String,
@@ -144,7 +167,7 @@ struct NpmPackageResponse {
 }
 
 /// NPM version information
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[allow(dead_code)]
 struct NpmVersionInfo {
     name: String,
@@ -158,7 +181,7 @@ struct NpmVersionInfo {
 }
 
 /// NPM distribution information
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[allow(dead_code)]
 struct NpmDistInfo {
     tarball: Option<String>,
@@ -293,12 +316,36 @@ impl RegistryClient {
             "https://packages.fhir.org/packages/".to_string(),
         ];
 
+        let validators_path = cache_dir.join("registry-cache.json");
+        let persisted_validators = {
+            // Best-effort load with warning on corruption
+            if let Ok(bytes) = std::fs::read(&validators_path) {
+                match serde_json::from_slice::<std::collections::HashMap<String, PersistedValidators>>(
+                    &bytes,
+                ) {
+                    Ok(map) => map,
+                    Err(e) => {
+                        tracing::warn!("Failed to parse registry validators cache: {}", e);
+                        std::collections::HashMap::new()
+                    }
+                }
+            } else {
+                std::collections::HashMap::new()
+            }
+        };
+
         Ok(Self {
             client,
             base_url,
             config: config.clone(),
             cache_dir,
             fallback_registries,
+            metadata_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+            persisted_validators: std::sync::Mutex::new(persisted_validators),
+            validators_path,
+            last_save: std::sync::Mutex::new(
+                std::time::Instant::now() - std::time::Duration::from_secs(10),
+            ),
         })
     }
 
@@ -333,8 +380,27 @@ impl RegistryClient {
     /// # Ok(())
     /// # }
     /// ```
+    #[tracing::instrument(name = "registry.download_package", skip(self), fields(pkg = %spec.name, ver = %spec.version))]
     pub async fn download_package(&self, spec: &PackageSpec) -> Result<PackageDownload> {
-        self.download_package_with_progress(spec, None).await
+        #[cfg(feature = "metrics")]
+        let start = std::time::Instant::now();
+        let result = self.download_package_with_progress(spec, None).await;
+        #[cfg(feature = "metrics")]
+        {
+            match &result {
+                Ok(_) => {
+                    metrics::increment_counter!("downloads_succeeded");
+                    metrics::histogram!(
+                        "download_latency_ms",
+                        start.elapsed().as_secs_f64() * 1000.0
+                    );
+                }
+                Err(_) => {
+                    metrics::increment_counter!("downloads_failed");
+                }
+            }
+        }
+        result
     }
 
     /// Downloads a FHIR package with progress reporting.
@@ -379,6 +445,7 @@ impl RegistryClient {
     /// # Ok(())
     /// # }
     /// ```
+    #[tracing::instrument(name = "registry.download_package", skip_all, fields(pkg = %spec.name, ver = %spec.version))]
     pub async fn download_package_with_progress(
         &self,
         spec: &PackageSpec,
@@ -450,7 +517,7 @@ impl RegistryClient {
         progress: Option<&dyn DownloadProgress>,
     ) -> Result<PackageDownload> {
         // Get package metadata to find download URL
-        let (metadata, download_url) = self
+        let (metadata, download_url, expected_shasum, expected_integrity) = self
             .get_package_metadata_and_url_from_registry(registry_url, &spec.name, &spec.version)
             .await?;
 
@@ -470,16 +537,70 @@ impl RegistryClient {
         // Save to cache directory with streaming
         let filename = format!("{}-{}.tgz", spec.name, spec.version);
         let file_path = self.cache_dir.join(&filename);
-        let mut file = fs::File::create(&file_path).await?;
+        let part_path = self.cache_dir.join(format!("{filename}.part"));
+        let mut file = fs::File::create(&part_path).await?;
 
         // Stream the download with progress updates
         let mut stream = response.bytes_stream();
+        let mut sha1_hasher = sha1::Sha1::new();
+        // Integrity (SRI) support: initialize only if integrity present
+        enum IntegrityAlgo {
+            Sha256,
+            Sha384,
+            Sha512,
+        }
+        let mut sri_algo: Option<IntegrityAlgo> = None;
+        let mut sri_sha256: Option<sha2::Sha256> = None;
+        let mut sri_sha384: Option<sha2::Sha384> = None;
+        let mut sri_sha512: Option<sha2::Sha512> = None;
+        if let Some(intg) = expected_integrity.as_ref() {
+            if let Some((algo, _b64)) = intg.split_once('-') {
+                match algo.to_ascii_lowercase().as_str() {
+                    "sha256" => {
+                        sri_algo = Some(IntegrityAlgo::Sha256);
+                        sri_sha256 = Some(sha2::Sha256::new());
+                    }
+                    "sha384" => {
+                        sri_algo = Some(IntegrityAlgo::Sha384);
+                        sri_sha384 = Some(sha2::Sha384::new());
+                    }
+                    "sha512" => {
+                        sri_algo = Some(IntegrityAlgo::Sha512);
+                        sri_sha512 = Some(sha2::Sha512::new());
+                    }
+                    _ => {}
+                }
+            }
+        }
         let mut downloaded = 0u64;
         let mut last_progress_update = std::time::Instant::now();
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
             file.write_all(&chunk).await?;
+            sha1_hasher.update(&chunk);
+            if let Some(algo) = &sri_algo {
+                match algo {
+                    IntegrityAlgo::Sha256 => {
+                        if let Some(h) = &mut sri_sha256 {
+                            use sha2::Digest;
+                            h.update(&chunk);
+                        }
+                    }
+                    IntegrityAlgo::Sha384 => {
+                        if let Some(h) = &mut sri_sha384 {
+                            use sha2::Digest;
+                            h.update(&chunk);
+                        }
+                    }
+                    IntegrityAlgo::Sha512 => {
+                        if let Some(h) = &mut sri_sha512 {
+                            use sha2::Digest;
+                            h.update(&chunk);
+                        }
+                    }
+                }
+            }
             downloaded += chunk.len() as u64;
 
             // Update progress more frequently and ensure visible updates
@@ -496,11 +617,68 @@ impl RegistryClient {
             }
         }
 
+        // Verify checksum if provided
+        if let Some(expected) = expected_shasum {
+            let digest = sha1_hasher.finalize();
+            let got = hex::encode(digest);
+            // Compare case-insensitively
+            let is_hex40 = expected.len() == 40 && expected.chars().all(|c| c.is_ascii_hexdigit());
+            if is_hex40 && !expected.eq_ignore_ascii_case(&got) {
+                let _ = fs::remove_file(&part_path).await;
+                return Err(RegistryError::InvalidMetadata {
+                    message: format!(
+                        "SHA1 checksum mismatch for {}@{}: expected {}, got {}",
+                        spec.name, spec.version, expected, got
+                    ),
+                }
+                .into());
+            }
+        }
+
+        // Verify SRI integrity if provided and recognized
+        if let (Some(algo), Some(intg)) = (sri_algo, expected_integrity) {
+            if let Some((_, b64)) = intg.split_once('-') {
+                let expected_bytes: Vec<u8> = base64::engine::general_purpose::STANDARD
+                    .decode(b64.as_bytes())
+                    .unwrap_or_default();
+                use sha2::Digest;
+                if expected_bytes.is_empty() { /* skip invalid integrity */
+                } else {
+                    let ok = match algo {
+                        IntegrityAlgo::Sha256 => {
+                            sri_sha256.map(|h| h.finalize().to_vec())
+                                == Some(expected_bytes.clone())
+                        }
+                        IntegrityAlgo::Sha384 => {
+                            sri_sha384.map(|h| h.finalize().to_vec())
+                                == Some(expected_bytes.clone())
+                        }
+                        IntegrityAlgo::Sha512 => {
+                            sri_sha512.map(|h| h.finalize().to_vec())
+                                == Some(expected_bytes.clone())
+                        }
+                    };
+                    if !ok {
+                        let _ = fs::remove_file(&part_path).await;
+                        return Err(RegistryError::InvalidMetadata {
+                            message: format!(
+                                "Integrity (SRI) mismatch for {}@{}",
+                                spec.name, spec.version
+                            ),
+                        }
+                        .into());
+                    }
+                }
+            }
+        }
+
         // Notify completion
         if let Some(progress) = progress {
             progress.on_complete();
         }
 
+        // Atomically move the .part file to final name
+        fs::rename(&part_path, &file_path).await?;
         info!("Package downloaded to: {}", file_path.display());
 
         Ok(PackageDownload {
@@ -538,8 +716,9 @@ impl RegistryClient {
     /// # Ok(())
     /// # }
     /// ```
+    #[tracing::instrument(name = "registry.get_metadata", skip(self))]
     pub async fn get_package_metadata(&self, name: &str, version: &str) -> Result<PackageMetadata> {
-        let (metadata, _) = self.get_package_metadata_and_url(name, version).await?;
+        let (metadata, _, _, _) = self.get_package_metadata_and_url(name, version).await?;
         Ok(metadata)
     }
 
@@ -549,7 +728,7 @@ impl RegistryClient {
         registry_url: &str,
         name: &str,
         version: &str,
-    ) -> Result<(PackageMetadata, String)> {
+    ) -> Result<(PackageMetadata, String, Option<String>, Option<String>)> {
         debug!(
             "Getting metadata for package: {}@{} from {}",
             name, version, registry_url
@@ -558,17 +737,7 @@ impl RegistryClient {
         // Build metadata URL for specific registry
         let metadata_url = format!("{registry_url}{name}");
 
-        let response = self.client.get(&metadata_url).send().await?;
-
-        if !response.status().is_success() {
-            return Err(RegistryError::PackageNotFound {
-                name: name.to_string(),
-                version: version.to_string(),
-            }
-            .into());
-        }
-
-        let npm_response: NpmPackageResponse = response.json().await?;
+        let npm_response = self.fetch_npm_metadata(&metadata_url).await?;
 
         debug!(
             "Metadata response has {} versions",
@@ -603,18 +772,48 @@ impl RegistryClient {
                 canonical_base: npm_response.canonical.clone(),
             };
 
-            return Ok((metadata, download_url));
+            let shasum = npm_response.dist.as_ref().and_then(|d| d.shasum.clone());
+            let integrity = npm_response.dist.as_ref().and_then(|d| d.integrity.clone());
+            return Ok((metadata, download_url, shasum, integrity));
         }
 
         // Full format with versions object
-        let version_info =
-            npm_response
+        // Resolve effective version: exact, dist-tag, or semver range
+        let effective_version = if let Some(info) = npm_response.versions.get(version) {
+            info.version.clone()
+        } else if let Some(tagged) = npm_response.dist_tags.get(version) {
+            tagged.clone()
+        } else if let Ok(req) = semver::VersionReq::parse(version) {
+            // Choose highest satisfying version
+            let mut vs: Vec<semver::Version> = npm_response
                 .versions
-                .get(version)
+                .keys()
+                .filter_map(|v| semver::Version::parse(v.trim_start_matches('v')).ok())
+                .collect();
+            vs.sort();
+            vs.into_iter()
+                .rev()
+                .find(|v| req.matches(v))
+                .map(|v| v.to_string())
                 .ok_or_else(|| RegistryError::PackageNotFound {
                     name: name.to_string(),
                     version: version.to_string(),
-                })?;
+                })?
+        } else {
+            return Err(RegistryError::PackageNotFound {
+                name: name.to_string(),
+                version: version.to_string(),
+            }
+            .into());
+        };
+
+        let version_info = npm_response
+            .versions
+            .get(&effective_version)
+            .ok_or_else(|| RegistryError::PackageNotFound {
+                name: name.to_string(),
+                version: effective_version.clone(),
+            })?;
 
         let download_url =
             version_info
@@ -638,14 +837,17 @@ impl RegistryClient {
 
         let metadata = PackageMetadata {
             name: name.to_string(),
-            version: version.to_string(),
+            version: effective_version.clone(),
             description: version_info.description.clone(),
             fhir_version,
             dependencies,
             canonical_base: version_info.canonical.clone(),
         };
 
-        Ok((metadata, download_url))
+        let shasum = version_info.dist.shasum.clone();
+        let integrity = version_info.dist.integrity.clone();
+
+        Ok((metadata, download_url, shasum, integrity))
     }
 
     /// Get package metadata and download URL
@@ -653,9 +855,135 @@ impl RegistryClient {
         &self,
         name: &str,
         version: &str,
-    ) -> Result<(PackageMetadata, String)> {
+    ) -> Result<(PackageMetadata, String, Option<String>, Option<String>)> {
         self.get_package_metadata_and_url_from_registry(self.base_url.as_ref(), name, version)
             .await
+    }
+
+    /// Fetch NPM-style package metadata with simple ETag/Last-Modified caching (in-memory)
+    async fn fetch_npm_metadata(&self, metadata_url: &str) -> Result<NpmPackageResponse> {
+        let mut req = self.client.get(metadata_url);
+
+        // Apply cache validators if present
+        {
+            // In-memory cache
+            if let Some(cached) = self
+                .metadata_cache
+                .lock()
+                .unwrap()
+                .get(metadata_url)
+                .cloned()
+            {
+                if let Some(etag) = &cached.etag {
+                    req = req.header(reqwest::header::IF_NONE_MATCH, etag);
+                }
+                if let Some(lm) = &cached.last_modified {
+                    req = req.header(reqwest::header::IF_MODIFIED_SINCE, lm);
+                }
+            } else {
+                // Persisted validators
+                if let Some(p) = self
+                    .persisted_validators
+                    .lock()
+                    .unwrap()
+                    .get(metadata_url)
+                    .cloned()
+                {
+                    // Simple TTL: 24h
+                    let ttl = chrono::Duration::hours(24);
+                    let fresh = chrono::Utc::now() - p.updated_at < ttl;
+                    if fresh {
+                        if let Some(etag) = p.etag {
+                            req = req.header(reqwest::header::IF_NONE_MATCH, etag);
+                        }
+                        if let Some(lm) = p.last_modified {
+                            req = req.header(reqwest::header::IF_MODIFIED_SINCE, lm);
+                        }
+                    } else {
+                        tracing::debug!(
+                            "Validators expired by TTL for {}. Forcing full fetch.",
+                            metadata_url
+                        );
+                    }
+                }
+            }
+        }
+
+        let resp = req.send().await?;
+
+        match resp.status() {
+            s if s.is_success() => {
+                let etag = resp
+                    .headers()
+                    .get(reqwest::header::ETAG)
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.to_string());
+                let last_modified = resp
+                    .headers()
+                    .get(reqwest::header::LAST_MODIFIED)
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.to_string());
+                let npm: NpmPackageResponse = resp.json().await?;
+
+                self.metadata_cache.lock().unwrap().insert(
+                    metadata_url.to_string(),
+                    CachedResponse {
+                        etag,
+                        last_modified,
+                        npm: npm.clone(),
+                    },
+                );
+                // Update persisted validators and save
+                self.update_and_save_validators(
+                    metadata_url,
+                    self.metadata_cache
+                        .lock()
+                        .unwrap()
+                        .get(metadata_url)
+                        .unwrap(),
+                );
+                Ok(npm)
+            }
+            reqwest::StatusCode::NOT_MODIFIED => {
+                if let Some(cached) = self.metadata_cache.lock().unwrap().get(metadata_url) {
+                    // refresh persisted validators
+                    self.update_and_save_validators(metadata_url, cached);
+                    Ok(cached.npm.clone())
+                } else {
+                    // No cache to use; fallback to a fresh fetch
+                    let npm: NpmPackageResponse =
+                        self.client.get(metadata_url).send().await?.json().await?;
+                    // No validators to store in this path
+                    Ok(npm)
+                }
+            }
+            _ => Err(RegistryError::PackageNotFound {
+                name: metadata_url.to_string(),
+                version: "latest".to_string(),
+            }
+            .into()),
+        }
+    }
+
+    fn update_and_save_validators(&self, url: &str, cached: &CachedResponse) {
+        let mut map = self.persisted_validators.lock().unwrap();
+        map.insert(
+            url.to_string(),
+            PersistedValidators {
+                etag: cached.etag.clone(),
+                last_modified: cached.last_modified.clone(),
+                updated_at: Utc::now(),
+            },
+        );
+        // Best-effort debounced save (min 500ms interval)
+        let mut last = self.last_save.lock().unwrap();
+        let now = std::time::Instant::now();
+        if now.duration_since(*last) >= std::time::Duration::from_millis(500) {
+            if let Ok(json) = serde_json::to_vec_pretty(&*map) {
+                let _ = std::fs::write(&self.validators_path, json);
+                *last = now;
+            }
+        }
     }
 
     /// Lists all available versions for a package.
@@ -686,6 +1014,7 @@ impl RegistryClient {
     /// # Ok(())
     /// # }
     /// ```
+    #[tracing::instrument(name = "registry.list_versions", skip(self))]
     pub async fn list_versions(&self, name: &str) -> Result<Vec<String>> {
         debug!("Listing versions for package: {}", name);
 
@@ -704,9 +1033,14 @@ impl RegistryClient {
         let npm_response: NpmPackageResponse = response.json().await?;
 
         let mut versions: Vec<String> = npm_response.versions.keys().cloned().collect();
+        // Sort using semver when possible, newest first; fall back to lexical
         versions.sort_by(|a, b| {
-            // Simple version sorting - in production would use semver crate
-            b.cmp(a) // Descending order (newest first)
+            let na = a.trim_start_matches('v');
+            let nb = b.trim_start_matches('v');
+            match (semver::Version::parse(na), semver::Version::parse(nb)) {
+                (Ok(va), Ok(vb)) => vb.cmp(&va),
+                _ => b.cmp(a),
+            }
         });
 
         Ok(versions)
@@ -736,6 +1070,7 @@ impl RegistryClient {
     /// # Ok(())
     /// # }
     /// ```
+    #[tracing::instrument(name = "registry.search_packages", skip(self))]
     pub async fn search_packages(&self, query: &str) -> Result<Vec<PackageInfo>> {
         debug!("Searching for packages with query: {}", query);
 
@@ -766,14 +1101,26 @@ impl RegistryClient {
                 "Download attempt {} of {} for URL: {}",
                 attempt, self.config.retry_attempts, url
             );
-            match self.client.get(url).send().await {
+            let res = self.client.get(url).send().await;
+            match res {
                 Ok(response) => {
-                    if response.status().is_success() {
+                    let status = response.status();
+                    if status.is_success() {
                         return Ok(response);
-                    } else {
+                    }
+
+                    // Retry only for retryable statuses
+                    if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                    {
                         last_error = Some(RegistryError::RegistryUnavailable {
-                            url: url.to_string(),
+                            url: format!("HTTP {status} for {url}"),
                         });
+                    } else {
+                        // Non-retryable
+                        return Err(RegistryError::RegistryUnavailable {
+                            url: format!("HTTP {status} for {url}"),
+                        }
+                        .into());
                     }
                 }
                 Err(e) => {
@@ -784,13 +1131,33 @@ impl RegistryClient {
             }
 
             if attempt < self.config.retry_attempts {
-                // Exponential backoff
-                let delay = std::time::Duration::from_millis(1000 * (2_u64.pow(attempt - 1)));
+                // Exponential backoff with jitter
+                let base = 500u64 * (2_u64.pow(attempt - 1));
+                let jitter: u64 = rand::random::<u8>() as u64 % 250; // up to 250ms
+                let delay = std::time::Duration::from_millis(base + jitter);
                 tokio::time::sleep(delay).await;
             }
         }
 
         Err(last_error.unwrap().into())
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::traits::AsyncRegistry for RegistryClient {
+    async fn get_package_metadata(
+        &self,
+        name: &str,
+        version: &str,
+    ) -> crate::error::Result<PackageMetadata> {
+        self.get_package_metadata(name, version).await
+    }
+
+    async fn download_package(
+        &self,
+        spec: &crate::config::PackageSpec,
+    ) -> crate::error::Result<PackageDownload> {
+        self.download_package(spec).await
     }
 }
 

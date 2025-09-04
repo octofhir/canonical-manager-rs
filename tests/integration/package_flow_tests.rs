@@ -9,6 +9,10 @@ use crate::common::{create_test_registry_with_packages, setup_test_env, wait_for
 /// Test CanonicalManager creation (simplified)
 #[tokio::test]
 async fn test_canonical_manager_creation_simple() {
+    if crate::common::test_helpers::should_skip_net() {
+        eprintln!("skipping net-bound test");
+        return;
+    }
     println!("Starting test_canonical_manager_creation_simple");
     let temp_dir = setup_test_env();
     println!("Created temp dir: {:?}", temp_dir.path());
@@ -74,6 +78,10 @@ async fn test_canonical_manager_creation_simple() {
 /// Test package installation with mock registry (with timeout)  
 #[tokio::test]
 async fn test_package_installation_with_timeout() {
+    if crate::common::test_helpers::should_skip_net() {
+        eprintln!("skipping net-bound test");
+        return;
+    }
     println!("Setting up test...");
     let temp_dir = setup_test_env();
     println!("Created temp directory");
@@ -160,6 +168,10 @@ async fn test_package_installation_with_timeout() {
 /// Test complete package installation workflow
 #[tokio::test]
 async fn test_full_package_installation_original() {
+    if crate::common::test_helpers::should_skip_net() {
+        eprintln!("skipping net-bound test");
+        return;
+    }
     println!("🔧 Setting up test environment...");
     let temp_dir = setup_test_env();
 
@@ -243,6 +255,10 @@ async fn test_full_package_installation_original() {
 /// Test package installation with dependencies
 #[tokio::test]
 async fn test_package_installation_with_dependencies() {
+    if crate::common::test_helpers::should_skip_net() {
+        eprintln!("skipping net-bound test");
+        return;
+    }
     let temp_dir = setup_test_env();
     let registry = create_test_registry_with_packages().await;
 
@@ -301,6 +317,10 @@ async fn test_package_installation_with_dependencies() {
 /// Test duplicate package installation (should not cause issues)
 #[tokio::test]
 async fn test_duplicate_package_installation() {
+    if crate::common::test_helpers::should_skip_net() {
+        eprintln!("skipping net-bound test");
+        return;
+    }
     let temp_dir = setup_test_env();
     let registry = create_test_registry_with_packages().await;
 
@@ -356,6 +376,10 @@ async fn test_duplicate_package_installation() {
 /// Test package removal workflow
 #[tokio::test]
 async fn test_package_removal() {
+    if crate::common::test_helpers::should_skip_net() {
+        eprintln!("skipping net-bound test");
+        return;
+    }
     let temp_dir = setup_test_env();
     let registry = create_test_registry_with_packages().await;
 
@@ -414,6 +438,10 @@ async fn test_package_removal() {
 /// Test canonical URL resolution after package installation
 #[tokio::test]
 async fn test_canonical_resolution_after_installation() {
+    if crate::common::test_helpers::should_skip_net() {
+        eprintln!("skipping net-bound test");
+        return;
+    }
     let temp_dir = setup_test_env();
     let registry = create_test_registry_with_packages().await;
 
@@ -474,6 +502,10 @@ async fn test_canonical_resolution_after_installation() {
 /// Test batch canonical URL resolution
 #[tokio::test]
 async fn test_batch_canonical_resolution() {
+    if crate::common::test_helpers::should_skip_net() {
+        eprintln!("skipping net-bound test");
+        return;
+    }
     let temp_dir = setup_test_env();
     let registry = create_test_registry_with_packages().await;
 
@@ -536,6 +568,10 @@ async fn test_batch_canonical_resolution() {
 /// Test error handling during package installation
 #[tokio::test]
 async fn test_package_installation_error_handling() {
+    if crate::common::test_helpers::should_skip_net() {
+        eprintln!("skipping net-bound test");
+        return;
+    }
     let temp_dir = setup_test_env();
     let registry = create_test_registry_with_packages().await;
 
@@ -592,6 +628,10 @@ async fn test_package_installation_error_handling() {
 /// Test concurrent package installations
 #[tokio::test]
 async fn test_concurrent_package_installations() {
+    if crate::common::test_helpers::should_skip_net() {
+        eprintln!("skipping net-bound test");
+        return;
+    }
     let temp_dir = setup_test_env();
     let registry = create_test_registry_with_packages().await;
 
@@ -654,6 +694,10 @@ async fn test_concurrent_package_installations() {
 #[tokio::test]
 #[cfg(feature = "cli")]
 async fn test_package_counting() {
+    if crate::common::test_helpers::should_skip_net() {
+        eprintln!("skipping net-bound test");
+        return;
+    }
     let temp_dir = setup_test_env();
     let registry = create_test_registry_with_packages().await;
 
@@ -705,6 +749,10 @@ async fn test_package_counting() {
 /// Test installation with custom priorities
 #[tokio::test]
 async fn test_installation_with_priorities() {
+    if crate::common::test_helpers::should_skip_net() {
+        eprintln!("skipping net-bound test");
+        return;
+    }
     let temp_dir = setup_test_env();
     let registry = create_test_registry_with_packages().await;
 

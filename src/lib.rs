@@ -29,51 +29,76 @@
 //! }
 //! ```
 
+#[doc(hidden)]
 pub mod binary_storage;
+#[doc(hidden)]
 pub mod change_detection;
+#[doc(hidden)]
+pub mod concurrency;
 pub mod config;
+#[doc(hidden)]
 pub mod config_validator;
+pub mod domain;
 pub mod error;
+#[cfg(feature = "fuzzy-search")]
+#[doc(hidden)]
+pub mod fuzzy;
+#[doc(hidden)]
 pub mod incremental_indexer;
+#[doc(hidden)]
+pub mod index_writer;
+#[doc(hidden)]
 pub mod output;
+#[doc(hidden)]
 pub mod package;
+#[doc(hidden)]
 pub mod performance;
+#[doc(hidden)]
 pub mod rebuild_strategy;
+#[doc(hidden)]
 pub mod registry;
 pub mod resolver;
 pub mod search;
+#[doc(hidden)]
 pub mod storage;
+#[doc(hidden)]
+pub mod traits;
+#[doc(hidden)]
 pub mod unified_storage;
 
 #[cfg(feature = "cli")]
+#[doc(hidden)]
 pub mod cli;
 
 #[cfg(feature = "cli")]
+#[doc(hidden)]
 pub mod cli_error;
 
-// Re-export main types
-pub use unified_storage::{UnifiedIntegrityReport, UnifiedStorage, UnifiedStorageStats};
-// Re-export selected types from binary_storage for compatibility
-pub use binary_storage::{IntegrityReport, PackageInfo, ResourceIndex, ResourceMetadata};
-pub use change_detection::{ChangeSet, PackageChangeDetector, PackageChecksum};
+// Public facade: configs, domain, resolver/search entrypoints, storage stats, and top-level errors
 pub use config::{FcmConfig, OptimizationConfig, PackageSpec, RegistryConfig, StorageConfig};
-pub use config_validator::{ConfigValidator, PerformanceImpact, ValidationResult};
+pub use domain::{CanonicalUrl, CanonicalWithVersion, FhirVersion, PackageVersion};
 pub use error::{FcmError, Result};
-pub use incremental_indexer::{FhirResource, IncrementalIndexer, IndexStats};
-pub use performance::{
-    IndexOperationType, PackageOperationType, PerformanceAnalysis, PerformanceConfig,
-    PerformanceMetrics, PerformanceMonitor,
-};
-pub use rebuild_strategy::{RebuildStrategy, SmartRebuildStrategy};
 pub use resolver::CanonicalResolver;
 pub use search::SearchEngine;
-pub use storage::{IndexData, IndexDataBuilder, OptimizedIndexStorage};
+pub use unified_storage::{UnifiedIntegrityReport, UnifiedStorageStats};
 
 use std::collections::HashSet;
 use std::sync::Arc;
 use tantivy::{Index, schema::*};
 use tokio::fs;
 use tracing::{debug, info, warn};
+
+// Internal imports for types no longer re-exported at crate root
+use crate::binary_storage::PackageInfo;
+use crate::change_detection::PackageChangeDetector;
+use crate::config_validator::ValidationResult;
+use crate::incremental_indexer::IncrementalIndexer;
+use crate::performance::{
+    IndexOperationType, PackageOperationType, PerformanceAnalysis, PerformanceConfig,
+    PerformanceMetrics, PerformanceMonitor,
+};
+use crate::rebuild_strategy::{RebuildStrategy, SmartRebuildStrategy};
+use crate::unified_storage::UnifiedStorage;
 
 #[cfg(feature = "cli")]
 use crate::output::Progress;
@@ -195,6 +220,11 @@ pub struct CanonicalManager {
     config: FcmConfig,
     storage: Arc<UnifiedStorage>, // Optimized unified storage system
     registry_client: registry::RegistryClient,
+    // Optional trait-based components for advanced construction
+    registry_dyn: Option<Arc<dyn crate::traits::AsyncRegistry + Send + Sync>>,
+    pkg_store_dyn: Option<Arc<dyn crate::traits::PackageStore + Send + Sync>>,
+    #[allow(dead_code)]
+    index_store_dyn: Option<Arc<dyn crate::traits::IndexStore + Send + Sync>>,
     resolver: CanonicalResolver,
     search_engine: SearchEngine,
     // Optimization components
@@ -206,11 +236,18 @@ pub struct CanonicalManager {
     tantivy_index: Arc<Index>,
 }
 
+impl std::fmt::Debug for CanonicalManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CanonicalManager")
+            .field("registry_url", &self.config.registry.url)
+            .field("packages_configured", &self.config.packages.len())
+            .finish()
+    }
+}
+
 impl CanonicalManager {
     /// Create a new CanonicalManager with the given configuration
     pub async fn new(mut config: FcmConfig) -> Result<Self> {
-        info!("Initializing FHIR Canonical Manager with optimization components");
-
         // Add early timeout check for CI/test environments to avoid hanging
         if std::env::var("CI").is_ok() || std::env::var("FHIRPATH_QUICK_INIT").is_ok() {
             info!("Quick initialization mode detected (CI or FHIRPATH_QUICK_INIT set)");
@@ -250,25 +287,6 @@ impl CanonicalManager {
         for recommendation in &validation.recommendations {
             info!("Configuration recommendation: {}", recommendation);
         }
-
-        // Log performance impact estimates
-        info!("Expected performance improvements:");
-        info!(
-            "  - Incremental speedup: {:.1}x",
-            validation.performance_impact.incremental_speedup_estimate
-        );
-        info!(
-            "  - Parallel efficiency: {:.1}%",
-            validation.performance_impact.parallel_efficiency_estimate * 100.0
-        );
-        info!(
-            "  - Memory usage: {}",
-            validation.performance_impact.memory_usage_estimate
-        );
-        info!(
-            "  - Disk usage: {}",
-            validation.performance_impact.disk_usage_estimate
-        );
 
         // Initialize unified storage system with timeout to prevent hanging
         let storage_future = UnifiedStorage::new(
@@ -317,9 +335,13 @@ impl CanonicalManager {
         // Create Tantivy index for full-text search
         let tantivy_index = Arc::new(Self::create_search_index()?);
 
-        // Initialize incremental indexer
-        let incremental_indexer = Arc::new(IncrementalIndexer::new(
+        // Initialize incremental indexer with a persistent writer manager
+        let writer_manager = Arc::new(index_writer::IndexWriterManager::new(
             Arc::clone(&tantivy_index),
+            50_000_000,
+        ));
+        let incremental_indexer = Arc::new(IncrementalIndexer::new(
+            Arc::clone(&writer_manager),
             Arc::clone(&change_detector),
             config.optimization.batch_size,
         ));
@@ -339,6 +361,101 @@ impl CanonicalManager {
             config,
             storage,
             registry_client,
+            registry_dyn: None,
+            pkg_store_dyn: None,
+            index_store_dyn: None,
+            resolver,
+            search_engine,
+            change_detector,
+            rebuild_strategy,
+            incremental_indexer,
+            performance_monitor,
+            tantivy_index,
+        })
+    }
+
+    /// Simple alias for end-user clarity
+    pub async fn new_simple(config: FcmConfig) -> Result<Self> {
+        Self::new(config).await
+    }
+
+    /// Advanced constructor using trait-based components. Caller must provide a BinaryStorage-backed
+    /// search storage for resolver/search.
+    pub async fn new_with_components(
+        mut config: FcmConfig,
+        package_store: Arc<dyn crate::traits::PackageStore + Send + Sync>,
+        index_store: Arc<dyn crate::traits::IndexStore + Send + Sync>,
+        registry: Arc<dyn crate::traits::AsyncRegistry + Send + Sync>,
+        search_storage: Arc<crate::binary_storage::BinaryStorage>,
+    ) -> Result<Self> {
+        // Reuse config optimization/validation
+        let skip_optimization =
+            config.optimization.parallel_workers == 1 && !config.optimization.enable_metrics;
+        let validation = if skip_optimization {
+            crate::config_validator::ConfigValidator::validate_config(&config)
+        } else {
+            crate::config_validator::ConfigValidator::optimize_config(&mut config)
+        };
+        if !validation.is_valid {
+            return Err(crate::error::FcmError::Config(
+                crate::error::ConfigError::ValidationFailed {
+                    message: "Invalid optimization configuration".to_string(),
+                },
+            ));
+        }
+
+        // Build a minimal UnifiedStorage for compatibility where needed (index store may still be used separately)
+        let storage = Arc::new(
+            UnifiedStorage::new(
+                config.storage.clone(),
+                config.optimization.use_mmap,
+                config.optimization.compression_level,
+            )
+            .await?,
+        );
+
+        // Resolver/Search backed by provided search_storage (BinaryStorage)
+        let resolver = CanonicalResolver::new(Arc::clone(&search_storage));
+        let search_engine = SearchEngine::new(Arc::clone(&search_storage));
+
+        // Optimization components
+        let change_detector = Arc::new(PackageChangeDetector::new());
+        let rebuild_strategy = SmartRebuildStrategy::new(Arc::clone(&change_detector))
+            .with_full_rebuild_threshold(config.optimization.full_rebuild_threshold)
+            .with_batch_size(config.optimization.incremental_batch_size);
+
+        let tantivy_index = Arc::new(Self::create_search_index()?);
+        let writer_manager = Arc::new(index_writer::IndexWriterManager::new(
+            Arc::clone(&tantivy_index),
+            50_000_000,
+        ));
+        let incremental_indexer = Arc::new(IncrementalIndexer::new(
+            Arc::clone(&writer_manager),
+            Arc::clone(&change_detector),
+            config.optimization.batch_size,
+        ));
+
+        let perf_config = PerformanceConfig {
+            enable_metrics: config.optimization.enable_metrics,
+            metrics_interval: std::time::Duration::from_secs(30),
+            max_samples: 1000,
+            enable_detailed_logging: config.optimization.enable_metrics,
+        };
+        let performance_monitor = Arc::new(PerformanceMonitor::new(perf_config));
+
+        // Create a dummy concrete client for compatibility, but route calls to trait object helpers
+        let expanded_storage = config.get_expanded_storage_config();
+        let registry_client =
+            registry::RegistryClient::new(&config.registry, expanded_storage.cache_dir.clone())
+                .await?;
+
+        Ok(Self {
+            config,
+            storage,
+            registry_client,
+            registry_dyn: Some(registry),
+            pkg_store_dyn: Some(package_store),
+            index_store_dyn: Some(index_store),
             resolver,
             search_engine,
             change_detector,
@@ -368,8 +485,36 @@ impl CanonicalManager {
         Ok(index)
     }
 
+    // Helper: registry download via trait or concrete client
+    async fn registry_download(&self, spec: &PackageSpec) -> Result<registry::PackageDownload> {
+        if let Some(r) = &self.registry_dyn {
+            r.download_package(spec).await
+        } else {
+            self.registry_client.download_package(spec).await
+        }
+    }
+
+    // Helper: list packages via trait or unified storage
+    async fn list_packages_via_store(&self) -> Result<Vec<PackageInfo>> {
+        if let Some(s) = &self.pkg_store_dyn {
+            s.list_packages().await
+        } else {
+            self.storage.list_packages().await
+        }
+    }
+
+    // Helper: add package via trait or unified storage
+    async fn add_package_via_store(&self, pkg: &package::ExtractedPackage) -> Result<()> {
+        if let Some(s) = &self.pkg_store_dyn {
+            s.add_package(pkg).await
+        } else {
+            self.storage.add_package(pkg).await
+        }
+    }
+
     /// Install a FHIR package by name and version
     /// Enhanced with optimization components for faster installation
+    #[tracing::instrument(name = "manager.install_package", skip(self), fields(pkg = %name, ver = %version))]
     pub async fn install_package(&self, name: &str, version: &str) -> Result<()> {
         // Check if we should use simplified installation for testing
         if self.config.optimization.parallel_workers == 1
@@ -492,6 +637,10 @@ impl CanonicalManager {
             // Add to storage (simplified - no complex indexing)
             debug!("Adding package {} to storage...", package_key);
             self.storage.add_package(&extracted).await?;
+            #[cfg(feature = "metrics")]
+            {
+                metrics::increment_counter!("packages_installed");
+            }
             debug!("Package {} added to storage successfully", package_key);
 
             installed.insert(package_key.clone());
@@ -586,8 +735,8 @@ impl CanonicalManager {
                 return Ok(());
             }
 
-            // Check if package already exists in storage
-            let packages = self.storage.list_packages().await?;
+            // Check if package already exists in storage (trait-aware)
+            let packages = self.list_packages_via_store().await?;
             for p in &packages {
                 debug!("- {}@{}", p.name, p.version);
             }
@@ -610,7 +759,7 @@ impl CanonicalManager {
             };
 
             // Download package and get metadata
-            let download = self.registry_client.download_package(&spec).await?;
+            let download = self.registry_download(&spec).await?;
             let dependencies = download.metadata.dependencies.clone();
 
             // Extract package
@@ -642,7 +791,7 @@ impl CanonicalManager {
             updated_extracted.extraction_path = package_dir.clone();
 
             // Add package to unified storage
-            if let Err(e) = self.storage.add_package(&updated_extracted).await {
+            if let Err(e) = self.add_package_via_store(&updated_extracted).await {
                 match &e {
                     crate::error::FcmError::Storage(
                         crate::error::StorageError::PackageAlreadyExists { .. },
@@ -651,6 +800,10 @@ impl CanonicalManager {
                     }
                     _ => return Err(e),
                 }
+            }
+            #[cfg(feature = "metrics")]
+            {
+                metrics::increment_counter!("packages_installed");
             }
 
             // Mark as installed
@@ -792,6 +945,7 @@ impl CanonicalManager {
 
     /// Resolve a canonical URL to a FHIR resource
     /// Enhanced with optimization components for better performance
+    #[tracing::instrument(name = "manager.resolve", skip(self), fields(canonical = %canonical_url))]
     pub async fn resolve(&self, canonical_url: &str) -> Result<resolver::ResolvedResource> {
         let tracker = self.performance_monitor.start_operation("resolve");
         let result = self.resolver.resolve(canonical_url).await;

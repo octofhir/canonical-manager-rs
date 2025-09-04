@@ -1,9 +1,9 @@
 use crate::change_detection::PackageChangeDetector;
 use crate::error::Result;
+use crate::index_writer::IndexWriterManager;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tantivy::Index;
 
 #[derive(Debug, Default, Clone)]
 pub struct IndexStats {
@@ -31,24 +31,25 @@ pub struct BatchStats {
 }
 
 pub struct IncrementalIndexer {
-    index: Arc<Index>,
+    writer_manager: Arc<IndexWriterManager>,
     change_detector: Arc<PackageChangeDetector>,
     batch_size: usize,
 }
 
 impl IncrementalIndexer {
     pub fn new(
-        index: Arc<Index>,
+        writer_manager: Arc<IndexWriterManager>,
         change_detector: Arc<PackageChangeDetector>,
         batch_size: usize,
     ) -> Self {
         Self {
-            index,
+            writer_manager,
             change_detector,
             batch_size,
         }
     }
 
+    #[tracing::instrument(name = "index.update", skip(self, package_path), fields(path = %package_path.display()))]
     pub async fn update_index(&self, package_path: &Path) -> Result<IndexStats> {
         let changes = self.change_detector.detect_changes(package_path).await?;
 
@@ -117,10 +118,6 @@ impl IncrementalIndexer {
     }
 
     async fn remove_from_index(&self, files: &[PathBuf]) -> Result<usize> {
-        let mut writer: tantivy::IndexWriter<tantivy::TantivyDocument> = self
-            .index
-            .writer(50_000_000)
-            .map_err(|e| crate::error::FcmError::Generic(format!("Tantivy error: {e}")))?;
         let mut removed_count = 0;
 
         for file_path in files {
@@ -131,9 +128,7 @@ impl IncrementalIndexer {
             removed_count += 1;
         }
 
-        writer
-            .commit()
-            .map_err(|e| crate::error::FcmError::Generic(format!("Tantivy error: {e}")))?;
+        self.writer_manager.commit().await?;
         Ok(removed_count)
     }
 
@@ -209,14 +204,7 @@ impl IncrementalIndexer {
     }
 
     async fn commit_index_changes(&self) -> Result<()> {
-        let mut writer: tantivy::IndexWriter<tantivy::TantivyDocument> = self
-            .index
-            .writer(15_000_000)
-            .map_err(|e| crate::error::FcmError::Generic(format!("Tantivy error: {e}")))?;
-        writer
-            .commit()
-            .map_err(|e| crate::error::FcmError::Generic(format!("Tantivy error: {e}")))?;
-        Ok(())
+        self.writer_manager.commit().await
     }
 }
 
@@ -262,11 +250,12 @@ impl FhirResource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::index_writer::IndexWriterManager;
     use std::fs;
-    use tantivy::schema::*;
+    use tantivy::{Index, schema::*};
     use tempfile::TempDir;
 
-    fn create_test_index() -> Arc<Index> {
+    fn create_test_index_manager() -> Arc<IndexWriterManager> {
         let mut schema_builder = Schema::builder();
 
         schema_builder.add_text_field("resource_type", TEXT | STORED);
@@ -277,7 +266,7 @@ mod tests {
 
         let schema = schema_builder.build();
         let index = Index::create_in_ram(schema);
-        Arc::new(index)
+        Arc::new(IndexWriterManager::new(Arc::new(index), 15_000_000))
     }
 
     #[tokio::test]
@@ -311,9 +300,9 @@ mod tests {
         )
         .unwrap();
 
-        let index = create_test_index();
+        let writer_manager = create_test_index_manager();
         let change_detector = Arc::new(PackageChangeDetector::new());
-        let indexer = IncrementalIndexer::new(index, change_detector, 10);
+        let indexer = IncrementalIndexer::new(writer_manager, change_detector, 10);
 
         let stats = indexer.update_index(&package_path).await.unwrap();
 
@@ -340,9 +329,9 @@ mod tests {
         )
         .unwrap();
 
-        let index = create_test_index();
+        let writer_manager = create_test_index_manager();
         let change_detector = Arc::new(PackageChangeDetector::new());
-        let indexer = IncrementalIndexer::new(index, change_detector, 10);
+        let indexer = IncrementalIndexer::new(writer_manager, change_detector, 10);
 
         let resource = indexer.parse_resource(&resource_path).await.unwrap();
 

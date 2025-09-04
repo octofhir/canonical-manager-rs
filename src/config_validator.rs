@@ -394,10 +394,12 @@ mod tests {
 
     #[test]
     fn test_optimization_config_validation() {
-        let mut config = OptimizationConfig::default();
-        config.parallel_workers = 0; // Invalid
-        config.batch_size = 0; // Invalid
-        config.full_rebuild_threshold = 1.5; // Invalid
+        let config = OptimizationConfig {
+            parallel_workers: 0,
+            batch_size: 0,
+            full_rebuild_threshold: 1.5,
+            ..OptimizationConfig::default()
+        };
 
         let mut result = ValidationResult {
             is_valid: true,

@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tar::Archive;
 use tokio::fs;
-use tokio::io::AsyncReadExt;
+// use tokio::io::AsyncReadExt;
 use tracing::{debug, info, warn};
 
 /// Service for extracting and processing FHIR Implementation Guide packages.
@@ -252,7 +252,7 @@ impl PackageExtractor {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```text
     /// # use octofhir_canonical_manager::package::PackageExtractor;
     /// # use octofhir_canonical_manager::registry::PackageDownload;
     /// # use std::path::PathBuf;
@@ -265,30 +265,48 @@ impl PackageExtractor {
     /// # Ok(())
     /// # }
     /// ```
+    #[tracing::instrument(name = "package.extract", skip_all, fields(pkg = %download.spec.name, ver = %download.spec.version))]
     pub async fn extract_package(&self, download: PackageDownload) -> Result<ExtractedPackage> {
         info!(
             "Extracting package: {}@{}",
             download.spec.name, download.spec.version
         );
+        #[cfg(feature = "metrics")]
+        let start = std::time::Instant::now();
 
-        // Create extraction directory
-        let extraction_path = self
+        // Prepare atomic extraction paths
+        let final_extraction_path = self
             .temp_dir
             .join(format!("{}-{}", download.spec.name, download.spec.version));
-        fs::create_dir_all(&extraction_path).await?;
+        let tmp_extraction_path =
+            final_extraction_path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4()));
 
-        // Extract the .tgz file
-        self.extract_tgz_file(&download.file_path, &extraction_path)
-            .await?;
+        // Ensure tmp dir exists
+        fs::create_dir_all(&tmp_extraction_path).await?;
+
+        // Extract the .tgz file into tmp dir
+        if let Err(e) = self
+            .extract_tgz_file(&download.file_path, &tmp_extraction_path)
+            .await
+        {
+            let _ = fs::remove_dir_all(&tmp_extraction_path).await;
+            return Err(e);
+        }
+
+        // Move into final location atomically (replace if exists)
+        if final_extraction_path.exists() {
+            let _ = fs::remove_dir_all(&final_extraction_path).await;
+        }
+        fs::rename(&tmp_extraction_path, &final_extraction_path).await?;
 
         // Validate package structure
-        self.validate_package(&extraction_path)?;
+        self.validate_package(&final_extraction_path).await?;
 
         // Parse manifest
-        let manifest = self.parse_manifest(&extraction_path)?;
+        let manifest = self.parse_manifest(&final_extraction_path).await?;
 
         // Extract resources
-        let resources = self.extract_resources(&extraction_path).await?;
+        let resources = self.extract_resources(&final_extraction_path).await?;
 
         info!(
             "Successfully extracted package: {}@{} with {} resources",
@@ -297,13 +315,20 @@ impl PackageExtractor {
             resources.len()
         );
 
-        Ok(ExtractedPackage {
+        let result = ExtractedPackage {
             name: download.spec.name,
             version: download.spec.version,
             manifest,
             resources,
-            extraction_path,
-        })
+            extraction_path: final_extraction_path,
+        };
+
+        #[cfg(feature = "metrics")]
+        {
+            metrics::histogram!("extract_latency_ms", start.elapsed().as_secs_f64() * 1000.0);
+        }
+
+        Ok(result)
     }
 
     /// Validates the structure of an extracted FHIR package.
@@ -322,17 +347,17 @@ impl PackageExtractor {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```text
     /// # use octofhir_canonical_manager::package::PackageExtractor;
     /// # use std::path::{Path, PathBuf};
     /// let extractor = PackageExtractor::new(PathBuf::from("/tmp"));
     ///
-    /// match extractor.validate_package(Path::new("/path/to/package")) {
+    /// match extractor.validate_package(Path::new("/path/to/package")).await {
     ///     Ok(()) => println!("Package structure is valid"),
     ///     Err(e) => println!("Invalid package: {}", e),
     /// }
     /// ```
-    pub fn validate_package(&self, path: &Path) -> Result<()> {
+    pub async fn validate_package(&self, path: &Path) -> Result<()> {
         debug!("Validating package structure");
 
         // Check that package directory exists
@@ -350,8 +375,8 @@ impl PackageExtractor {
             return Err(PackageError::MissingManifest.into());
         }
 
-        // Validate package.json is valid JSON
-        if let Err(e) = std::fs::read_to_string(&package_json) {
+        // Validate package.json is readable (async)
+        if let Err(e) = fs::read_to_string(&package_json).await {
             return Err(PackageError::ValidationFailed {
                 message: format!("Cannot read package.json: {e}"),
             }
@@ -387,19 +412,19 @@ impl PackageExtractor {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```text
     /// # use octofhir_canonical_manager::package::PackageExtractor;
     /// # use std::path::{Path, PathBuf};
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let extractor = PackageExtractor::new(PathBuf::from("/tmp"));
     ///
-    /// let manifest = extractor.parse_manifest(Path::new("/path/to/package"))?;
+    /// let manifest = extractor.parse_manifest(Path::new("/path/to/package")).await?;
     /// println!("Package: {}@{}", manifest.name, manifest.version);
     /// println!("FHIR versions: {:?}", manifest.fhir_versions);
     /// # Ok(())
     /// # }
     /// ```
-    pub fn parse_manifest(&self, path: &Path) -> Result<PackageManifest> {
+    pub async fn parse_manifest(&self, path: &Path) -> Result<PackageManifest> {
         debug!("Parsing package manifest");
 
         // Look for package.json in package/ subdirectory
@@ -409,7 +434,7 @@ impl PackageExtractor {
             return Err(PackageError::MissingManifest.into());
         }
 
-        let content = std::fs::read_to_string(&package_json_path)?;
+        let content = fs::read_to_string(&package_json_path).await?;
         let manifest: PackageManifest =
             serde_json::from_str(&content).map_err(|e| PackageError::ValidationFailed {
                 message: format!("Invalid package manifest: {e}"),
@@ -426,30 +451,124 @@ impl PackageExtractor {
             output_dir.display()
         );
 
-        // Read the file
-        let mut file = fs::File::open(tgz_path).await?;
-        let mut buffer = Vec::new();
-        file.read_to_end(&mut buffer).await?;
+        // Prefer fully-async extraction; fall back to blocking if async path fails
+        if let Err(e) = self.extract_tgz_file_async(tgz_path, output_dir).await {
+            warn!(
+                "Async extraction failed ({}), falling back to blocking path",
+                e
+            );
 
-        // Use blocking task for CPU-intensive extraction
-        let output_dir = output_dir.to_path_buf();
-        tokio::task::spawn_blocking(move || {
-            let tar_gz = std::io::Cursor::new(buffer);
-            let tar = GzDecoder::new(tar_gz);
-            let mut archive = Archive::new(tar);
+            // Fallback: blocking streaming extraction without loading whole file
+            let tgz_path = tgz_path.to_path_buf();
+            let output_dir = output_dir.to_path_buf();
+            tokio::task::spawn_blocking(move || {
+                let file =
+                    std::fs::File::open(&tgz_path).map_err(|e| PackageError::ExtractionFailed {
+                        message: format!("Failed to open archive: {e}"),
+                    })?;
+                let reader = std::io::BufReader::new(file);
+                let tar = GzDecoder::new(reader);
+                let mut archive = Archive::new(tar);
 
-            archive
-                .unpack(&output_dir)
-                .map_err(|e| PackageError::ExtractionFailed {
-                    message: format!("Failed to extract archive: {e}"),
-                })
-        })
-        .await
-        .map_err(|e| PackageError::ExtractionFailed {
-            message: format!("Task join error: {e}"),
-        })??;
+                for entry in archive
+                    .entries()
+                    .map_err(|e| PackageError::ExtractionFailed {
+                        message: format!("Failed to read archive entries: {e}"),
+                    })?
+                {
+                    let mut entry = entry.map_err(|e| PackageError::ExtractionFailed {
+                        message: format!("Invalid entry: {e}"),
+                    })?;
+                    let path = entry.path().map_err(|e| PackageError::ExtractionFailed {
+                        message: format!("Invalid entry path: {e}"),
+                    })?;
+
+                    let out_path = Self::sanitize_extract_path(&output_dir, &path)?;
+
+                    if let Some(parent) = out_path.parent() {
+                        std::fs::create_dir_all(parent).map_err(|e| {
+                            PackageError::ExtractionFailed {
+                                message: format!("Failed to create directories: {e}"),
+                            }
+                        })?;
+                    }
+
+                    entry
+                        .unpack(&out_path)
+                        .map_err(|e| PackageError::ExtractionFailed {
+                            message: format!("Failed to unpack entry: {e}"),
+                        })?;
+                }
+
+                Ok::<(), crate::error::FcmError>(())
+            })
+            .await
+            .map_err(|e| PackageError::ExtractionFailed {
+                message: format!("Task join error: {e}"),
+            })??;
+        }
 
         Ok(())
+    }
+
+    async fn extract_tgz_file_async(&self, tgz_path: &Path, output_dir: &Path) -> Result<()> {
+        use async_compression::tokio::bufread::GzipDecoder as AsyncGzipDecoder;
+        use futures_util::StreamExt;
+        use tokio_util::compat::TokioAsyncReadCompatExt;
+
+        let file = fs::File::open(tgz_path).await?;
+        let reader = tokio::io::BufReader::new(file);
+        let gz = AsyncGzipDecoder::new(reader);
+        let archive = async_tar::Archive::new(gz.compat());
+        let mut entries = archive
+            .entries()
+            .map_err(|e| PackageError::ExtractionFailed {
+                message: format!("Failed to read archive entries: {e}"),
+            })?;
+
+        while let Some(next) = entries.next().await {
+            let mut entry = next.map_err(|e| PackageError::ExtractionFailed {
+                message: format!("Invalid archive entry: {e}"),
+            })?;
+
+            let path = entry.path().map_err(|e| PackageError::ExtractionFailed {
+                message: format!("Invalid entry path: {e}"),
+            })?;
+            let std_path = std::path::Path::new(path.as_os_str());
+            let out_path = Self::sanitize_extract_path(output_dir, std_path)?;
+
+            if let Some(parent) = out_path.parent() {
+                fs::create_dir_all(parent).await?;
+            }
+
+            // Use built-in unpack if available; otherwise stream copy
+            entry
+                .unpack(&out_path)
+                .await
+                .map_err(|e| PackageError::ExtractionFailed {
+                    message: format!("Failed to unpack entry: {e}"),
+                })?;
+        }
+
+        Ok(())
+    }
+
+    fn sanitize_extract_path(base: &Path, path: &std::path::Path) -> Result<PathBuf> {
+        use std::path::Component;
+        let mut out_path = base.to_path_buf();
+        for comp in path.components() {
+            match comp {
+                Component::Prefix(_) | Component::RootDir | Component::CurDir => continue,
+                Component::ParentDir => {
+                    return Err(PackageError::ExtractionFailed {
+                        message: "Archive contains path traversal".into(),
+                    }
+                    .into());
+                }
+                Component::Normal(p) => out_path.push(p),
+            }
+        }
+        Ok(out_path)
     }
 
     /// Extract FHIR resources from package
@@ -560,15 +679,15 @@ mod tests {
         assert_eq!(extractor.temp_dir, temp_dir.path().join("temp"));
     }
 
-    #[test]
-    fn test_package_structure_validation() {
+    #[tokio::test]
+    async fn test_package_structure_validation() {
         let temp_dir = TempDir::new().unwrap();
         let extractor = PackageExtractor::new(temp_dir.path().to_path_buf());
 
         // Test invalid package (no package directory)
         let invalid_path = temp_dir.path().join("invalid");
         fs::create_dir_all(&invalid_path).unwrap();
-        assert!(extractor.validate_package(&invalid_path).is_err());
+        assert!(extractor.validate_package(&invalid_path).await.is_err());
 
         // Test valid package structure
         let valid_path = temp_dir.path().join("valid");
@@ -579,11 +698,11 @@ mod tests {
         let package_json = package_dir.join("package.json");
         fs::write(&package_json, r#"{"name": "test", "version": "1.0.0"}"#).unwrap();
 
-        assert!(extractor.validate_package(&valid_path).is_ok());
+        assert!(extractor.validate_package(&valid_path).await.is_ok());
     }
 
-    #[test]
-    fn test_manifest_parsing() {
+    #[tokio::test]
+    async fn test_manifest_parsing() {
         let temp_dir = TempDir::new().unwrap();
         let extractor = PackageExtractor::new(temp_dir.path().to_path_buf());
 
@@ -607,7 +726,7 @@ mod tests {
         let package_json = package_dir.join("package.json");
         fs::write(&package_json, manifest_content.to_string()).unwrap();
 
-        let manifest = extractor.parse_manifest(&package_path).unwrap();
+        let manifest = extractor.parse_manifest(&package_path).await.unwrap();
         assert_eq!(manifest.name, "test.package");
         assert_eq!(manifest.version, "1.0.0");
         assert_eq!(manifest.fhir_versions, Some(vec!["4.0.1".to_string()]));

@@ -248,6 +248,26 @@ impl OptimizedIndexStorage {
     }
 }
 
+#[async_trait::async_trait]
+impl crate::traits::IndexStore for OptimizedIndexStorage {
+    async fn store_index(
+        &self,
+        index: &crate::storage::optimized::IndexData,
+    ) -> crate::error::Result<()> {
+        self.store_index(index).await
+    }
+
+    async fn load_metadata(
+        &self,
+    ) -> crate::error::Result<crate::storage::optimized::IndexMetadata> {
+        self.load_metadata().await
+    }
+
+    async fn verify_integrity(&self) -> crate::error::Result<bool> {
+        self.verify_integrity().await
+    }
+}
+
 // Builder pattern for creating IndexData
 pub struct IndexDataBuilder {
     version: u32,

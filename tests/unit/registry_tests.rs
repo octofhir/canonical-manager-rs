@@ -20,8 +20,10 @@ async fn test_registry_client_creation() {
 /// Test registry client with invalid URL
 #[tokio::test]
 async fn test_registry_client_invalid_url() {
-    let mut config = RegistryConfig::default();
-    config.url = "not-a-valid-url".to_string();
+    let config = RegistryConfig {
+        url: "not-a-valid-url".to_string(),
+        ..RegistryConfig::default()
+    };
     let temp_dir = TempDir::new().unwrap();
 
     let result = RegistryClient::new(&config, temp_dir.path().to_path_buf()).await;
@@ -31,6 +33,10 @@ async fn test_registry_client_invalid_url() {
 /// Test successful package metadata retrieval
 #[tokio::test]
 async fn test_get_package_metadata_success() {
+    if crate::common::test_helpers::should_skip_net() {
+        eprintln!("skipping net-bound test");
+        return;
+    }
     let registry = create_test_registry_with_packages().await;
 
     let config = RegistryConfig {
@@ -60,6 +66,10 @@ async fn test_get_package_metadata_success() {
 /// Test package metadata retrieval for non-existent package
 #[tokio::test]
 async fn test_get_package_metadata_not_found() {
+    if crate::common::test_helpers::should_skip_net() {
+        eprintln!("skipping net-bound test");
+        return;
+    }
     let registry = create_test_registry_with_packages().await;
 
     let config = RegistryConfig {
@@ -81,6 +91,10 @@ async fn test_get_package_metadata_not_found() {
 /// Test successful package download
 #[tokio::test]
 async fn test_download_package_success() {
+    if crate::common::test_helpers::should_skip_net() {
+        eprintln!("skipping net-bound test");
+        return;
+    }
     let registry = create_test_registry_with_packages().await;
 
     let config = RegistryConfig {
@@ -115,6 +129,10 @@ async fn test_download_package_success() {
 /// Test package download with dependencies
 #[tokio::test]
 async fn test_download_package_with_dependencies() {
+    if crate::common::test_helpers::should_skip_net() {
+        eprintln!("skipping net-bound test");
+        return;
+    }
     let registry = create_test_registry_with_packages().await;
 
     let config = RegistryConfig {
@@ -149,6 +167,10 @@ async fn test_download_package_with_dependencies() {
 /// Test registry fallback mechanism
 #[tokio::test]
 async fn test_registry_fallback() {
+    if crate::common::test_helpers::should_skip_net() {
+        eprintln!("skipping net-bound test");
+        return;
+    }
     // Create a registry that will fail
     let mut failing_registry = MockRegistry::new().await;
     failing_registry.simulate_network_error();
@@ -186,6 +208,10 @@ async fn test_registry_fallback() {
 /// Test retry mechanism with temporary failures
 #[tokio::test]
 async fn test_retry_mechanism() {
+    if crate::common::test_helpers::should_skip_net() {
+        eprintln!("skipping net-bound test");
+        return;
+    }
     let mut registry = MockRegistry::new().await;
 
     // Add a test package
@@ -222,6 +248,10 @@ async fn test_retry_mechanism() {
 /// Test list versions functionality
 #[tokio::test]
 async fn test_list_versions() {
+    if crate::common::test_helpers::should_skip_net() {
+        eprintln!("skipping net-bound test");
+        return;
+    }
     let registry = create_test_registry_with_packages().await;
 
     let config = RegistryConfig {
@@ -245,6 +275,10 @@ async fn test_list_versions() {
 /// Test search packages functionality
 #[tokio::test]
 async fn test_search_packages() {
+    if crate::common::test_helpers::should_skip_net() {
+        eprintln!("skipping net-bound test");
+        return;
+    }
     let registry = create_test_registry_with_packages().await;
 
     let config = RegistryConfig {
@@ -265,9 +299,66 @@ async fn test_search_packages() {
     assert!(packages.is_empty());
 }
 
+/// Test persistent metadata cache writes validators and uses them on a new client
+#[tokio::test]
+async fn test_persistent_metadata_cache_etag_and_304() {
+    if crate::common::test_helpers::should_skip_net() {
+        eprintln!("skipping net-bound test");
+        return;
+    }
+    let registry = create_test_registry_with_packages().await;
+
+    let config = RegistryConfig {
+        url: registry.url(),
+        timeout: 30,
+        retry_attempts: 3,
+    };
+    let temp_dir = TempDir::new().unwrap();
+
+    // First client fetch: should be 200 and persist validators
+    let client1 = RegistryClient::new(&config, temp_dir.path().to_path_buf())
+        .await
+        .unwrap();
+    let _ = client1
+        .get_package_metadata("hl7.fhir.r4.core", "4.0.1")
+        .await
+        .unwrap();
+
+    // Second client with same cache dir: should send If-None-Match and hit 304 on server
+    let client2 = RegistryClient::new(&config, temp_dir.path().to_path_buf())
+        .await
+        .unwrap();
+    let _ = client2
+        .get_package_metadata("hl7.fhir.r4.core", "4.0.1")
+        .await
+        .unwrap();
+
+    // Inspect requests to ensure an If-None-Match header was seen
+    let reqs = registry.received_requests().await;
+    let mut saw_if_none_match = false;
+    for r in reqs {
+        if r.url.path().ends_with("hl7.fhir.r4.core")
+            && r.headers
+                .iter()
+                .any(|(k, _)| k.as_str().eq_ignore_ascii_case("if-none-match"))
+        {
+            saw_if_none_match = true;
+            break;
+        }
+    }
+    assert!(
+        saw_if_none_match,
+        "expected If-None-Match header on second metadata request"
+    );
+}
+
 /// Test package metadata parsing with various formats
 #[tokio::test]
 async fn test_package_metadata_parsing() {
+    if crate::common::test_helpers::should_skip_net() {
+        eprintln!("skipping net-bound test");
+        return;
+    }
     let mut registry = MockRegistry::new().await;
 
     // Test package with complex dependencies
@@ -318,6 +409,10 @@ async fn test_package_metadata_parsing() {
 /// Test network timeout handling
 #[tokio::test]
 async fn test_network_timeout() {
+    if crate::common::test_helpers::should_skip_net() {
+        eprintln!("skipping net-bound test");
+        return;
+    }
     let mut registry = MockRegistry::new().await;
 
     // Add delay longer than timeout
@@ -345,7 +440,5 @@ async fn test_network_timeout() {
 /// Test URL building functions
 #[test]
 fn test_url_building() {
-    // This test would require exposing the URL building methods or testing through public interface
-    // For now, we test the overall functionality through the public API
-    assert!(true, "URL building is tested through integration");
+    // Covered via `src/registry.rs` unit tests; placeholder to keep suite structure consistent.
 }

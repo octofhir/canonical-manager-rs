@@ -295,12 +295,12 @@ impl FcmConfig {
     /// # }
     /// ```
     pub async fn from_file(path: &std::path::Path) -> Result<Self> {
-        let path_clone = path.to_path_buf();
-        let content = tokio::task::spawn_blocking(move || {
-            std::fs::read_to_string(&path_clone)
-                .map_err(|_| ConfigError::InvalidFile { path: path_clone })
-        })
-        .await??;
+        let content =
+            tokio::fs::read_to_string(path)
+                .await
+                .map_err(|_| ConfigError::InvalidFile {
+                    path: path.to_path_buf(),
+                })?;
 
         let config: Self = toml::from_str(&content)?;
         config.validate()?;
@@ -430,7 +430,7 @@ impl FcmConfig {
         let default_config = Self::default();
         let toml_content = toml::to_string_pretty(&default_config)?;
 
-        tokio::task::spawn_blocking(move || std::fs::write(&config_path, toml_content)).await??;
+        tokio::fs::write(&config_path, toml_content).await?;
         Ok(())
     }
 
@@ -457,7 +457,7 @@ impl FcmConfig {
     pub async fn save(&self) -> Result<()> {
         let config_path = Self::default_config_path();
         let toml_content = toml::to_string_pretty(self)?;
-        tokio::task::spawn_blocking(move || std::fs::write(&config_path, toml_content)).await??;
+        tokio::fs::write(&config_path, toml_content).await?;
         Ok(())
     }
 

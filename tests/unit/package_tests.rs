@@ -16,9 +16,7 @@ fn test_package_extractor_creation() {
     let temp_dir = setup_test_env();
     let _extractor = PackageExtractor::new(temp_dir.path().to_path_buf());
 
-    // This test verifies the extractor can be created
-    // The actual cache_dir field is private, so we can't test it directly
-    assert!(true, "PackageExtractor created successfully");
+    // This test verifies the extractor can be created without panicking
 }
 
 /// Test package manifest parsing

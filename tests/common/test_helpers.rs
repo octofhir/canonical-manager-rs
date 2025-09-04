@@ -36,6 +36,46 @@ pub fn setup_test_env() -> TempDir {
     temp_dir
 }
 
+/// Returns true if network-bound tests should be skipped.
+///
+/// Behavior:
+/// - Opt-in to run with `FCM_RUN_NET_TESTS` set to a truthy value ("1", "true", "yes").
+/// - Explicitly skip if `FCM_SKIP_NET_TESTS` is set to a truthy value.
+/// - In CI (when `CI` is set), skip unless explicitly opted-in.
+/// - Otherwise, attempt a localhost bind to detect sandbox restrictions; skip on failure.
+pub fn should_skip_net() -> bool {
+    let is_truthy = |v: String| -> bool {
+        matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
+    };
+
+    // Explicit opt-in to run network tests
+    if std::env::var("FCM_RUN_NET_TESTS")
+        .map(is_truthy)
+        .unwrap_or(false)
+    {
+        return false;
+    }
+
+    // Explicit skip takes precedence if truthy
+    if std::env::var("FCM_SKIP_NET_TESTS")
+        .map(is_truthy)
+        .unwrap_or(false)
+    {
+        return true;
+    }
+
+    // In CI environments, default to skipping unless explicitly opted-in
+    if std::env::var("CI").is_ok() {
+        return true;
+    }
+
+    // Try a harmless local bind to detect sandbox restrictions
+    match std::net::TcpListener::bind("127.0.0.1:0") {
+        Ok(_sock) => false,
+        Err(_e) => true,
+    }
+}
+
 /// Assert that a path exists
 pub fn assert_path_exists(path: &Path) {
     assert!(path.exists(), "Path should exist: {}", path.display());

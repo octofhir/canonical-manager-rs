@@ -36,6 +36,8 @@ async fn test_resolver_creation() {
         version_preference: VersionPreference::Latest,
         fuzzy_matching_threshold: 0.9,
         enable_fuzzy_matching: false,
+        #[cfg(feature = "fuzzy-search")]
+        fuzzy_max_candidates: 200,
     };
 
     let custom_resolver = CanonicalResolver::with_config(storage, custom_config);
@@ -250,6 +252,8 @@ async fn test_fuzzy_matching() {
         version_preference: VersionPreference::Latest,
         fuzzy_matching_threshold: 0.7,
         enable_fuzzy_matching: true,
+        #[cfg(feature = "fuzzy-search")]
+        fuzzy_max_candidates: 200,
     };
 
     let resolver = CanonicalResolver::with_config(storage, fuzzy_config);
@@ -294,6 +298,8 @@ async fn test_fuzzy_matching_disabled() {
         version_preference: VersionPreference::Latest,
         fuzzy_matching_threshold: 0.7,
         enable_fuzzy_matching: false,
+        #[cfg(feature = "fuzzy-search")]
+        fuzzy_max_candidates: 200,
     };
 
     let resolver = CanonicalResolver::with_config(storage, strict_config);

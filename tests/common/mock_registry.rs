@@ -1,10 +1,11 @@
 //! Mock registry implementation for testing
 
+use base64::Engine;
 use serde_json::json;
 use std::collections::HashMap;
 use wiremock::{
-    Mock, MockServer, ResponseTemplate,
-    matchers::{method, path},
+    Mock, MockServer, Request, ResponseTemplate,
+    matchers::{header, method, path},
 };
 
 /// Mock package data for testing
@@ -18,6 +19,8 @@ pub struct MockPackageData {
     pub canonical: Option<String>,
     pub tarball_url: Option<String>,
     pub content: Option<Vec<u8>>, // Package content for download
+    pub shasum: Option<String>,
+    pub integrity: Option<String>,
 }
 
 impl MockPackageData {
@@ -31,6 +34,8 @@ impl MockPackageData {
             canonical: Some(format!("http://example.com/{name}")),
             tarball_url: None,
             content: None,
+            shasum: None,
+            integrity: None,
         }
     }
 
@@ -111,7 +116,22 @@ impl MockRegistry {
     ) {
         let metadata_response = self.create_npm_metadata_response(package_data);
 
-        let mut response_template = ResponseTemplate::new(200).set_body_json(&metadata_response);
+        // Stable ETag and Last-Modified for this package
+        let etag_value = format!("\"{}@{}\"", package_data.name, package_data.version);
+        let last_modified_value = "Wed, 21 Oct 2015 07:28:00 GMT";
+
+        // 304 responder when validators match (mount first)
+        Mock::given(method("GET"))
+            .and(path(package_name))
+            .and(header("if-none-match", etag_value.clone()))
+            .respond_with(ResponseTemplate::new(304))
+            .mount(&self.server)
+            .await;
+
+        let mut response_template = ResponseTemplate::new(200)
+            .set_body_json(&metadata_response)
+            .insert_header("ETag", etag_value)
+            .insert_header("Last-Modified", last_modified_value);
 
         if let Some(delay) = self.response_delay {
             response_template = response_template.set_delay(delay);
@@ -163,6 +183,28 @@ impl MockRegistry {
     fn create_npm_metadata_response(&self, package_data: &MockPackageData) -> serde_json::Value {
         let mut versions = HashMap::new();
 
+        // Compute checksums for deterministic tarball content
+        let tarball = self.create_mock_tarball(&package_data.name, &package_data.version);
+        let sha1_hex = {
+            let mut hasher = sha1::Sha1::new();
+            use sha1::Digest as _;
+            hasher.update(&tarball);
+            hex::encode(hasher.finalize())
+        };
+        let sha512_b64 = {
+            use sha2::Digest as _;
+            let mut hasher = sha2::Sha512::new();
+            hasher.update(&tarball);
+            let bytes = hasher.finalize();
+            format!(
+                "sha512-{}",
+                base64::engine::general_purpose::STANDARD.encode(bytes)
+            )
+        };
+
+        let shasum_field = package_data.shasum.clone().unwrap_or(sha1_hex);
+        let integrity_field = package_data.integrity.clone().unwrap_or(sha512_b64);
+
         let version_info = json!({
             "name": package_data.name,
             "version": package_data.version,
@@ -172,8 +214,8 @@ impl MockRegistry {
             "canonical": package_data.canonical,
             "dist": {
                 "tarball": package_data.tarball_url,
-                "shasum": "mock-shasum",
-                "integrity": "sha512-mock-integrity"
+                "shasum": shasum_field,
+                "integrity": integrity_field
             }
         });
 
@@ -249,6 +291,12 @@ impl MockRegistry {
         buf
     }
 
+    /// Expose received requests for assertions
+    #[allow(dead_code)]
+    pub async fn received_requests(&self) -> Vec<Request> {
+        self.server.received_requests().await.unwrap_or_default()
+    }
+
     /// Simulate network error on next request (for backward compatibility)
     #[allow(dead_code)]
     pub fn simulate_network_error(&mut self) {
@@ -301,6 +349,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_mock_registry_creation() {
+        if crate::common::test_helpers::should_skip_net() {
+            eprintln!("skipping net-bound test");
+            return;
+        }
         let registry = MockRegistry::new().await;
         let url = registry.url();
 
@@ -310,6 +362,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_add_package() {
+        if crate::common::test_helpers::should_skip_net() {
+            eprintln!("skipping net-bound test");
+            return;
+        }
         let mut registry = MockRegistry::new().await;
         let package = MockPackageData::new("test.package", "1.0.0");
 
@@ -319,6 +375,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_test_registry_with_packages() {
+        if crate::common::test_helpers::should_skip_net() {
+            eprintln!("skipping net-bound test");
+            return;
+        }
         let registry = create_test_registry_with_packages().await;
 
         assert!(registry.packages.contains_key("hl7.fhir.r4.core"));

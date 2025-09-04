@@ -1,4 +1,6 @@
+use crate::concurrency::ConcurrentMap;
 use crate::config::StorageConfig;
+use crate::domain::CanonicalUrl;
 use crate::error::{Result, StorageError};
 use crate::package::{ExtractedPackage, FhirResource};
 use chrono::{DateTime, Utc};
@@ -7,8 +9,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use tokio::fs;
+use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 /// Index entry for a FHIR resource in storage.
@@ -92,6 +95,10 @@ pub struct BinaryStorage {
     storage_path: PathBuf,
     backup_path: PathBuf,
     in_memory_cache: Arc<RwLock<StorageData>>,
+    // Concurrent read indexes for fast lookups without locking the full cache
+    canonical_index: ConcurrentMap<String, ResourceIndex>,
+    // canonical base (normalized, maybe without version suffix) -> all variant indices
+    base_index: ConcurrentMap<String, Vec<ResourceIndex>>,
 }
 
 impl BinaryStorage {
@@ -148,10 +155,13 @@ impl BinaryStorage {
                     package_count: 0,
                 },
             })),
+            canonical_index: ConcurrentMap::new(),
+            base_index: ConcurrentMap::new(),
         };
 
         // Load existing data
         storage.load_from_disk().await?;
+        storage.rebuild_indexes_from_cache().await?;
 
         info!("Binary storage initialized at {:?}", storage.storage_path);
         Ok(storage)
@@ -172,12 +182,13 @@ impl BinaryStorage {
     /// - Package already exists with same version
     /// - Cannot write to storage file
     /// - Resource indexing fails
+    #[tracing::instrument(name = "storage.add_package", skip_all, fields(pkg = %package.name, ver = %package.version))]
     pub async fn add_package(&self, package: &ExtractedPackage) -> Result<()> {
         let package_key = format!("{}:{}", package.name, package.version);
 
         // Check if package already exists
         {
-            let cache = self.in_memory_cache.read().unwrap();
+            let cache = self.in_memory_cache.read().await;
             if cache.packages.contains_key(&package_key) {
                 return Err(crate::error::FcmError::Storage(
                     StorageError::PackageAlreadyExists {
@@ -198,7 +209,7 @@ impl BinaryStorage {
 
         // Update cache atomically
         {
-            let mut cache = self.in_memory_cache.write().unwrap();
+            let mut cache = self.in_memory_cache.write().await;
 
             // Add package info
             let package_info = PackageInfo {
@@ -210,14 +221,34 @@ impl BinaryStorage {
             cache.packages.insert(package_key, package_info);
 
             // Add all resource indices
-            for index in resource_indices {
-                cache.resources.insert(index.canonical_url.clone(), index);
+            for index in &resource_indices {
+                cache
+                    .resources
+                    .insert(index.canonical_url.clone(), index.clone());
             }
 
             // Update metadata
             cache.metadata.last_updated = Utc::now();
             cache.metadata.package_count = cache.packages.len();
             cache.metadata.resource_count = cache.resources.len();
+        }
+
+        // Update concurrent read index outside of cache lock
+        for index in resource_indices {
+            self.canonical_index
+                .insert(index.canonical_url.clone(), index.clone());
+            if let Some(base) = Self::compute_canonical_base(
+                &index.canonical_url,
+                index.metadata.version.as_deref(),
+            ) {
+                // push into existing vec
+                if let Some(mut vec) = self.base_index.get_cloned(&base) {
+                    vec.push(index.clone());
+                    self.base_index.insert(base, vec);
+                } else {
+                    self.base_index.insert(base, vec![index.clone()]);
+                }
+            }
         }
 
         // Persist to disk
@@ -245,11 +276,12 @@ impl BinaryStorage {
     /// # Returns
     ///
     /// `true` if the package was found and removed, `false` if not found.
+    #[tracing::instrument(name = "storage.remove_package", skip(self))]
     pub async fn remove_package(&self, name: &str, version: &str) -> Result<bool> {
         let package_key = format!("{name}:{version}");
 
         let removed = {
-            let mut cache = self.in_memory_cache.write().unwrap();
+            let mut cache = self.in_memory_cache.write().await;
 
             // Check if package exists
             if !cache.packages.contains_key(&package_key) {
@@ -291,6 +323,29 @@ impl BinaryStorage {
         if removed {
             // Persist to disk
             self.save_to_disk().await?;
+            // Update read index: re-scan and remove entries for this package
+            let all = self.canonical_index.iter_cloned();
+            for (url, idx) in all {
+                if idx.package_name == name && idx.package_version == version {
+                    self.canonical_index.remove(&url);
+                    if let Some(base) =
+                        Self::compute_canonical_base(&url, idx.metadata.version.as_deref())
+                    {
+                        if let Some(mut vec) = self.base_index.get_cloned(&base) {
+                            vec.retain(|ri| {
+                                !(ri.package_name == name
+                                    && ri.package_version == version
+                                    && ri.canonical_url == url)
+                            });
+                            if vec.is_empty() {
+                                self.base_index.remove(&base);
+                            } else {
+                                self.base_index.insert(base, vec);
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         Ok(removed)
@@ -299,8 +354,9 @@ impl BinaryStorage {
     /// Lists all installed packages.
     ///
     /// Returns a vector of package information sorted by name and version.
+    #[tracing::instrument(name = "storage.list_packages", skip(self))]
     pub async fn list_packages(&self) -> Result<Vec<PackageInfo>> {
-        let cache = self.in_memory_cache.read().unwrap();
+        let cache = self.in_memory_cache.read().await;
         let mut packages: Vec<PackageInfo> = cache.packages.values().cloned().collect();
         packages.sort_by(|a, b| a.name.cmp(&b.name).then(a.version.cmp(&b.version)));
         Ok(packages)
@@ -315,17 +371,86 @@ impl BinaryStorage {
     /// # Returns
     ///
     /// `Some(ResourceIndex)` if found, `None` otherwise.
+    #[tracing::instrument(name = "storage.find_resource", skip(self))]
     pub async fn find_resource(&self, canonical_url: &str) -> Result<Option<ResourceIndex>> {
-        let cache = self.in_memory_cache.read().unwrap();
-        Ok(cache.resources.get(canonical_url).cloned())
+        let key = CanonicalUrl::parse(canonical_url)
+            .map(|c| c.into())
+            .unwrap_or_else(|_| canonical_url.to_string());
+        if let Some(idx) = self.canonical_index.get_cloned(&key) {
+            return Ok(Some(idx));
+        }
+        let cache = self.in_memory_cache.read().await;
+        Ok(cache.resources.get(&key).cloned())
+    }
+
+    /// Find all resources whose canonical URL starts with the given base URL
+    pub async fn find_by_base_url(&self, base_url: &str) -> Result<Vec<ResourceIndex>> {
+        let base = CanonicalUrl::parse(base_url)
+            .map(String::from)
+            .unwrap_or_else(|_| base_url.to_string());
+        if let Some(vec) = self.base_index.get_cloned(&base) {
+            return Ok(vec);
+        }
+        // Fallback: prefix scan from canonical index
+        let mut out = Vec::new();
+        for (url, idx) in self.canonical_index.iter_cloned() {
+            if url.starts_with(&base) {
+                out.push(idx);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Find the latest version for a given base canonical URL
+    pub async fn find_latest_by_base_url(&self, base_url: &str) -> Result<Option<ResourceIndex>> {
+        let mut candidates = self.find_by_base_url(base_url).await?;
+        if candidates.is_empty() {
+            return Ok(None);
+        }
+        candidates.sort_by(|a, b| {
+            let va = a.metadata.version.as_deref().unwrap_or("");
+            let vb = b.metadata.version.as_deref().unwrap_or("");
+            let na = va.trim_start_matches('v');
+            let nb = vb.trim_start_matches('v');
+            match (semver::Version::parse(na), semver::Version::parse(nb)) {
+                (Ok(va), Ok(vb)) => vb.cmp(&va),
+                _ => vb.cmp(va),
+            }
+        });
+        Ok(candidates.into_iter().next())
+    }
+
+    /// List available versions for a canonical base URL, newest first.
+    pub async fn list_versions_for_canonical(&self, base_url: &str) -> Result<Vec<String>> {
+        let mut versions: Vec<String> = self
+            .find_by_base_url(base_url)
+            .await?
+            .into_iter()
+            .filter_map(|ri| ri.metadata.version)
+            .collect();
+
+        // Dedup preserving order after sort
+        versions.sort_by(|a, b| {
+            let na = a.trim_start_matches('v');
+            let nb = b.trim_start_matches('v');
+            match (semver::Version::parse(na), semver::Version::parse(nb)) {
+                (Ok(va), Ok(vb)) => vb.cmp(&va),
+                _ => b.cmp(a),
+            }
+        });
+        versions.dedup();
+        Ok(versions)
     }
 
     /// Gets all resource indices for search operations.
     ///
     /// Returns a HashMap mapping canonical URLs to resource indices.
     pub fn get_cache_entries(&self) -> HashMap<String, ResourceIndex> {
-        let cache = self.in_memory_cache.read().unwrap();
-        cache.resources.clone()
+        // Build from concurrent read index to avoid locking the async RwLock
+        self.canonical_index
+            .iter_cloned()
+            .into_iter()
+            .collect::<HashMap<_, _>>()
     }
 
     /// Loads a FHIR resource from disk.
@@ -337,6 +462,7 @@ impl BinaryStorage {
     /// # Returns
     ///
     /// The loaded FHIR resource with its content.
+    #[tracing::instrument(name = "storage.get_resource", skip(self, resource_index))]
     pub async fn get_resource(&self, resource_index: &ResourceIndex) -> Result<FhirResource> {
         let file_path = resource_index.file_path.clone();
 
@@ -373,8 +499,9 @@ impl BinaryStorage {
     ///
     /// Returns information about the current state of storage including
     /// package count, resource count, and last update time.
+    #[tracing::instrument(name = "storage.get_stats", skip(self))]
     pub async fn get_stats(&self) -> Result<StorageMetadata> {
-        let cache = self.in_memory_cache.read().unwrap();
+        let cache = self.in_memory_cache.read().await;
         Ok(cache.metadata.clone())
     }
 
@@ -385,10 +512,13 @@ impl BinaryStorage {
         package_name: &str,
         package_version: &str,
     ) -> Result<ResourceIndex> {
-        let canonical_url = resource
+        let canonical_url_raw = resource
             .url
             .clone()
             .unwrap_or_else(|| format!("{}#{}", resource.resource_type, resource.id));
+        let canonical_url = CanonicalUrl::parse(&canonical_url_raw)
+            .map(String::from)
+            .unwrap_or(canonical_url_raw);
 
         Ok(ResourceIndex {
             canonical_url,
@@ -407,6 +537,7 @@ impl BinaryStorage {
     }
 
     /// Loads storage data from disk.
+    #[tracing::instrument(name = "storage.load_from_disk", skip(self))]
     async fn load_from_disk(&mut self) -> Result<()> {
         if !self.storage_path.exists() {
             debug!("Storage file does not exist, starting with empty storage");
@@ -429,7 +560,7 @@ impl BinaryStorage {
         match self.try_load_data(&compressed_data).await {
             Ok(storage_data) => {
                 // Update cache
-                let mut cache = self.in_memory_cache.write().unwrap();
+                let mut cache = self.in_memory_cache.write().await;
                 *cache = storage_data;
                 debug!("Successfully loaded storage data from disk");
                 Ok(())
@@ -439,7 +570,7 @@ impl BinaryStorage {
 
                 // Try to load from backup
                 if let Ok(backup_data) = self.try_load_backup().await {
-                    let mut cache = self.in_memory_cache.write().unwrap();
+                    let mut cache = self.in_memory_cache.write().await;
                     *cache = backup_data;
                     warn!("Recovered storage data from backup");
                     Ok(())
@@ -529,7 +660,7 @@ impl BinaryStorage {
     /// Saves storage data to disk with atomic write operation.
     async fn save_to_disk(&self) -> Result<()> {
         let storage_data = {
-            let cache = self.in_memory_cache.read().unwrap();
+            let cache = self.in_memory_cache.read().await;
             cache.clone()
         };
 
@@ -579,6 +710,7 @@ impl BinaryStorage {
     ///
     /// Verifies that all referenced files exist and are readable.
     /// Returns a report of any issues found.
+    #[tracing::instrument(name = "storage.integrity_check", skip(self))]
     pub async fn integrity_check(&self) -> Result<IntegrityReport> {
         let mut report = IntegrityReport {
             total_packages: 0,
@@ -588,7 +720,7 @@ impl BinaryStorage {
             orphaned_resources: Vec::new(),
         };
 
-        let cache = self.in_memory_cache.read().unwrap();
+        let cache = self.in_memory_cache.read().await;
         report.total_packages = cache.packages.len();
         report.total_resources = cache.resources.len();
 
@@ -634,6 +766,7 @@ impl BinaryStorage {
     ///
     /// This operation rewrites the storage file to remove fragmentation
     /// and optimize for better read performance.
+    #[tracing::instrument(name = "storage.compact", skip(self))]
     pub async fn compact(&self) -> Result<()> {
         info!("Starting storage compaction");
 
@@ -642,6 +775,87 @@ impl BinaryStorage {
 
         info!("Storage compaction completed");
         Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::traits::PackageStore for BinaryStorage {
+    async fn add_package(&self, package: &crate::package::ExtractedPackage) -> Result<()> {
+        self.add_package(package).await
+    }
+
+    async fn remove_package(&self, name: &str, version: &str) -> Result<bool> {
+        self.remove_package(name, version).await
+    }
+
+    async fn find_resource(&self, canonical_url: &str) -> Result<Option<ResourceIndex>> {
+        self.find_resource(canonical_url).await
+    }
+
+    async fn list_packages(&self) -> Result<Vec<PackageInfo>> {
+        self.list_packages().await
+    }
+}
+
+impl BinaryStorage {
+    async fn rebuild_indexes_from_cache(&self) -> Result<()> {
+        self.canonical_index.clear();
+        self.base_index.clear();
+        let cache = self.in_memory_cache.read().await;
+        for (url, idx) in &cache.resources {
+            self.canonical_index.insert(url.clone(), idx.clone());
+            if let Some(base) = Self::compute_canonical_base(url, idx.metadata.version.as_deref()) {
+                if let Some(mut vec) = self.base_index.get_cloned(&base) {
+                    vec.push(idx.clone());
+                    self.base_index.insert(base, vec);
+                } else {
+                    self.base_index.insert(base, vec![idx.clone()]);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl BinaryStorage {
+    fn compute_canonical_base(canonical: &str, ver_hint: Option<&str>) -> Option<String> {
+        // Strict URL handling first
+        if let Ok(mut u) = url::Url::parse(canonical) {
+            let path = u.path().trim_end_matches('/');
+            let last = path.rsplit('/').next().unwrap_or("");
+            if Self::looks_like_version(last, ver_hint) {
+                let mut segs: Vec<&str> = path.split('/').collect();
+                segs.pop();
+                let new_path = if segs.is_empty() {
+                    "/".to_string()
+                } else {
+                    format!("/{}", segs.join("/"))
+                };
+                u.set_path(&new_path);
+                return Some(u.to_string());
+            }
+            return Some(u.to_string());
+        }
+        // Non-URL; simple heuristic
+        let s = canonical.trim_end_matches('/');
+        let last = s.rsplit('/').next().unwrap_or("");
+        if Self::looks_like_version(last, ver_hint) {
+            return s.rsplit_once('/').map(|(h, _)| h.to_string());
+        }
+        Some(s.to_string())
+    }
+
+    fn looks_like_version(seg: &str, ver_hint: Option<&str>) -> bool {
+        if seg.is_empty() {
+            return false;
+        }
+        if let Some(h) = ver_hint {
+            if seg.eq_ignore_ascii_case(h) {
+                return true;
+            }
+        }
+        let t = seg.trim_start_matches('v');
+        semver::Version::parse(t).is_ok()
     }
 }
 

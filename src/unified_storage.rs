@@ -35,8 +35,6 @@ impl UnifiedStorage {
         use_mmap: bool,
         compression_level: i32,
     ) -> Result<Self> {
-        info!("Initializing unified storage system with optimization features");
-
         // Initialize package storage
         let package_storage = Arc::new(BinaryStorage::new(config.clone()).await?);
 
@@ -267,6 +265,50 @@ impl UnifiedStorage {
         }
 
         recommendations
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::traits::PackageStore for UnifiedStorage {
+    async fn add_package(&self, package: &ExtractedPackage) -> crate::error::Result<()> {
+        self.add_package(package).await
+    }
+
+    async fn remove_package(&self, name: &str, version: &str) -> crate::error::Result<bool> {
+        self.remove_package(name, version).await
+    }
+
+    async fn find_resource(
+        &self,
+        canonical_url: &str,
+    ) -> crate::error::Result<Option<ResourceIndex>> {
+        self.find_resource(canonical_url).await
+    }
+
+    async fn list_packages(&self) -> crate::error::Result<Vec<PackageInfo>> {
+        self.list_packages().await
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::traits::IndexStore for UnifiedStorage {
+    async fn store_index(
+        &self,
+        index: &crate::storage::optimized::IndexData,
+    ) -> crate::error::Result<()> {
+        self.index_storage.store_index(index).await
+    }
+
+    async fn load_metadata(
+        &self,
+    ) -> crate::error::Result<crate::storage::optimized::IndexMetadata> {
+        self.get_index_metadata()
+            .await?
+            .ok_or_else(|| crate::error::FcmError::Generic("Index metadata not found".to_string()))
+    }
+
+    async fn verify_integrity(&self) -> crate::error::Result<bool> {
+        self.index_storage.verify_integrity().await
     }
 }
 

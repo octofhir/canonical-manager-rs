@@ -1,6 +1,7 @@
 //! Canonical URL resolution
 
 use crate::binary_storage::{BinaryStorage, PackageInfo, ResourceMetadata};
+use crate::domain::{CanonicalWithVersion, PackageVersion};
 use crate::error::{ResolutionError, Result};
 use crate::package::FhirResource;
 use serde::{Deserialize, Serialize};
@@ -42,6 +43,8 @@ use url::Url;
 pub struct CanonicalResolver {
     storage: Arc<BinaryStorage>,
     resolution_config: ResolutionConfig,
+    #[cfg(feature = "fuzzy-search")]
+    fuzzy_index: crate::fuzzy::NGramIndex,
 }
 
 /// Configuration for canonical URL resolution behavior.
@@ -59,6 +62,8 @@ pub struct CanonicalResolver {
 ///     version_preference: VersionPreference::Latest,
 ///     fuzzy_matching_threshold: 0.8,
 ///     enable_fuzzy_matching: true,
+///     #[cfg(feature = "fuzzy-search")]
+///     fuzzy_max_candidates: 200,
 /// };
 /// ```
 #[derive(Debug, Clone)]
@@ -67,6 +72,8 @@ pub struct ResolutionConfig {
     pub version_preference: VersionPreference,
     pub fuzzy_matching_threshold: f64,
     pub enable_fuzzy_matching: bool,
+    #[cfg(feature = "fuzzy-search")]
+    pub fuzzy_max_candidates: usize,
 }
 
 /// Strategy for resolving version conflicts during canonical URL resolution.
@@ -92,7 +99,9 @@ impl Default for ResolutionConfig {
             package_priorities: vec![],
             version_preference: VersionPreference::Latest,
             fuzzy_matching_threshold: 0.8,
-            enable_fuzzy_matching: true,
+            enable_fuzzy_matching: false,
+            #[cfg(feature = "fuzzy-search")]
+            fuzzy_max_candidates: 200,
         }
     }
 }
@@ -169,9 +178,16 @@ impl CanonicalResolver {
     /// # }
     /// ```
     pub fn new(storage: Arc<BinaryStorage>) -> Self {
+        #[cfg(feature = "fuzzy-search")]
+        let fuzzy_index = {
+            let urls: Vec<String> = storage.get_cache_entries().keys().cloned().collect();
+            crate::fuzzy::NGramIndex::build_from_urls(urls)
+        };
         Self {
             storage,
             resolution_config: ResolutionConfig::default(),
+            #[cfg(feature = "fuzzy-search")]
+            fuzzy_index,
         }
     }
 
@@ -211,9 +227,16 @@ impl CanonicalResolver {
     /// # }
     /// ```
     pub fn with_config(storage: Arc<BinaryStorage>, config: ResolutionConfig) -> Self {
+        #[cfg(feature = "fuzzy-search")]
+        let fuzzy_index = {
+            let urls: Vec<String> = storage.get_cache_entries().keys().cloned().collect();
+            crate::fuzzy::NGramIndex::build_from_urls(urls)
+        };
         Self {
             storage,
             resolution_config: config,
+            #[cfg(feature = "fuzzy-search")]
+            fuzzy_index,
         }
     }
 
@@ -243,48 +266,41 @@ impl CanonicalResolver {
     /// # Ok(())
     /// # }
     /// ```
+    #[tracing::instrument(name = "resolver.resolve", skip(self), fields(canonical = %canonical_url))]
     pub async fn resolve(&self, canonical_url: &str) -> Result<ResolvedResource> {
         info!("Resolving canonical URL: {}", canonical_url);
+        #[cfg(feature = "metrics")]
+        let start = std::time::Instant::now();
+
+        // Support `url|version` form per FHIR semantics
+        let parsed = CanonicalWithVersion::parse(canonical_url);
+        let base = parsed.canonical.clone();
 
         // Step 1: Try exact match
-        if let Some(resource_index) = self.storage.find_resource(canonical_url).await? {
+        if let Some(resource_index) = self.storage.find_resource(&base).await? {
             debug!("Found exact match for canonical URL");
             return self
-                .build_resolved_resource(canonical_url, resource_index, ResolutionPath::ExactMatch)
+                .build_resolved_resource(&base, resource_index, ResolutionPath::ExactMatch)
                 .await;
         }
 
-        // Step 2: Try version fallback (remove version from URL or find versioned variants)
-        if let Ok(parsed_url) = Url::parse(canonical_url) {
-            let base_url = self.extract_base_url(&parsed_url)?;
-
-            // Try to find latest version for the base URL
-            if let Some(resource_index) = self.find_latest_version(&base_url).await? {
-                // Only use version fallback if we found a different URL
-                if resource_index.canonical_url != canonical_url {
-                    debug!("Found version fallback match");
-                    let resolved_url = resource_index.canonical_url.clone();
-                    return self
-                        .build_resolved_resource(
-                            canonical_url,
-                            resource_index,
-                            ResolutionPath::VersionFallback {
-                                requested: canonical_url.to_string(),
-                                resolved: resolved_url,
-                            },
-                        )
-                        .await;
-                }
+        // Step 2: If a version is specified, try to resolve exact or compatible version
+        if let Some(ver) = parsed.version.clone() {
+            if let Some(resource_index) = self.resolve_with_version_candidates(&base, &ver).await? {
+                debug!("Resolved via version-specific selection");
+                return self
+                    .build_resolved_resource(&base, resource_index, ResolutionPath::ExactMatch)
+                    .await;
             }
         }
 
-        // Step 3: Try fuzzy matching if enabled
+        // Step 3: Try fuzzy matching first if enabled
         if self.resolution_config.enable_fuzzy_matching {
-            if let Some((resource_index, similarity)) = self.fuzzy_match(canonical_url).await? {
+            if let Some((resource_index, similarity)) = self.fuzzy_match(&base).await? {
                 debug!("Found fuzzy match with similarity: {:.2}", similarity);
                 return self
                     .build_resolved_resource(
-                        canonical_url,
+                        &base,
                         resource_index,
                         ResolutionPath::FuzzyMatch { similarity },
                     )
@@ -292,10 +308,104 @@ impl CanonicalResolver {
             }
         }
 
-        Err(ResolutionError::CanonicalUrlNotFound {
-            url: canonical_url.to_string(),
+        // Step 4: Try version fallback only when the last path segment looks like a version
+        if let Ok(parsed_url) = Url::parse(&base) {
+            let base_url = self.extract_base_url(&parsed_url)?;
+            let last_seg = parsed_url
+                .path()
+                .trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .unwrap_or("");
+            let looks_like_ver = self.looks_like_version(last_seg);
+
+            if looks_like_ver {
+                // Try to find latest version for the base URL via storage pre-index
+                if let Some(resource_index) =
+                    self.storage.find_latest_by_base_url(&base_url).await?
+                {
+                    // Only use version fallback if we found a different URL
+                    if resource_index.canonical_url != base {
+                        debug!("Found version fallback match");
+                        let resolved_url = resource_index.canonical_url.clone();
+                        return self
+                            .build_resolved_resource(
+                                &base,
+                                resource_index,
+                                ResolutionPath::VersionFallback {
+                                    requested: base.to_string(),
+                                    resolved: resolved_url,
+                                },
+                            )
+                            .await;
+                    }
+                }
+            }
         }
-        .into())
+
+        let result = Err(ResolutionError::CanonicalUrlNotFound { url: base }.into());
+
+        #[cfg(feature = "metrics")]
+        {
+            metrics::histogram!("resolve_latency_ms", start.elapsed().as_secs_f64() * 1000.0);
+        }
+
+        result
+    }
+
+    async fn resolve_with_version_candidates(
+        &self,
+        base_canonical: &str,
+        desired: &PackageVersion,
+    ) -> Result<Option<crate::binary_storage::ResourceIndex>> {
+        // Collect candidates under the same base
+        let mut candidates = self.storage.find_by_base_url(base_canonical).await?;
+        if candidates.is_empty() {
+            return Ok(None);
+        }
+
+        // Try exact metadata.version match
+        if let Some(exact) = candidates.iter().find(|ri| {
+            ri.metadata
+                .version
+                .as_ref()
+                .map(|v| v == &desired.original)
+                .unwrap_or(false)
+        }) {
+            return Ok(Some(exact.clone()));
+        }
+
+        // If compatibility policy is enabled, select highest compatible version (same major via caret)
+        if matches!(
+            self.resolution_config.version_preference,
+            VersionPreference::Compatible
+        ) {
+            if let Some(want) = &desired.semver {
+                let req = semver::VersionReq::parse(&format!("^{want}"))
+                    .unwrap_or(semver::VersionReq::STAR);
+                candidates.sort_by(|a, b| {
+                    let va = a.metadata.version.as_deref().unwrap_or("");
+                    let vb = b.metadata.version.as_deref().unwrap_or("");
+                    match (
+                        semver::Version::parse(va.trim_start_matches('v')),
+                        semver::Version::parse(vb.trim_start_matches('v')),
+                    ) {
+                        (Ok(va), Ok(vb)) => vb.cmp(&va),
+                        _ => vb.cmp(va),
+                    }
+                });
+                for ri in candidates {
+                    if let Some(vs) = ri.metadata.version.as_deref() {
+                        if let Ok(v) = semver::Version::parse(vs.trim_start_matches('v')) {
+                            if req.matches(&v) {
+                                return Ok(Some(ri));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// Resolves a canonical URL to a specific version of a FHIR resource.
@@ -495,90 +605,16 @@ impl CanonicalResolver {
         segment.chars().next().is_some_and(|c| c.is_ascii_digit()) && segment.contains('.')
     }
 
-    /// Find the latest version of a resource by base URL
-    async fn find_latest_version(
-        &self,
-        base_url: &str,
-    ) -> Result<Option<crate::binary_storage::ResourceIndex>> {
-        let cache_entries = self.storage.get_cache_entries();
-
-        let mut matching_resources = Vec::new();
-        for (url, resource_index) in cache_entries {
-            if self.is_version_of_base_url(&url, base_url)? {
-                matching_resources.push(resource_index);
-            }
-        }
-
-        if matching_resources.is_empty() {
-            return Ok(None);
-        }
-
-        // Sort by version if available, otherwise by canonical URL
-        matching_resources.sort_by(|a, b| {
-            match (&a.metadata.version, &b.metadata.version) {
-                (Some(v1), Some(v2)) => self.compare_versions(v2, v1), // Reverse for latest first
-                (Some(_), None) => std::cmp::Ordering::Less,
-                (None, Some(_)) => std::cmp::Ordering::Greater,
-                (None, None) => b.canonical_url.cmp(&a.canonical_url),
-            }
-        });
-
-        Ok(matching_resources.into_iter().next())
-    }
-
-    /// Check if a URL is a version of a base URL
-    fn is_version_of_base_url(&self, url: &str, base_url: &str) -> Result<bool> {
-        if let (Ok(parsed_url), Ok(parsed_base)) = (Url::parse(url), Url::parse(base_url)) {
-            if parsed_url.scheme() != parsed_base.scheme()
-                || parsed_url.host() != parsed_base.host()
-            {
-                return Ok(false);
-            }
-
-            let url_path = parsed_url.path().trim_end_matches('/');
-            let base_path = parsed_base.path().trim_end_matches('/');
-
-            // Check if URL path starts with base path followed by version-like segment
-            if let Some(remainder) = url_path.strip_prefix(base_path) {
-                if let Some(version_part) = remainder.strip_prefix('/') {
-                    return Ok(self.looks_like_version(version_part));
-                }
-            }
-        }
-
-        Ok(false)
-    }
-
-    /// Simple version comparison (semantic versioning-like)
-    fn compare_versions(&self, v1: &str, v2: &str) -> std::cmp::Ordering {
-        let parse_version = |v: &str| -> Vec<u32> {
-            v.trim_start_matches('v')
-                .split('.')
-                .filter_map(|s| s.parse::<u32>().ok())
-                .collect()
-        };
-
-        let version1 = parse_version(v1);
-        let version2 = parse_version(v2);
-
-        version1.cmp(&version2)
-    }
+    // Find the latest version of a resource by base URL
+    // Helper methods for legacy fallback have been removed in favor of storage pre-index lookups
 
     /// Get all resources that match a base URL pattern
     async fn get_resources_by_base_url(
         &self,
         base_url: &str,
     ) -> Result<Vec<crate::binary_storage::ResourceIndex>> {
-        let cache_entries = self.storage.get_cache_entries();
-
-        let mut matching_resources = Vec::new();
-        for (url, resource_index) in cache_entries {
-            if url.starts_with(base_url) || self.is_version_of_base_url(&url, base_url)? {
-                matching_resources.push(resource_index);
-            }
-        }
-
-        Ok(matching_resources)
+        // Use storage pre-index for base URL lookups
+        self.storage.find_by_base_url(base_url).await
     }
 
     /// Perform fuzzy matching on canonical URLs
@@ -586,26 +622,52 @@ impl CanonicalResolver {
         &self,
         canonical_url: &str,
     ) -> Result<Option<(crate::binary_storage::ResourceIndex, f64)>> {
-        let cache_entries = self.storage.get_cache_entries();
-
-        let mut best_match = None;
-        let mut best_similarity = 0.0;
-
-        for (url, resource_index) in cache_entries {
-            let similarity = self.calculate_similarity(canonical_url, &url);
-
-            if similarity > self.resolution_config.fuzzy_matching_threshold
-                && similarity > best_similarity
-            {
-                best_similarity = similarity;
-                best_match = Some(resource_index);
+        #[cfg(feature = "fuzzy-search")]
+        {
+            let max_candidates = self.resolution_config.fuzzy_max_candidates;
+            let candidates = self
+                .fuzzy_index
+                .query(canonical_url, max_candidates)
+                .into_iter()
+                .map(|(u, _)| u)
+                .collect::<Vec<_>>();
+            let cache = self.storage.get_cache_entries();
+            let mut best: Option<(crate::binary_storage::ResourceIndex, f64)> = None;
+            for u in candidates {
+                if let Some(idx) = cache.get(&u) {
+                    let sim = self.calculate_similarity(canonical_url, &u);
+                    if sim > self.resolution_config.fuzzy_matching_threshold {
+                        if let Some((_, best_sim)) = &best {
+                            if sim > *best_sim {
+                                best = Some((idx.clone(), sim));
+                            }
+                        } else {
+                            best = Some((idx.clone(), sim));
+                        }
+                    }
+                }
             }
+            Ok(best)
         }
-
-        if let Some(resource_index) = best_match {
-            Ok(Some((resource_index, best_similarity)))
-        } else {
-            Ok(None)
+        #[cfg(not(feature = "fuzzy-search"))]
+        {
+            let cache_entries = self.storage.get_cache_entries();
+            let mut best_match = None;
+            let mut best_similarity = 0.0;
+            for (url, resource_index) in cache_entries {
+                let similarity = self.calculate_similarity(canonical_url, &url);
+                if similarity > self.resolution_config.fuzzy_matching_threshold
+                    && similarity > best_similarity
+                {
+                    best_similarity = similarity;
+                    best_match = Some(resource_index);
+                }
+            }
+            if let Some(resource_index) = best_match {
+                Ok(Some((resource_index, best_similarity)))
+            } else {
+                Ok(None)
+            }
         }
     }
 

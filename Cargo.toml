@@ -1,6 +1,6 @@
 [package]
 name = "octofhir-canonical-manager"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2024"
 description = "FHIR Canonical Manager - Library-first FHIR package management"
 license = "MIT OR Apache-2.0"
@@ -27,13 +27,28 @@ path = "examples/search_parameters.rs"
 tokio = { version = "1.0", features = ["full"] }
 
 # HTTP client
-reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "stream",
+    "rustls-tls",
+] }
 futures-util = "0.3"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "0.9"
+semver = "1"
+async-compression = { version = "0.4", features = ["tokio", "gzip"] }
+async-tar = "0.5"
+sha1 = "0.10"
+hex = "0.4"
+rand = "0.9"
+papaya = "0.2"
+sha2 = "0.10"
+base64 = "0.22"
+crossbeam-epoch = "0.9"
+async-trait = "0.1"
 
 # Error handling
 thiserror = "2"
@@ -52,7 +67,7 @@ flate2 = "1.0"
 tar = "0.4"
 
 # UUID generation
-uuid = { version = "1.0", features = ["v4", "serde"] }
+uuid = { version = "1.18", features = ["v4", "serde"] }
 
 # URL handling
 url = { version = "2.5", features = ["serde"] }
@@ -76,11 +91,11 @@ dashmap = "6.1"
 lru = "0.16"
 rayon = "1.10"
 crossbeam-channel = "0.5"
-tantivy = "0.24"
+tantivy = "0.25"
 walkdir = "2.5"
 
 # Async file I/O
-tokio-util = { version = "0.7", features = ["io"] }
+tokio-util = { version = "0.7", features = ["io", "compat"] }
 
 # Date/time handling
 chrono = { version = "0.4", features = ["serde"] }
@@ -90,6 +105,9 @@ regex = "1.0"
 
 # System information for config optimization
 num_cpus = "1.0"
+
+# Optional metrics
+metrics = { version = "0.21", optional = true }
 
 [dev-dependencies]
 tokio-test = "0.4"
@@ -101,3 +119,5 @@ predicates = "3.0"
 [features]
 default = ["cli"]
 cli = ["clap", "colored"]
+fuzzy-search = []
+metrics = ["dep:metrics"]

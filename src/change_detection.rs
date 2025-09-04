@@ -122,13 +122,10 @@ impl PackageChangeDetector {
         let mut checksums = Vec::new();
         for entry in entries {
             let path = entry.path().to_owned();
-            let (path_clone, hash) = tokio::task::spawn_blocking(move || {
-                let content = std::fs::read(&path)?;
-                let file_hash = blake3::hash(&content);
-                Ok::<_, crate::error::FcmError>((path, file_hash))
-            })
-            .await??;
-            checksums.push((path_clone, hash));
+            let content = tokio::fs::read(&path).await?;
+            let file_hash = blake3::hash(&content);
+            let path_clone = path.clone();
+            checksums.push((path_clone, file_hash));
         }
 
         for (path, hash) in checksums {
@@ -226,10 +223,7 @@ async fn extract_package_id(package_path: &Path) -> Result<String> {
     // Try to read package.json for package ID
     let package_json_path = package_path.join("package.json");
     if package_json_path.exists() {
-        let package_json_path_clone = package_json_path.clone();
-        let content =
-            tokio::task::spawn_blocking(move || std::fs::read_to_string(&package_json_path_clone))
-                .await??;
+        let content = tokio::fs::read_to_string(&package_json_path).await?;
         let json: serde_json::Value = serde_json::from_str(&content)?;
         if let Some(name) = json.get("name").and_then(|n| n.as_str()) {
             return Ok(name.to_string());
@@ -248,10 +242,7 @@ async fn extract_version(package_path: &Path) -> Result<String> {
     // Try to read package.json for version
     let package_json_path = package_path.join("package.json");
     if package_json_path.exists() {
-        let package_json_path_clone = package_json_path.clone();
-        let content =
-            tokio::task::spawn_blocking(move || std::fs::read_to_string(&package_json_path_clone))
-                .await??;
+        let content = tokio::fs::read_to_string(&package_json_path).await?;
         let json: serde_json::Value = serde_json::from_str(&content)?;
         if let Some(version) = json.get("version").and_then(|v| v.as_str()) {
             return Ok(version.to_string());

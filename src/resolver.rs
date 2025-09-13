@@ -567,9 +567,13 @@ impl CanonicalResolver {
     /// # }
     /// ```
     pub fn list_canonical_urls(&self) -> Vec<String> {
-        self.storage.get_cache_entries().keys().cloned().collect()
+        self.storage
+            .get_cache_entries()
+            .keys()
+            .filter(|key| !key.contains("#")) // Filter out composite keys
+            .cloned()
+            .collect()
     }
-
     /// Extract base URL by removing version components
     fn extract_base_url(&self, parsed_url: &Url) -> Result<String> {
         let path = parsed_url.path();

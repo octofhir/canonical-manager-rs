@@ -85,7 +85,7 @@ async fn test_add_package_to_storage() {
 
     // Verify resources are indexed
     let cache_entries = storage.get_cache_entries();
-    assert_eq!(cache_entries.len(), 2);
+    assert_eq!(cache_entries.len(), 4); // 2 composite keys + 2 canonical URLs
     assert!(cache_entries.contains_key("http://example.com/StructureDefinition/test-patient"));
     assert!(cache_entries.contains_key("http://example.com/ValueSet/test-codes"));
 }
@@ -187,7 +187,7 @@ async fn test_search_by_type() {
         .values()
         .filter(|entry| entry.resource_type == "StructureDefinition")
         .collect();
-    assert_eq!(structure_defs.len(), 1);
+    assert_eq!(structure_defs.len(), 2); // composite key + canonical URL
     assert_eq!(structure_defs[0].resource_type, "StructureDefinition");
     assert_eq!(
         structure_defs[0].canonical_url,
@@ -199,7 +199,7 @@ async fn test_search_by_type() {
         .values()
         .filter(|entry| entry.resource_type == "ValueSet")
         .collect();
-    assert_eq!(value_sets.len(), 1);
+    assert_eq!(value_sets.len(), 2); // composite key + canonical URL
     assert_eq!(value_sets[0].resource_type, "ValueSet");
     assert_eq!(
         value_sets[0].canonical_url,

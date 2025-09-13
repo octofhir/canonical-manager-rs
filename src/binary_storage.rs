@@ -221,10 +221,13 @@ impl BinaryStorage {
             cache.packages.insert(package_key, package_info);
 
             // Add all resource indices
+            // Use composite key: canonical_url + package to avoid conflicts between FHIR versions
             for index in &resource_indices {
-                cache
-                    .resources
-                    .insert(index.canonical_url.clone(), index.clone());
+                let composite_key = format!(
+                    "{}#{}@{}",
+                    index.canonical_url, index.package_name, index.package_version
+                );
+                cache.resources.insert(composite_key, index.clone());
             }
 
             // Update metadata
@@ -234,9 +237,25 @@ impl BinaryStorage {
         }
 
         // Update concurrent read index outside of cache lock
+        // Use composite key: canonical_url + package to avoid conflicts between FHIR versions
         for index in resource_indices {
-            self.canonical_index
-                .insert(index.canonical_url.clone(), index.clone());
+            let composite_key = format!(
+                "{}#{}@{}",
+                index.canonical_url, index.package_name, index.package_version
+            );
+            self.canonical_index.insert(composite_key, index.clone());
+            // Also store by canonical URL directly, preferring latest version
+            if let Some(existing) = self.canonical_index.get_cloned(&index.canonical_url) {
+                // Compare versions and keep the latest one
+                if index.package_version > existing.package_version {
+                    self.canonical_index
+                        .insert(index.canonical_url.clone(), index.clone());
+                }
+            } else {
+                // First resource with this canonical URL
+                self.canonical_index
+                    .insert(index.canonical_url.clone(), index.clone());
+            }
             if let Some(base) = Self::compute_canonical_base(
                 &index.canonical_url,
                 index.metadata.version.as_deref(),
@@ -376,13 +395,36 @@ impl BinaryStorage {
         let key = CanonicalUrl::parse(canonical_url)
             .map(|c| c.into())
             .unwrap_or_else(|_| canonical_url.to_string());
+
+        // First try direct lookup (for simple cases)
         if let Some(idx) = self.canonical_index.get_cloned(&key) {
             return Ok(Some(idx));
         }
+
+        // If not found directly, try to find by scanning composite keys
+        // This handles the case where we have multiple versions of the same resource
+        let mut candidates = Vec::new();
+        for (stored_key, resource_index) in self.canonical_index.iter_cloned() {
+            // Check if the stored key starts with our canonical URL
+            if stored_key.starts_with(&key) {
+                // If it is an exact match or a composite key match
+                if stored_key == key || stored_key.starts_with(&format!("{key}#")) {
+                    candidates.push(resource_index);
+                }
+            }
+        }
+
+        if !candidates.is_empty() {
+            // If we have multiple candidates, prefer the latest version
+            // Sort by package version (this is a simple heuristic)
+            candidates.sort_by(|a, b| b.package_version.cmp(&a.package_version));
+            return Ok(Some(candidates[0].clone()));
+        }
+
+        // Fall back to cache lookup
         let cache = self.in_memory_cache.read().await;
         Ok(cache.resources.get(&key).cloned())
     }
-
     /// Find all resources whose canonical URL starts with the given base URL
     pub async fn find_by_base_url(&self, base_url: &str) -> Result<Vec<ResourceIndex>> {
         let base = CanonicalUrl::parse(base_url)
@@ -444,7 +486,6 @@ impl BinaryStorage {
 
     /// Gets all resource indices for search operations.
     ///
-    /// Returns a HashMap mapping canonical URLs to resource indices.
     pub fn get_cache_entries(&self) -> HashMap<String, ResourceIndex> {
         // Build from concurrent read index to avoid locking the async RwLock
         self.canonical_index
@@ -452,7 +493,6 @@ impl BinaryStorage {
             .into_iter()
             .collect::<HashMap<_, _>>()
     }
-
     /// Loads a FHIR resource from disk.
     ///
     /// # Arguments

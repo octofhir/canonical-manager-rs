@@ -91,7 +91,7 @@ impl SmartRebuildStrategy {
 
         // Check if forced full rebuild is needed
         if self.should_force_full_rebuild().await {
-            tracing::info!("Forcing full rebuild due to time interval or other criteria");
+            tracing::debug!("Forcing full rebuild due to time interval or other criteria");
             return Ok(RebuildStrategy::Full);
         }
 
@@ -287,13 +287,13 @@ impl SmartRebuildStrategy {
     async fn log_strategy_decision(&self, strategy: &RebuildStrategy, change_ratio: f64) {
         match strategy {
             RebuildStrategy::None => {
-                tracing::info!("Strategy: No rebuild needed - no changes detected");
+                tracing::debug!("Strategy: No rebuild needed - no changes detected");
             }
             RebuildStrategy::Incremental {
                 packages,
                 batch_size,
             } => {
-                tracing::info!(
+                tracing::debug!(
                     "Strategy: Incremental rebuild - {} packages, batch_size={}, change_ratio={:.1}%",
                     packages.len(),
                     batch_size,
@@ -301,7 +301,7 @@ impl SmartRebuildStrategy {
                 );
             }
             RebuildStrategy::Full => {
-                tracing::info!(
+                tracing::debug!(
                     "Strategy: Full rebuild - change_ratio={:.1}% exceeded threshold {:.1}%",
                     change_ratio * 100.0,
                     self.full_rebuild_threshold * 100.0
@@ -344,7 +344,7 @@ impl SmartRebuildStrategy {
         if strategy_name == "full" {
             // This would need to be done in a way that updates the struct field
             // For now, just log it
-            tracing::info!(
+            tracing::debug!(
                 "Recorded full rebuild completion at {:?}",
                 SystemTime::now()
             );

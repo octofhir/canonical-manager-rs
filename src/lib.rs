@@ -355,7 +355,7 @@ impl CanonicalManager {
         };
         let performance_monitor = Arc::new(PerformanceMonitor::new(perf_config));
 
-        info!("FHIR Canonical Manager initialized successfully with optimized configuration");
+        debug!("FHIR Canonical Manager initialized successfully with optimized configuration");
 
         Ok(Self {
             config,
@@ -527,7 +527,7 @@ impl CanonicalManager {
         let tracker = self.performance_monitor.start_operation("install_package");
         let mut installed = HashSet::new();
 
-        info!(
+        debug!(
             "Installing package {}@{} with optimization features enabled",
             name, version
         );
@@ -536,7 +536,7 @@ impl CanonicalManager {
             .await?;
 
         // Use smart rebuild strategy to determine if full or incremental rebuild is needed
-        info!("Analyzing rebuild strategy for newly installed packages...");
+        debug!("Analyzing rebuild strategy for newly installed packages...");
         self.smart_rebuild_index().await?;
 
         let total_duration = tracker.finish();
@@ -546,7 +546,7 @@ impl CanonicalManager {
             .record_package_operation(PackageOperationType::Install, total_duration)
             .await;
 
-        info!("Package installation completed in {:?}", total_duration);
+        debug!("Package installation completed in {:?}", total_duration);
 
         // Track performance metrics
         if self.config.optimization.enable_metrics {
@@ -713,7 +713,7 @@ impl CanonicalManager {
         .await?;
 
         // Use smart rebuild strategy to determine if full or incremental rebuild is needed
-        info!("Analyzing rebuild strategy for newly installed packages...");
+        debug!("Analyzing rebuild strategy for newly installed packages...");
         self.smart_rebuild_index().await?;
 
         Ok(())
@@ -745,12 +745,12 @@ impl CanonicalManager {
                 .iter()
                 .any(|p| p.name == name && p.version == version)
             {
-                info!("Package already installed in storage: {}", package_key);
+                debug!("Package already installed in storage: {}", package_key);
                 installed.insert(package_key);
                 return Ok(());
             }
 
-            info!("Installing package: {}@{}", name, version);
+            debug!("Installing package: {}@{}", name, version);
 
             let spec = PackageSpec {
                 name: name.to_string(),
@@ -848,7 +848,7 @@ impl CanonicalManager {
                 .iter()
                 .any(|p| p.name == name && p.version == version)
             {
-                info!("Package already installed in storage: {}", package_key);
+                debug!("Package already installed in storage: {}", package_key);
                 #[cfg(feature = "cli")]
                 Progress::step(&format!("✓ Package already installed: {package_key}"));
                 installed.insert(package_key);
@@ -858,7 +858,7 @@ impl CanonicalManager {
             // Create stream progress for this package
             let stream_progress = progress.create_stream_progress();
 
-            info!("Installing package: {}@{}", name, version);
+            debug!("Installing package: {}@{}", name, version);
             #[cfg(feature = "cli")]
             Progress::step(&format!("Downloading {package_key}"));
 
@@ -991,7 +991,7 @@ impl CanonicalManager {
 
     /// Smart rebuild using the new optimization system
     pub async fn smart_rebuild_index(&self) -> Result<()> {
-        info!("Starting optimized index rebuild...");
+        debug!("Starting optimized index rebuild...");
 
         let start_time = std::time::Instant::now();
 
@@ -1001,14 +1001,14 @@ impl CanonicalManager {
 
         let result = match strategy {
             RebuildStrategy::None => {
-                info!("No changes detected, skipping index rebuild");
+                debug!("No changes detected, skipping index rebuild");
                 Ok(())
             }
             RebuildStrategy::Incremental {
                 ref packages,
                 batch_size,
             } => {
-                info!(
+                debug!(
                     "Performing incremental index update for {} packages",
                     packages.len()
                 );
@@ -1027,7 +1027,7 @@ impl CanonicalManager {
                 Ok(())
             }
             RebuildStrategy::Full => {
-                info!(
+                debug!(
                     "Performing full index rebuild for {} packages",
                     packages.len()
                 );
@@ -1036,7 +1036,7 @@ impl CanonicalManager {
                 let start_time = std::time::Instant::now();
                 for package in &packages {
                     let stats = self.incremental_indexer.update_index(&package.path).await?;
-                    info!(
+                    debug!(
                         "Updated index for {}: indexed={}, removed={}, duration={:?}",
                         package.id, stats.indexed, stats.removed, stats.duration
                     );
@@ -1074,7 +1074,7 @@ impl CanonicalManager {
     ) -> Result<()> {
         for package in packages {
             let stats = self.incremental_indexer.update_index(&package.path).await?;
-            info!(
+            debug!(
                 "Updated index for {}: indexed={}, removed={}, duration={:?}",
                 package.id, stats.indexed, stats.removed, stats.duration
             );
@@ -1215,7 +1215,7 @@ impl CanonicalManager {
         let start_time = std::time::Instant::now();
         for package in &packages {
             let stats = self.incremental_indexer.update_index(&package.path).await?;
-            info!(
+            debug!(
                 "Updated index for {}: indexed={}, removed={}, duration={:?}",
                 package.id, stats.indexed, stats.removed, stats.duration
             );

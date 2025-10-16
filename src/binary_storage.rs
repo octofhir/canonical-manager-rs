@@ -163,7 +163,7 @@ impl BinaryStorage {
         storage.load_from_disk().await?;
         storage.rebuild_indexes_from_cache().await?;
 
-        info!("Binary storage initialized at {:?}", storage.storage_path);
+        debug!("Binary storage initialized at {:?}", storage.storage_path);
         Ok(storage)
     }
 

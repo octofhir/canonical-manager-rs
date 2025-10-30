@@ -553,23 +553,23 @@ impl RegistryClient {
         let mut sri_sha256: Option<sha2::Sha256> = None;
         let mut sri_sha384: Option<sha2::Sha384> = None;
         let mut sri_sha512: Option<sha2::Sha512> = None;
-        if let Some(intg) = expected_integrity.as_ref() {
-            if let Some((algo, _b64)) = intg.split_once('-') {
-                match algo.to_ascii_lowercase().as_str() {
-                    "sha256" => {
-                        sri_algo = Some(IntegrityAlgo::Sha256);
-                        sri_sha256 = Some(sha2::Sha256::new());
-                    }
-                    "sha384" => {
-                        sri_algo = Some(IntegrityAlgo::Sha384);
-                        sri_sha384 = Some(sha2::Sha384::new());
-                    }
-                    "sha512" => {
-                        sri_algo = Some(IntegrityAlgo::Sha512);
-                        sri_sha512 = Some(sha2::Sha512::new());
-                    }
-                    _ => {}
+        if let Some(intg) = expected_integrity.as_ref()
+            && let Some((algo, _b64)) = intg.split_once('-')
+        {
+            match algo.to_ascii_lowercase().as_str() {
+                "sha256" => {
+                    sri_algo = Some(IntegrityAlgo::Sha256);
+                    sri_sha256 = Some(sha2::Sha256::new());
                 }
+                "sha384" => {
+                    sri_algo = Some(IntegrityAlgo::Sha384);
+                    sri_sha384 = Some(sha2::Sha384::new());
+                }
+                "sha512" => {
+                    sri_algo = Some(IntegrityAlgo::Sha512);
+                    sri_sha512 = Some(sha2::Sha512::new());
+                }
+                _ => {}
             }
         }
         let mut downloaded = 0u64;
@@ -636,38 +636,35 @@ impl RegistryClient {
         }
 
         // Verify SRI integrity if provided and recognized
-        if let (Some(algo), Some(intg)) = (sri_algo, expected_integrity) {
-            if let Some((_, b64)) = intg.split_once('-') {
-                let expected_bytes: Vec<u8> = base64::engine::general_purpose::STANDARD
-                    .decode(b64.as_bytes())
-                    .unwrap_or_default();
-                use sha2::Digest;
-                if expected_bytes.is_empty() { /* skip invalid integrity */
-                } else {
-                    let ok = match algo {
-                        IntegrityAlgo::Sha256 => {
-                            sri_sha256.map(|h| h.finalize().to_vec())
-                                == Some(expected_bytes.clone())
-                        }
-                        IntegrityAlgo::Sha384 => {
-                            sri_sha384.map(|h| h.finalize().to_vec())
-                                == Some(expected_bytes.clone())
-                        }
-                        IntegrityAlgo::Sha512 => {
-                            sri_sha512.map(|h| h.finalize().to_vec())
-                                == Some(expected_bytes.clone())
-                        }
-                    };
-                    if !ok {
-                        let _ = fs::remove_file(&part_path).await;
-                        return Err(RegistryError::InvalidMetadata {
-                            message: format!(
-                                "Integrity (SRI) mismatch for {}@{}",
-                                spec.name, spec.version
-                            ),
-                        }
-                        .into());
+        if let (Some(algo), Some(intg)) = (sri_algo, expected_integrity)
+            && let Some((_, b64)) = intg.split_once('-')
+        {
+            let expected_bytes: Vec<u8> = base64::engine::general_purpose::STANDARD
+                .decode(b64.as_bytes())
+                .unwrap_or_default();
+            use sha2::Digest;
+            if expected_bytes.is_empty() { /* skip invalid integrity */
+            } else {
+                let ok = match algo {
+                    IntegrityAlgo::Sha256 => {
+                        sri_sha256.map(|h| h.finalize().to_vec()) == Some(expected_bytes.clone())
                     }
+                    IntegrityAlgo::Sha384 => {
+                        sri_sha384.map(|h| h.finalize().to_vec()) == Some(expected_bytes.clone())
+                    }
+                    IntegrityAlgo::Sha512 => {
+                        sri_sha512.map(|h| h.finalize().to_vec()) == Some(expected_bytes.clone())
+                    }
+                };
+                if !ok {
+                    let _ = fs::remove_file(&part_path).await;
+                    return Err(RegistryError::InvalidMetadata {
+                        message: format!(
+                            "Integrity (SRI) mismatch for {}@{}",
+                            spec.name, spec.version
+                        ),
+                    }
+                    .into());
                 }
             }
         }
@@ -978,11 +975,11 @@ impl RegistryClient {
         // Best-effort debounced save (min 500ms interval)
         let mut last = self.last_save.lock().unwrap();
         let now = std::time::Instant::now();
-        if now.duration_since(*last) >= std::time::Duration::from_millis(500) {
-            if let Ok(json) = serde_json::to_vec_pretty(&*map) {
-                let _ = std::fs::write(&self.validators_path, json);
-                *last = now;
-            }
+        if now.duration_since(*last) >= std::time::Duration::from_millis(500)
+            && let Ok(json) = serde_json::to_vec_pretty(&*map)
+        {
+            let _ = std::fs::write(&self.validators_path, json);
+            *last = now;
         }
     }
 

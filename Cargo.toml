@@ -1,6 +1,6 @@
 [package]
 name = "octofhir-canonical-manager"
-version = "0.1.9"
+version = "0.1.10"
 edition = "2024"
 description = "FHIR Canonical Manager - Library-first FHIR package management"
 license = "MIT OR Apache-2.0"
@@ -121,3 +121,4 @@ default = ["cli"]
 cli = ["clap", "colored"]
 fuzzy-search = []
 metrics = ["dep:metrics"]
+test-utils = []

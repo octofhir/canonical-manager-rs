@@ -21,6 +21,8 @@ pub fn create_test_config(temp_dir: &Path) -> FcmConfig {
             max_cache_size: "100MB".to_string(),
         },
         optimization: OptimizationConfig::default(),
+        local_packages: vec![],
+        resource_directories: vec![],
     }
 }
 

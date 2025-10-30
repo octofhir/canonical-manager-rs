@@ -726,20 +726,20 @@ impl SearchEngine {
             self.text_index.add_resource(canonical_url, &content_str);
 
             // Index specific FHIR fields if available
-            if let Some(description) = fhir_resource.content.get("description") {
-                if let Some(desc_str) = description.as_str() {
-                    self.text_index.add_resource(canonical_url, desc_str);
-                }
+            if let Some(description) = fhir_resource.content.get("description")
+                && let Some(desc_str) = description.as_str()
+            {
+                self.text_index.add_resource(canonical_url, desc_str);
             }
-            if let Some(title) = fhir_resource.content.get("title") {
-                if let Some(title_str) = title.as_str() {
-                    self.text_index.add_resource(canonical_url, title_str);
-                }
+            if let Some(title) = fhir_resource.content.get("title")
+                && let Some(title_str) = title.as_str()
+            {
+                self.text_index.add_resource(canonical_url, title_str);
             }
-            if let Some(name) = fhir_resource.content.get("name") {
-                if let Some(name_str) = name.as_str() {
-                    self.text_index.add_resource(canonical_url, name_str);
-                }
+            if let Some(name) = fhir_resource.content.get("name")
+                && let Some(name_str) = name.as_str()
+            {
+                self.text_index.add_resource(canonical_url, name_str);
             }
         }
 
@@ -776,10 +776,10 @@ impl SearchEngine {
 
     /// Get cached search result if available and not expired
     fn get_cached_result(&self, cache_key: &str) -> Option<SearchResult> {
-        if let Some((result, timestamp)) = self.search_cache.get_cloned(&cache_key.to_string()) {
-            if timestamp.elapsed() < self.cache_ttl {
-                return Some(result);
-            }
+        if let Some((result, timestamp)) = self.search_cache.get_cloned(&cache_key.to_string())
+            && timestamp.elapsed() < self.cache_ttl
+        {
+            return Some(result);
         }
         None
     }
@@ -983,10 +983,10 @@ impl SearchEngine {
         }
 
         // Boost score for canonical URL pattern matches
-        if let Some(pattern) = &query.canonical_pattern {
-            if resource_index.canonical_url.contains(pattern) {
-                score += 1.0;
-            }
+        if let Some(pattern) = &query.canonical_pattern
+            && resource_index.canonical_url.contains(pattern)
+        {
+            score += 1.0;
         }
 
         // Text search scoring

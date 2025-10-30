@@ -638,19 +638,19 @@ impl PackageExtractor {
 
         // Try to get additional info from index
         let filename = file_path.file_name().unwrap().to_str().unwrap();
-        if let Some(index) = index {
-            if let Some(index_entry) = index.files.get(filename) {
-                // Use index information if available
-                let resource = FhirResource {
-                    resource_type: index_entry.resource_type.clone().unwrap_or(resource_type),
-                    id: index_entry.id.clone().unwrap_or(id),
-                    url: index_entry.url.clone().or(url),
-                    version: index_entry.version.clone().or(version),
-                    content: json_value,
-                    file_path: file_path.to_path_buf(),
-                };
-                return Ok(Some(resource));
-            }
+        if let Some(index) = index
+            && let Some(index_entry) = index.files.get(filename)
+        {
+            // Use index information if available
+            let resource = FhirResource {
+                resource_type: index_entry.resource_type.clone().unwrap_or(resource_type),
+                id: index_entry.id.clone().unwrap_or(id),
+                url: index_entry.url.clone().or(url),
+                version: index_entry.version.clone().or(version),
+                content: json_value,
+                file_path: file_path.to_path_buf(),
+            };
+            return Ok(Some(resource));
         }
 
         // Fallback to parsed information

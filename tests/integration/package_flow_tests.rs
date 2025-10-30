@@ -24,6 +24,8 @@ async fn test_canonical_manager_creation_simple() {
             retry_attempts: 1,
         },
         packages: vec![],
+        local_packages: vec![],
+        resource_directories: vec![],
         storage: StorageConfig {
             cache_dir: temp_dir.path().join("cache"),
             index_dir: temp_dir.path().join("index"),
@@ -97,6 +99,8 @@ async fn test_package_installation_with_timeout() {
             retry_attempts: 1,
         },
         packages: vec![],
+        local_packages: vec![],
+        resource_directories: vec![],
         storage: StorageConfig {
             cache_dir: temp_dir.path().join("cache"),
             index_dir: temp_dir.path().join("index"),
@@ -186,6 +190,8 @@ async fn test_full_package_installation_original() {
             retry_attempts: 3,
         },
         packages: vec![],
+        local_packages: vec![],
+        resource_directories: vec![],
         storage: StorageConfig {
             cache_dir: temp_dir.path().join("cache"),
             index_dir: temp_dir.path().join("index"),
@@ -269,6 +275,8 @@ async fn test_package_installation_with_dependencies() {
             retry_attempts: 3,
         },
         packages: vec![],
+        local_packages: vec![],
+        resource_directories: vec![],
         storage: StorageConfig {
             cache_dir: temp_dir.path().join("cache"),
             index_dir: temp_dir.path().join("index"),
@@ -331,6 +339,8 @@ async fn test_duplicate_package_installation() {
             retry_attempts: 3,
         },
         packages: vec![],
+        local_packages: vec![],
+        resource_directories: vec![],
         storage: StorageConfig {
             cache_dir: temp_dir.path().join("cache"),
             index_dir: temp_dir.path().join("index"),
@@ -390,6 +400,8 @@ async fn test_package_removal() {
             retry_attempts: 3,
         },
         packages: vec![],
+        local_packages: vec![],
+        resource_directories: vec![],
         storage: StorageConfig {
             cache_dir: temp_dir.path().join("cache"),
             index_dir: temp_dir.path().join("index"),
@@ -452,6 +464,8 @@ async fn test_canonical_resolution_after_installation() {
             retry_attempts: 3,
         },
         packages: vec![],
+        local_packages: vec![],
+        resource_directories: vec![],
         storage: StorageConfig {
             cache_dir: temp_dir.path().join("cache"),
             index_dir: temp_dir.path().join("index"),
@@ -516,6 +530,8 @@ async fn test_batch_canonical_resolution() {
             retry_attempts: 3,
         },
         packages: vec![],
+        local_packages: vec![],
+        resource_directories: vec![],
         storage: StorageConfig {
             cache_dir: temp_dir.path().join("cache"),
             index_dir: temp_dir.path().join("index"),
@@ -582,6 +598,8 @@ async fn test_package_installation_error_handling() {
             retry_attempts: 3,
         },
         packages: vec![],
+        local_packages: vec![],
+        resource_directories: vec![],
         storage: StorageConfig {
             cache_dir: temp_dir.path().join("cache"),
             index_dir: temp_dir.path().join("index"),
@@ -642,6 +660,8 @@ async fn test_concurrent_package_installations() {
             retry_attempts: 3,
         },
         packages: vec![],
+        local_packages: vec![],
+        resource_directories: vec![],
         storage: StorageConfig {
             cache_dir: temp_dir.path().join("cache"),
             index_dir: temp_dir.path().join("index"),
@@ -708,6 +728,8 @@ async fn test_package_counting() {
             retry_attempts: 3,
         },
         packages: vec![],
+        local_packages: vec![],
+        resource_directories: vec![],
         storage: StorageConfig {
             cache_dir: temp_dir.path().join("cache"),
             index_dir: temp_dir.path().join("index"),
@@ -775,6 +797,8 @@ async fn test_installation_with_priorities() {
                 priority: 2,
             },
         ],
+        local_packages: vec![],
+        resource_directories: vec![],
         storage: StorageConfig {
             cache_dir: temp_dir.path().join("cache"),
             index_dir: temp_dir.path().join("index"),
@@ -822,6 +846,8 @@ async fn test_search_parameter_retrieval_simple() {
             retry_attempts: 1,
         },
         packages: vec![],
+        local_packages: vec![],
+        resource_directories: vec![],
         storage: StorageConfig {
             cache_dir: temp_dir.path().join("cache"),
             index_dir: temp_dir.path().join("index"),
@@ -885,6 +911,8 @@ async fn test_search_parameter_retrieval_with_installation() {
             retry_attempts: 3,
         },
         packages: vec![],
+        local_packages: vec![],
+        resource_directories: vec![],
         storage: StorageConfig {
             cache_dir: temp_dir.path().join("cache"),
             index_dir: temp_dir.path().join("index"),

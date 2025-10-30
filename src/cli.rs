@@ -57,7 +57,7 @@ impl crate::registry::DownloadProgress for StreamProgress {
             let last_shown = self
                 .last_percent_shown
                 .load(std::sync::atomic::Ordering::Relaxed);
-            if percent > last_shown && percent % 25 == 0 && downloaded < total {
+            if percent > last_shown && percent.is_multiple_of(25) && downloaded < total {
                 Progress::step(&format!(
                     "Progress: {percent}% ({downloaded} / {total} bytes)"
                 ));

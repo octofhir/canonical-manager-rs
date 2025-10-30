@@ -29,6 +29,12 @@ pub struct FcmConfig {
     pub storage: StorageConfig,
     #[serde(default)]
     pub optimization: OptimizationConfig,
+    /// Local package overrides (take precedence over registry packages)
+    #[serde(default)]
+    pub local_packages: Vec<LocalPackageSpec>,
+    /// Resource-only directories (loose FHIR JSON files without package.json)
+    #[serde(default)]
+    pub resource_directories: Vec<ResourceDirectorySpec>,
 }
 
 /// Configuration for FHIR package registry connection.
@@ -79,6 +85,61 @@ pub struct PackageSpec {
     pub version: String,
     #[serde(default = "default_priority")]
     pub priority: u32,
+}
+
+/// Specification for a local FHIR package directory.
+///
+/// Defines a local filesystem directory containing a FHIR package with package.json.
+/// Local packages take precedence over registry packages based on priority.
+///
+/// # Example
+///
+/// ```rust
+/// use octofhir_canonical_manager::config::LocalPackageSpec;
+/// use std::path::PathBuf;
+///
+/// let spec = LocalPackageSpec {
+///     name: "hl7.fhir.us.core".to_string(),
+///     version: "6.1.0".to_string(),
+///     path: PathBuf::from("./local-packages/us-core-dev"),
+///     priority: 100,
+/// };
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalPackageSpec {
+    /// Package name (must match package.json if present)
+    pub name: String,
+    /// Package version (must match package.json if present)
+    pub version: String,
+    /// Local filesystem path to the package directory
+    pub path: PathBuf,
+    /// Priority for resolution (higher = checked first)
+    #[serde(default = "default_local_priority")]
+    pub priority: i32,
+}
+
+/// Specification for a resource-only directory.
+///
+/// Defines a directory containing loose FHIR JSON resource files without a package.json.
+/// Resources are indexed under a namespace for organization.
+///
+/// # Example
+///
+/// ```rust
+/// use octofhir_canonical_manager::config::ResourceDirectorySpec;
+/// use std::path::PathBuf;
+///
+/// let spec = ResourceDirectorySpec {
+///     path: PathBuf::from("./input/resources"),
+///     namespace: "local".to_string(),
+/// };
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceDirectorySpec {
+    /// Local filesystem path to the resources directory
+    pub path: PathBuf,
+    /// Namespace for grouping these resources
+    pub namespace: String,
 }
 
 /// Configuration for local storage paths and cache settings.
@@ -463,12 +524,12 @@ impl FcmConfig {
 
     /// Expand tilde paths to full paths
     fn expand_path(path: &Path) -> PathBuf {
-        if path.starts_with("~") {
-            if let Some(home_dir) = dirs::home_dir() {
-                let path_str = path.to_string_lossy();
-                let expanded = path_str.replacen("~", home_dir.to_string_lossy().as_ref(), 1);
-                return PathBuf::from(expanded);
-            }
+        if path.starts_with("~")
+            && let Some(home_dir) = dirs::home_dir()
+        {
+            let path_str = path.to_string_lossy();
+            let expanded = path_str.replacen("~", home_dir.to_string_lossy().as_ref(), 1);
+            return PathBuf::from(expanded);
         }
         path.to_path_buf()
     }
@@ -500,22 +561,6 @@ impl FcmConfig {
             index_dir: Self::expand_path(&self.storage.index_dir),
             packages_dir: Self::expand_path(&self.storage.packages_dir),
             max_cache_size: self.storage.max_cache_size.clone(),
-        }
-    }
-
-    /// Create test configuration
-    #[cfg(test)]
-    pub fn test_config(temp_dir: &std::path::Path) -> Self {
-        Self {
-            registry: RegistryConfig::default(),
-            packages: vec![],
-            storage: StorageConfig {
-                cache_dir: temp_dir.join("cache"),
-                index_dir: temp_dir.join("index"),
-                packages_dir: temp_dir.join("packages"),
-                max_cache_size: "100MB".to_string(),
-            },
-            optimization: OptimizationConfig::default(),
         }
     }
 }
@@ -653,6 +698,9 @@ fn default_retry_attempts() -> u32 {
 }
 fn default_priority() -> u32 {
     1
+}
+fn default_local_priority() -> i32 {
+    100
 }
 fn default_max_cache_size() -> String {
     "1GB".to_string()
@@ -998,6 +1046,61 @@ impl Validate for PackageSpec {
         }
 
         Ok(())
+    }
+}
+
+impl FcmConfig {
+    /// Create a test configuration with minimal setup
+    ///
+    /// This is a convenience method for tests that need a valid configuration
+    /// without complex setup. It creates a minimal config with all required directories
+    /// under the provided temporary path.
+    ///
+    /// # Arguments
+    ///
+    /// * `temp_dir` - Temporary directory path to use for storage
+    ///
+    /// # Returns
+    ///
+    /// A `FcmConfig` suitable for testing with:
+    /// - Minimal parallelism (1 worker)
+    /// - Metrics disabled
+    /// - Test-friendly storage paths
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use octofhir_canonical_manager::FcmConfig;
+    /// use tempfile::TempDir;
+    ///
+    /// let temp_dir = TempDir::new().unwrap();
+    /// let config = FcmConfig::test_config(temp_dir.path());
+    /// ```
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn test_config(temp_dir: &Path) -> Self {
+        let mut config = FcmConfig {
+            registry: RegistryConfig {
+                url: "http://localhost:8080/".to_string(),
+                timeout: 30,
+                retry_attempts: 3,
+            },
+            packages: vec![],
+            storage: StorageConfig {
+                cache_dir: temp_dir.join("cache"),
+                index_dir: temp_dir.join("index"),
+                packages_dir: temp_dir.join("packages"),
+                max_cache_size: "100MB".to_string(),
+            },
+            optimization: OptimizationConfig::default(),
+            local_packages: vec![],
+            resource_directories: vec![],
+        };
+
+        // Configure for test mode (minimal parallelism, no metrics)
+        config.optimization.parallel_workers = 1;
+        config.optimization.enable_metrics = false;
+
+        config
     }
 }
 

@@ -285,27 +285,27 @@ impl CanonicalResolver {
         }
 
         // Step 2: If a version is specified, try to resolve exact or compatible version
-        if let Some(ver) = parsed.version.clone() {
-            if let Some(resource_index) = self.resolve_with_version_candidates(&base, &ver).await? {
-                debug!("Resolved via version-specific selection");
-                return self
-                    .build_resolved_resource(&base, resource_index, ResolutionPath::ExactMatch)
-                    .await;
-            }
+        if let Some(ver) = parsed.version.clone()
+            && let Some(resource_index) = self.resolve_with_version_candidates(&base, &ver).await?
+        {
+            debug!("Resolved via version-specific selection");
+            return self
+                .build_resolved_resource(&base, resource_index, ResolutionPath::ExactMatch)
+                .await;
         }
 
         // Step 3: Try fuzzy matching first if enabled
-        if self.resolution_config.enable_fuzzy_matching {
-            if let Some((resource_index, similarity)) = self.fuzzy_match(&base).await? {
-                debug!("Found fuzzy match with similarity: {:.2}", similarity);
-                return self
-                    .build_resolved_resource(
-                        &base,
-                        resource_index,
-                        ResolutionPath::FuzzyMatch { similarity },
-                    )
-                    .await;
-            }
+        if self.resolution_config.enable_fuzzy_matching
+            && let Some((resource_index, similarity)) = self.fuzzy_match(&base).await?
+        {
+            debug!("Found fuzzy match with similarity: {:.2}", similarity);
+            return self
+                .build_resolved_resource(
+                    &base,
+                    resource_index,
+                    ResolutionPath::FuzzyMatch { similarity },
+                )
+                .await;
         }
 
         // Step 4: Try version fallback only when the last path segment looks like a version
@@ -379,29 +379,27 @@ impl CanonicalResolver {
         if matches!(
             self.resolution_config.version_preference,
             VersionPreference::Compatible
-        ) {
-            if let Some(want) = &desired.semver {
-                let req = semver::VersionReq::parse(&format!("^{want}"))
-                    .unwrap_or(semver::VersionReq::STAR);
-                candidates.sort_by(|a, b| {
-                    let va = a.metadata.version.as_deref().unwrap_or("");
-                    let vb = b.metadata.version.as_deref().unwrap_or("");
-                    match (
-                        semver::Version::parse(va.trim_start_matches('v')),
-                        semver::Version::parse(vb.trim_start_matches('v')),
-                    ) {
-                        (Ok(va), Ok(vb)) => vb.cmp(&va),
-                        _ => vb.cmp(va),
-                    }
-                });
-                for ri in candidates {
-                    if let Some(vs) = ri.metadata.version.as_deref() {
-                        if let Ok(v) = semver::Version::parse(vs.trim_start_matches('v')) {
-                            if req.matches(&v) {
-                                return Ok(Some(ri));
-                            }
-                        }
-                    }
+        ) && let Some(want) = &desired.semver
+        {
+            let req =
+                semver::VersionReq::parse(&format!("^{want}")).unwrap_or(semver::VersionReq::STAR);
+            candidates.sort_by(|a, b| {
+                let va = a.metadata.version.as_deref().unwrap_or("");
+                let vb = b.metadata.version.as_deref().unwrap_or("");
+                match (
+                    semver::Version::parse(va.trim_start_matches('v')),
+                    semver::Version::parse(vb.trim_start_matches('v')),
+                ) {
+                    (Ok(va), Ok(vb)) => vb.cmp(&va),
+                    _ => vb.cmp(va),
+                }
+            });
+            for ri in candidates {
+                if let Some(vs) = ri.metadata.version.as_deref()
+                    && let Ok(v) = semver::Version::parse(vs.trim_start_matches('v'))
+                    && req.matches(&v)
+                {
+                    return Ok(Some(ri));
                 }
             }
         }
@@ -464,17 +462,17 @@ impl CanonicalResolver {
         // Try to find resource with specific version in metadata
         let resources_by_type = self.get_resources_by_base_url(canonical_url).await?;
         for resource_index in resources_by_type {
-            if let Some(resource_version) = &resource_index.metadata.version {
-                if resource_version == version {
-                    debug!("Found resource with matching version in metadata");
-                    return self
-                        .build_resolved_resource(
-                            canonical_url,
-                            resource_index,
-                            ResolutionPath::ExactMatch,
-                        )
-                        .await;
-                }
+            if let Some(resource_version) = &resource_index.metadata.version
+                && resource_version == version
+            {
+                debug!("Found resource with matching version in metadata");
+                return self
+                    .build_resolved_resource(
+                        canonical_url,
+                        resource_index,
+                        ResolutionPath::ExactMatch,
+                    )
+                    .await;
             }
         }
 

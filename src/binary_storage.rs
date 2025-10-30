@@ -349,18 +349,17 @@ impl BinaryStorage {
                     self.canonical_index.remove(&url);
                     if let Some(base) =
                         Self::compute_canonical_base(&url, idx.metadata.version.as_deref())
+                        && let Some(mut vec) = self.base_index.get_cloned(&base)
                     {
-                        if let Some(mut vec) = self.base_index.get_cloned(&base) {
-                            vec.retain(|ri| {
-                                !(ri.package_name == name
-                                    && ri.package_version == version
-                                    && ri.canonical_url == url)
-                            });
-                            if vec.is_empty() {
-                                self.base_index.remove(&base);
-                            } else {
-                                self.base_index.insert(base, vec);
-                            }
+                        vec.retain(|ri| {
+                            !(ri.package_name == name
+                                && ri.package_version == version
+                                && ri.canonical_url == url)
+                        });
+                        if vec.is_empty() {
+                            self.base_index.remove(&base);
+                        } else {
+                            self.base_index.insert(base, vec);
                         }
                     }
                 }
@@ -889,10 +888,10 @@ impl BinaryStorage {
         if seg.is_empty() {
             return false;
         }
-        if let Some(h) = ver_hint {
-            if seg.eq_ignore_ascii_case(h) {
-                return true;
-            }
+        if let Some(h) = ver_hint
+            && seg.eq_ignore_ascii_case(h)
+        {
+            return true;
         }
         let t = seg.trim_start_matches('v');
         semver::Version::parse(t).is_ok()
@@ -936,19 +935,18 @@ pub fn extract_resource_date(content: &Value) -> Option<String> {
     let date_fields = ["date", "lastUpdated"];
 
     for field in &date_fields {
-        if let Some(date_value) = content.get(field) {
-            if let Some(date_str) = date_value.as_str() {
-                return Some(date_str.to_string());
-            }
+        if let Some(date_value) = content.get(field)
+            && let Some(date_str) = date_value.as_str()
+        {
+            return Some(date_str.to_string());
         }
     }
 
-    if let Some(meta) = content.get("meta") {
-        if let Some(last_updated) = meta.get("lastUpdated") {
-            if let Some(date_str) = last_updated.as_str() {
-                return Some(date_str.to_string());
-            }
-        }
+    if let Some(meta) = content.get("meta")
+        && let Some(last_updated) = meta.get("lastUpdated")
+        && let Some(date_str) = last_updated.as_str()
+    {
+        return Some(date_str.to_string());
     }
 
     None
@@ -959,21 +957,21 @@ pub fn extract_resource_publisher(content: &Value) -> Option<String> {
     let publisher_fields = ["publisher", "author"];
 
     for field in &publisher_fields {
-        if let Some(publisher_value) = content.get(field) {
-            if let Some(publisher_str) = publisher_value.as_str() {
-                return Some(publisher_str.to_string());
-            }
+        if let Some(publisher_value) = content.get(field)
+            && let Some(publisher_str) = publisher_value.as_str()
+        {
+            return Some(publisher_str.to_string());
         }
     }
 
-    if let Some(contact) = content.get("contact") {
-        if let Some(contact_array) = contact.as_array() {
-            for contact_item in contact_array {
-                if let Some(name) = contact_item.get("name") {
-                    if let Some(name_str) = name.as_str() {
-                        return Some(name_str.to_string());
-                    }
-                }
+    if let Some(contact) = content.get("contact")
+        && let Some(contact_array) = contact.as_array()
+    {
+        for contact_item in contact_array {
+            if let Some(name) = contact_item.get("name")
+                && let Some(name_str) = name.as_str()
+            {
+                return Some(name_str.to_string());
             }
         }
     }

@@ -2,11 +2,11 @@
 
 # Run all tests
 test:
-    cargo test
+    cargo test --features test-utils
 
 # Run tests with output
 test-verbose:
-    cargo test -- --nocapture
+    cargo test --features test-utils -- --nocapture
 
 # Run linting
 lint:

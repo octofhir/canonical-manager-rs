@@ -83,6 +83,7 @@ pub use search::SearchEngine;
 pub use unified_storage::{UnifiedIntegrityReport, UnifiedStorageStats};
 
 use std::collections::HashSet;
+use std::path::Path;
 use std::sync::Arc;
 use tantivy::{Index, schema::*};
 use tokio::fs;
@@ -1288,6 +1289,377 @@ impl CanonicalManager {
     /// Get a reference to the unified storage system
     pub fn storage(&self) -> &Arc<UnifiedStorage> {
         &self.storage
+    }
+
+    /// Load a FHIR package from a local directory
+    ///
+    /// The directory should contain a package structure:
+    /// - package.json (manifest)
+    /// - *.json files (FHIR resources)
+    ///
+    /// If package_id is None, it's read from package.json
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the package directory
+    /// * `package_id` - Optional package identifier (name@version). If None, read from package.json
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(PackageInfo)` - Information about the loaded package
+    /// * `Err` - If directory doesn't exist, package.json is missing/invalid, or loading fails
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use octofhir_canonical_manager::{CanonicalManager, FcmConfig};
+    /// # use std::path::Path;
+    /// # async fn example(manager: &CanonicalManager) -> Result<(), Box<dyn std::error::Error>> {
+    /// // Load local package
+    /// let package_info = manager.load_from_directory(
+    ///     Path::new("./local-packages/hl7.fhir.us.core-custom"),
+    ///     None  // Read from package.json
+    /// ).await?;
+    ///
+    /// println!("Loaded package: {}@{}", package_info.name, package_info.version);
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[tracing::instrument(name = "manager.load_from_directory", skip(self))]
+    pub async fn load_from_directory(
+        &self,
+        path: &Path,
+        package_id: Option<&str>,
+    ) -> Result<PackageInfo> {
+        use crate::package::{ExtractedPackage, FhirResource, PackageManifest};
+
+        info!("Loading package from local directory: {}", path.display());
+
+        // Validate directory exists
+        if !path.exists() {
+            return Err(FcmError::Package(
+                crate::error::PackageError::ExtractionFailed {
+                    message: format!("Directory not found: {}", path.display()),
+                },
+            ));
+        }
+
+        if !path.is_dir() {
+            return Err(FcmError::Package(
+                crate::error::PackageError::ExtractionFailed {
+                    message: format!("Path is not a directory: {}", path.display()),
+                },
+            ));
+        }
+
+        // Read and parse package.json
+        let manifest_path = path.join("package.json");
+        if !manifest_path.exists() {
+            return Err(FcmError::Package(
+                crate::error::PackageError::ExtractionFailed {
+                    message: format!("package.json not found in: {}", path.display()),
+                },
+            ));
+        }
+
+        let manifest_content = fs::read_to_string(&manifest_path).await.map_err(|e| {
+            FcmError::Package(crate::error::PackageError::ExtractionFailed {
+                message: format!("Failed to read package.json: {}", e),
+            })
+        })?;
+
+        let manifest: PackageManifest = serde_json::from_str(&manifest_content).map_err(|e| {
+            FcmError::Package(crate::error::PackageError::ExtractionFailed {
+                message: format!("Invalid package.json: {}", e),
+            })
+        })?;
+
+        // Validate package_id matches manifest if provided
+        if let Some(expected_id) = package_id {
+            let actual_id = format!("{}@{}", manifest.name, manifest.version);
+            if expected_id != actual_id {
+                warn!(
+                    "Package ID mismatch: expected {}, got {}",
+                    expected_id, actual_id
+                );
+            }
+        }
+
+        // Scan directory for .json resource files
+        let mut resources = Vec::new();
+        let mut entries = fs::read_dir(path).await.map_err(|e| {
+            FcmError::Package(crate::error::PackageError::ExtractionFailed {
+                message: format!("Failed to read directory: {}", e),
+            })
+        })?;
+
+        while let Some(entry) = entries.next_entry().await.map_err(|e| {
+            FcmError::Package(crate::error::PackageError::ExtractionFailed {
+                message: format!("Failed to read directory entry: {}", e),
+            })
+        })? {
+            let entry_path = entry.path();
+
+            // Skip non-JSON files
+            if entry_path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+
+            // Skip package.json itself
+            if entry_path.file_name().and_then(|n| n.to_str()) == Some("package.json") {
+                continue;
+            }
+
+            // Read and parse resource
+            let content = match fs::read_to_string(&entry_path).await {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!("Failed to read {}: {}", entry_path.display(), e);
+                    continue;
+                }
+            };
+
+            let json: serde_json::Value = match serde_json::from_str(&content) {
+                Ok(j) => j,
+                Err(e) => {
+                    warn!("Invalid JSON in {}: {}", entry_path.display(), e);
+                    continue;
+                }
+            };
+
+            // Extract resource metadata
+            let resource_type = json
+                .get("resourceType")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Unknown")
+                .to_string();
+
+            let id = json
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+
+            let url = json.get("url").and_then(|v| v.as_str()).map(String::from);
+
+            let version = json
+                .get("version")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+
+            resources.push(FhirResource {
+                resource_type,
+                id,
+                url,
+                version,
+                content: json,
+                file_path: entry_path,
+            });
+        }
+
+        info!("Found {} resources in {}", resources.len(), path.display());
+
+        // Create ExtractedPackage structure
+        let extracted = ExtractedPackage {
+            name: manifest.name.clone(),
+            version: manifest.version.clone(),
+            manifest,
+            resources,
+            extraction_path: path.to_path_buf(),
+        };
+
+        // Add to storage
+        self.add_package_via_store(&extracted).await?;
+
+        // Return package info
+        Ok(PackageInfo {
+            name: extracted.name,
+            version: extracted.version,
+            installed_at: chrono::Utc::now(),
+            resource_count: extracted.resources.len(),
+        })
+    }
+
+    /// Load individual resources from directory without package.json
+    ///
+    /// All .json files are loaded and indexed under the given namespace.
+    /// Resources must have valid resourceType, url/id fields.
+    ///
+    /// The namespace is used for grouping (e.g., "local", "test-fixtures")
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the resources directory
+    /// * `namespace` - Namespace for grouping these resources
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(usize)` - Number of resources loaded
+    /// * `Err` - If directory doesn't exist or loading fails
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use octofhir_canonical_manager::{CanonicalManager, FcmConfig};
+    /// # use std::path::Path;
+    /// # async fn example(manager: &CanonicalManager) -> Result<(), Box<dyn std::error::Error>> {
+    /// // Load loose resources
+    /// let count = manager.load_resources_from_directory(
+    ///     Path::new("./input/resources"),
+    ///     "project-resources"
+    /// ).await?;
+    ///
+    /// println!("Loaded {} resources", count);
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[tracing::instrument(name = "manager.load_resources_from_directory", skip(self))]
+    pub async fn load_resources_from_directory(
+        &self,
+        path: &Path,
+        namespace: &str,
+    ) -> Result<usize> {
+        use crate::package::{ExtractedPackage, FhirResource, PackageManifest};
+
+        info!(
+            "Loading resources from directory: {} (namespace: {})",
+            path.display(),
+            namespace
+        );
+
+        // Validate directory exists
+        if !path.exists() {
+            return Err(FcmError::Package(
+                crate::error::PackageError::ExtractionFailed {
+                    message: format!("Directory not found: {}", path.display()),
+                },
+            ));
+        }
+
+        if !path.is_dir() {
+            return Err(FcmError::Package(
+                crate::error::PackageError::ExtractionFailed {
+                    message: format!("Path is not a directory: {}", path.display()),
+                },
+            ));
+        }
+
+        // Scan directory for .json resource files
+        let mut resources = Vec::new();
+        let mut entries = fs::read_dir(path).await.map_err(|e| {
+            FcmError::Package(crate::error::PackageError::ExtractionFailed {
+                message: format!("Failed to read directory: {}", e),
+            })
+        })?;
+
+        while let Some(entry) = entries.next_entry().await.map_err(|e| {
+            FcmError::Package(crate::error::PackageError::ExtractionFailed {
+                message: format!("Failed to read directory entry: {}", e),
+            })
+        })? {
+            let entry_path = entry.path();
+
+            // Skip non-JSON files
+            if entry_path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+
+            // Skip package.json
+            if entry_path.file_name().and_then(|n| n.to_str()) == Some("package.json") {
+                continue;
+            }
+
+            // Read and parse resource
+            let content = match fs::read_to_string(&entry_path).await {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!("Failed to read {}: {}", entry_path.display(), e);
+                    continue;
+                }
+            };
+
+            let json: serde_json::Value = match serde_json::from_str(&content) {
+                Ok(j) => j,
+                Err(e) => {
+                    warn!("Invalid JSON in {}: {}", entry_path.display(), e);
+                    continue;
+                }
+            };
+
+            // Validate resource has resourceType
+            let resource_type = match json.get("resourceType").and_then(|v| v.as_str()) {
+                Some(rt) => rt.to_string(),
+                None => {
+                    warn!("Skipping {}: missing resourceType", entry_path.display());
+                    continue;
+                }
+            };
+
+            // Extract id (required)
+            let id = match json.get("id").and_then(|v| v.as_str()) {
+                Some(id_val) => id_val.to_string(),
+                None => {
+                    warn!("Skipping {}: missing id", entry_path.display());
+                    continue;
+                }
+            };
+
+            let url = json.get("url").and_then(|v| v.as_str()).map(String::from);
+
+            let version = json
+                .get("version")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+
+            resources.push(FhirResource {
+                resource_type,
+                id,
+                url,
+                version,
+                content: json,
+                file_path: entry_path,
+            });
+        }
+
+        let resource_count = resources.len();
+
+        if resource_count == 0 {
+            warn!("No valid resources found in {}", path.display());
+            return Ok(0);
+        }
+
+        info!(
+            "Found {} resources in {} (namespace: {})",
+            resource_count,
+            path.display(),
+            namespace
+        );
+
+        // Create a synthetic package for these resources
+        let manifest = PackageManifest {
+            name: format!("local.{}", namespace),
+            version: "dev".to_string(),
+            fhir_versions: None,
+            dependencies: std::collections::HashMap::new(),
+            canonical: None,
+            jurisdiction: None,
+            package_type: Some("local-resources".to_string()),
+            title: Some(format!("Local resources: {}", namespace)),
+            description: Some(format!("Resources loaded from {}", path.display())),
+        };
+
+        let extracted = ExtractedPackage {
+            name: manifest.name.clone(),
+            version: manifest.version.clone(),
+            manifest,
+            resources,
+            extraction_path: path.to_path_buf(),
+        };
+
+        // Add to storage
+        self.add_package_via_store(&extracted).await?;
+
+        Ok(resource_count)
     }
 }
 

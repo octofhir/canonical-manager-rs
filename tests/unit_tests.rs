@@ -4,6 +4,7 @@ mod common;
 
 mod unit {
     mod config_tests;
+    mod local_loading_tests;
     mod package_tests;
     mod registry_tests;
     mod resolver_tests;

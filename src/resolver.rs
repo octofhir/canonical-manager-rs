@@ -1,9 +1,9 @@
 //! Canonical URL resolution
 
-use crate::binary_storage::{BinaryStorage, PackageInfo, ResourceMetadata};
 use crate::domain::{CanonicalWithVersion, PackageVersion};
 use crate::error::{ResolutionError, Result};
 use crate::package::FhirResource;
+use crate::sqlite_storage::{PackageInfo, ResourceMetadata, SqliteStorage};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -20,7 +20,7 @@ use url::Url;
 ///
 /// ```rust,no_run
 /// use octofhir_canonical_manager::resolver::CanonicalResolver;
-/// use octofhir_canonical_manager::binary_storage::BinaryStorage;
+/// use octofhir_canonical_manager::sqlite_storage::SqliteStorage;
 /// use octofhir_canonical_manager::config::StorageConfig;
 /// use std::sync::Arc;
 /// use std::path::PathBuf;
@@ -28,11 +28,10 @@ use url::Url;
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let config = StorageConfig {
 ///     cache_dir: PathBuf::from("/tmp/cache"),
-///     index_dir: PathBuf::from("/tmp/index"),
 ///     packages_dir: PathBuf::from("/tmp/packages"),
 ///     max_cache_size: "1GB".to_string(),
 /// };
-/// let storage = Arc::new(BinaryStorage::new(config).await?);
+/// let storage = Arc::new(SqliteStorage::new(config).await?);
 /// let resolver = CanonicalResolver::new(storage);
 ///
 /// let resolved = resolver.resolve("http://hl7.org/fhir/Patient").await?;
@@ -41,7 +40,7 @@ use url::Url;
 /// # }
 /// ```
 pub struct CanonicalResolver {
-    storage: Arc<BinaryStorage>,
+    storage: Arc<SqliteStorage>,
     resolution_config: ResolutionConfig,
     #[cfg(feature = "fuzzy-search")]
     fuzzy_index: crate::fuzzy::NGramIndex,
@@ -160,7 +159,7 @@ impl CanonicalResolver {
     ///
     /// ```rust,no_run
     /// use octofhir_canonical_manager::resolver::CanonicalResolver;
-    /// use octofhir_canonical_manager::binary_storage::BinaryStorage;
+    /// use octofhir_canonical_manager::sqlite_storage::SqliteStorage;
     /// use octofhir_canonical_manager::config::StorageConfig;
     /// use std::sync::Arc;
     /// use std::path::PathBuf;
@@ -168,16 +167,15 @@ impl CanonicalResolver {
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let config = StorageConfig {
     ///     cache_dir: PathBuf::from("/tmp/cache"),
-    ///     index_dir: PathBuf::from("/tmp/index"),
     ///     packages_dir: PathBuf::from("/tmp/packages"),
     ///     max_cache_size: "1GB".to_string(),
     /// };
-    /// let storage = Arc::new(BinaryStorage::new(config).await?);
+    /// let storage = Arc::new(SqliteStorage::new(config).await?);
     /// let resolver = CanonicalResolver::new(storage);
     /// # Ok(())
     /// # }
     /// ```
-    pub fn new(storage: Arc<BinaryStorage>) -> Self {
+    pub fn new(storage: Arc<SqliteStorage>) -> Self {
         #[cfg(feature = "fuzzy-search")]
         let fuzzy_index = {
             let urls: Vec<String> = storage.get_cache_entries().keys().cloned().collect();
@@ -202,7 +200,7 @@ impl CanonicalResolver {
     ///
     /// ```rust,no_run
     /// use octofhir_canonical_manager::resolver::{CanonicalResolver, ResolutionConfig, VersionPreference};
-    /// use octofhir_canonical_manager::binary_storage::BinaryStorage;
+    /// use octofhir_canonical_manager::sqlite_storage::SqliteStorage;
     /// use octofhir_canonical_manager::config::StorageConfig;
     /// use std::sync::Arc;
     /// use std::path::PathBuf;
@@ -210,11 +208,10 @@ impl CanonicalResolver {
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let storage_config = StorageConfig {
     ///     cache_dir: PathBuf::from("/tmp/cache"),
-    ///     index_dir: PathBuf::from("/tmp/index"),
     ///     packages_dir: PathBuf::from("/tmp/packages"),
     ///     max_cache_size: "1GB".to_string(),
     /// };
-    /// let storage = Arc::new(BinaryStorage::new(storage_config).await?);
+    /// let storage = Arc::new(SqliteStorage::new(storage_config).await?);
     ///
     /// let config = ResolutionConfig {
     ///     version_preference: VersionPreference::Latest,
@@ -226,7 +223,7 @@ impl CanonicalResolver {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn with_config(storage: Arc<BinaryStorage>, config: ResolutionConfig) -> Self {
+    pub fn with_config(storage: Arc<SqliteStorage>, config: ResolutionConfig) -> Self {
         #[cfg(feature = "fuzzy-search")]
         let fuzzy_index = {
             let urls: Vec<String> = storage.get_cache_entries().keys().cloned().collect();
@@ -357,7 +354,7 @@ impl CanonicalResolver {
         &self,
         base_canonical: &str,
         desired: &PackageVersion,
-    ) -> Result<Option<crate::binary_storage::ResourceIndex>> {
+    ) -> Result<Option<crate::sqlite_storage::ResourceIndex>> {
         // Collect candidates under the same base
         let mut candidates = self.storage.find_by_base_url(base_canonical).await?;
         if candidates.is_empty() {
@@ -478,6 +475,80 @@ impl CanonicalResolver {
 
         Err(ResolutionError::CanonicalUrlNotFound {
             url: format!("{canonical_url}@{version}"),
+        }
+        .into())
+    }
+    /// Resolves a canonical URL to a FHIR resource filtered by FHIR version.
+    ///
+    /// This method is useful when you need to resolve resources in a specific FHIR version context,
+    /// such as when compiling FSH projects or running a FHIR server with a specific FHIR version.
+    ///
+    /// # Arguments
+    ///
+    /// * `canonical_url` - The canonical URL of the resource to resolve
+    /// * `fhir_version` - The FHIR version to filter by (e.g., "4.0.1", "5.0.0")
+    ///
+    /// # Returns
+    ///
+    /// Returns the resolved resource if found in the specified FHIR version,
+    /// or an error if the resource is not found or resolution fails.
+    pub async fn resolve_with_fhir_version(
+        &self,
+        canonical_url: &str,
+        fhir_version: &str,
+    ) -> Result<ResolvedResource> {
+        info!(
+            "Resolving canonical URL: {} with FHIR version: {}",
+            canonical_url, fhir_version
+        );
+
+        // Try direct match with FHIR version filter
+        if let Some(resource_index) = self
+            .storage
+            .find_resource_with_fhir_version(canonical_url, fhir_version)
+            .await?
+        {
+            debug!("Found exact match for FHIR version {}", fhir_version);
+            return self
+                .build_resolved_resource(canonical_url, resource_index, ResolutionPath::ExactMatch)
+                .await;
+        }
+
+        // Try version fallback within the same FHIR version
+        let parsed = CanonicalWithVersion::parse(canonical_url);
+        let base_url = parsed.canonical.clone();
+        let resources_by_base = self.storage.find_by_base_url(&base_url).await?;
+
+        // Filter by FHIR version and sort by package version
+        let mut matching_resources: Vec<_> = resources_by_base
+            .into_iter()
+            .filter(|idx| idx.fhir_version == fhir_version)
+            .collect();
+
+        if !matching_resources.is_empty() {
+            // Sort by package version (descending) to get the latest
+            matching_resources.sort_by(|a, b| b.package_version.cmp(&a.package_version));
+
+            let resolved_canonical = matching_resources[0].canonical_url.clone();
+            debug!(
+                "Found {} resources with FHIR version {}, using latest",
+                matching_resources.len(),
+                fhir_version
+            );
+            return self
+                .build_resolved_resource(
+                    canonical_url,
+                    matching_resources.into_iter().next().unwrap(),
+                    ResolutionPath::VersionFallback {
+                        requested: canonical_url.to_string(),
+                        resolved: resolved_canonical,
+                    },
+                )
+                .await;
+        }
+
+        Err(ResolutionError::CanonicalUrlNotFound {
+            url: format!("{canonical_url} (FHIR version: {fhir_version})"),
         }
         .into())
     }
@@ -614,7 +685,7 @@ impl CanonicalResolver {
     async fn get_resources_by_base_url(
         &self,
         base_url: &str,
-    ) -> Result<Vec<crate::binary_storage::ResourceIndex>> {
+    ) -> Result<Vec<crate::sqlite_storage::ResourceIndex>> {
         // Use storage pre-index for base URL lookups
         self.storage.find_by_base_url(base_url).await
     }
@@ -623,7 +694,7 @@ impl CanonicalResolver {
     async fn fuzzy_match(
         &self,
         canonical_url: &str,
-    ) -> Result<Option<(crate::binary_storage::ResourceIndex, f64)>> {
+    ) -> Result<Option<(crate::sqlite_storage::ResourceIndex, f64)>> {
         #[cfg(feature = "fuzzy-search")]
         {
             let max_candidates = self.resolution_config.fuzzy_max_candidates;
@@ -634,7 +705,7 @@ impl CanonicalResolver {
                 .map(|(u, _)| u)
                 .collect::<Vec<_>>();
             let cache = self.storage.get_cache_entries();
-            let mut best: Option<(crate::binary_storage::ResourceIndex, f64)> = None;
+            let mut best: Option<(crate::sqlite_storage::ResourceIndex, f64)> = None;
             for u in candidates {
                 if let Some(idx) = cache.get(&u) {
                     let sim = self.calculate_similarity(canonical_url, &u);
@@ -723,7 +794,7 @@ impl CanonicalResolver {
     async fn build_resolved_resource(
         &self,
         requested_url: &str,
-        resource_index: crate::binary_storage::ResourceIndex,
+        resource_index: crate::sqlite_storage::ResourceIndex,
         resolution_path: ResolutionPath,
     ) -> Result<ResolvedResource> {
         // Get the full resource content
@@ -764,12 +835,11 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config = StorageConfig {
             cache_dir: temp_dir.path().join("cache"),
-            index_dir: temp_dir.path().join("index"),
             packages_dir: temp_dir.path().join("packages"),
             max_cache_size: "100MB".to_owned(),
         };
 
-        let storage = Arc::new(BinaryStorage::new(config).await.unwrap());
+        let storage = Arc::new(SqliteStorage::new(config).await.unwrap());
         let resolver = CanonicalResolver::new(storage);
 
         assert!(resolver.list_canonical_urls().is_empty());
@@ -780,12 +850,11 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config = StorageConfig {
             cache_dir: temp_dir.path().join("cache"),
-            index_dir: temp_dir.path().join("index"),
             packages_dir: temp_dir.path().join("packages"),
             max_cache_size: "100MB".to_owned(),
         };
 
-        let storage = Arc::new(BinaryStorage::new(config).await.unwrap());
+        let storage = Arc::new(SqliteStorage::new(config).await.unwrap());
         let resolver = CanonicalResolver::new(storage);
 
         let result = resolver.resolve("http://example.com/missing").await;
@@ -797,12 +866,11 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config = StorageConfig {
             cache_dir: temp_dir.path().join("cache"),
-            index_dir: temp_dir.path().join("index"),
             packages_dir: temp_dir.path().join("packages"),
             max_cache_size: "100MB".to_owned(),
         };
 
-        let storage = Arc::new(BinaryStorage::new(config).await.unwrap());
+        let storage = Arc::new(SqliteStorage::new(config).await.unwrap());
         let resolver = CanonicalResolver::new(storage);
 
         assert!(resolver.looks_like_version("1.0.0"));

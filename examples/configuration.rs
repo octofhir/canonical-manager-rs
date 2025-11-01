@@ -22,7 +22,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!("✅ Default configuration created");
     println!("   Registry URL: {}", config.registry.url);
     println!("   Cache Dir: {}", config.storage.cache_dir.display());
-    println!("   Index Dir: {}", config.storage.index_dir.display());
     println!("   Packages Dir: {}", config.storage.packages_dir.display());
 
     // Customize registry settings
@@ -42,14 +41,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!("\n💾 Customizing storage settings...");
     config.storage = StorageConfig {
         cache_dir: PathBuf::from("/tmp/fcm-example/cache"),
-        index_dir: PathBuf::from("/tmp/fcm-example/index"),
         packages_dir: PathBuf::from("/tmp/fcm-example/packages"),
         max_cache_size: "2GB".to_string(), // Larger cache
     };
 
     println!("✅ Storage settings updated");
     println!("   Cache: {}", config.storage.cache_dir.display());
-    println!("   Index: {}", config.storage.index_dir.display());
     println!("   Packages: {}", config.storage.packages_dir.display());
     println!("   Max cache size: {}", config.storage.max_cache_size);
 
@@ -128,7 +125,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let expanded_storage = config.get_expanded_storage_config();
     println!("✅ Expanded paths resolved:");
     println!("   Cache: {}", expanded_storage.cache_dir.display());
-    println!("   Index: {}", expanded_storage.index_dir.display());
     println!("   Packages: {}", expanded_storage.packages_dir.display());
 
     // Demonstrate package management

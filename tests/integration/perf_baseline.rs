@@ -19,20 +19,13 @@ async fn install_and_resolve_timing_baseline() {
             max_cache_size: "10MB".into(),
         },
         optimization: OptimizationConfig {
-            incremental_indexing: true,
             parallel_workers: 1,
             batch_size: 100,
             enable_checksums: false,
-            checksum_algorithm: "blake3".into(),
+            checksum_algorithm: "blake3".to_string(),
             checksum_cache_size: 1000,
-            full_rebuild_threshold: 0.5,
-            incremental_batch_size: 50,
-            compression: "none".into(),
-            compression_level: 3,
-            use_mmap: false,
-            max_index_size: "100MB".into(),
             enable_metrics: false,
-            metrics_interval: "30s".into(),
+            metrics_interval: "30s".to_string(),
         },
     };
 

@@ -16,7 +16,6 @@ pub fn create_test_config(temp_dir: &Path) -> FcmConfig {
         packages: vec![],
         storage: StorageConfig {
             cache_dir: temp_dir.join("cache"),
-            index_dir: temp_dir.join("index"),
             packages_dir: temp_dir.join("packages"),
             max_cache_size: "100MB".to_string(),
         },

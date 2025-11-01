@@ -241,7 +241,7 @@ impl CanonicalManager {
             // Use minimal configuration for quick initialization
             config.optimization.parallel_workers = 1;
             config.optimization.enable_metrics = false;
-            // config.optimization.use_mmap = false; // Field doesn't exist in current version
+            config.optimization.use_mmap = false;
         }
 
         // Validate and optimize configuration before initialization
@@ -252,8 +252,7 @@ impl CanonicalManager {
             debug!("Skipping config optimization for test mode");
             crate::config_validator::ConfigValidator::validate_config(&config)
         } else {
-            // crate::config_validator::ConfigValidator::optimize_config(&mut config)
-            crate::config_validator::ConfigValidator::validate_config(&config) // Use validate instead
+            crate::config_validator::ConfigValidator::optimize_config(&mut config)
         };
 
         if !validation.is_valid {
@@ -277,7 +276,11 @@ impl CanonicalManager {
         }
 
         // Initialize unified storage system with timeout to prevent hanging
-        let storage_future = UnifiedStorage::new(config.storage.clone());
+        let storage_future = UnifiedStorage::new(
+            config.storage.clone(),
+            config.optimization.use_mmap,
+            config.optimization.compression_level,
+        );
 
         let storage =
             match tokio::time::timeout(std::time::Duration::from_secs(30), storage_future).await {
@@ -343,7 +346,7 @@ impl CanonicalManager {
     /// Advanced constructor using trait-based components. Caller must provide a SqliteStorage-backed
     /// search storage for resolver/search.
     pub async fn new_with_components(
-        config: FcmConfig,
+        mut config: FcmConfig,
         package_store: Arc<dyn crate::traits::PackageStore + Send + Sync>,
         registry: Arc<dyn crate::traits::AsyncRegistry + Send + Sync>,
         search_storage: Arc<crate::sqlite_storage::SqliteStorage>,
@@ -354,8 +357,7 @@ impl CanonicalManager {
         let validation = if skip_optimization {
             crate::config_validator::ConfigValidator::validate_config(&config)
         } else {
-            // crate::config_validator::ConfigValidator::optimize_config(&mut config)
-            crate::config_validator::ConfigValidator::validate_config(&config) // Use validate instead
+            crate::config_validator::ConfigValidator::optimize_config(&mut config)
         };
         if !validation.is_valid {
             return Err(crate::error::FcmError::Config(
@@ -366,7 +368,14 @@ impl CanonicalManager {
         }
 
         // Build a minimal UnifiedStorage for compatibility where needed (index store may still be used separately)
-        let storage = Arc::new(UnifiedStorage::new(config.storage.clone()).await?);
+        let storage = Arc::new(
+            UnifiedStorage::new(
+                config.storage.clone(),
+                config.optimization.use_mmap,
+                config.optimization.compression_level,
+            )
+            .await?,
+        );
 
         // Resolver/Search backed by provided search_storage (SqliteStorage)
         let resolver = CanonicalResolver::new(Arc::clone(&search_storage));

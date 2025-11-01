@@ -102,7 +102,6 @@ fn test_storage_config_validation() {
     let temp_dir = TempDir::new().unwrap();
     let mut storage_config = StorageConfig {
         cache_dir: temp_dir.path().join("cache"),
-        index_dir: temp_dir.path().join("index"),
         packages_dir: temp_dir.path().join("packages"),
         max_cache_size: "1GB".to_string(),
     };
@@ -284,7 +283,6 @@ fn test_path_expansion() {
 
     // The expanded config should have the same values since we don't use ~ in defaults
     assert_eq!(expanded.cache_dir, config.storage.cache_dir);
-    assert_eq!(expanded.index_dir, config.storage.index_dir);
     assert_eq!(expanded.packages_dir, config.storage.packages_dir);
 }
 

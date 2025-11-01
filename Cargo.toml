@@ -1,6 +1,6 @@
 [package]
 name = "octofhir-canonical-manager"
-version = "0.1.10"
+version = "0.1.11"
 edition = "2024"
 description = "FHIR Canonical Manager - Library-first FHIR package management"
 license = "MIT OR Apache-2.0"
@@ -79,19 +79,15 @@ dirs = "6"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# Binary serialization (replacing SQLite)
-bincode = "2"
-lz4_flex = "0.11"
+# SQLite database
+rusqlite = { version = "0.37", features = ["bundled", "serde_json"] }
 
 # Performance optimization dependencies
 blake3 = "1.5"
-zstd = "0.13"
-memmap2 = "0.9"
 dashmap = "6.1"
 lru = "0.16"
 rayon = "1.10"
 crossbeam-channel = "0.5"
-tantivy = "0.25"
 walkdir = "2.5"
 
 # Async file I/O

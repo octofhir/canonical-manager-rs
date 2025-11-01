@@ -34,13 +34,6 @@ pub trait PackageStore {
     async fn find_resource(
         &self,
         canonical_url: &str,
-    ) -> Result<Option<crate::binary_storage::ResourceIndex>>;
-    async fn list_packages(&self) -> Result<Vec<crate::binary_storage::PackageInfo>>;
-}
-
-#[async_trait::async_trait]
-pub trait IndexStore {
-    async fn store_index(&self, index: &crate::storage::optimized::IndexData) -> Result<()>;
-    async fn load_metadata(&self) -> Result<crate::storage::optimized::IndexMetadata>;
-    async fn verify_integrity(&self) -> Result<bool>;
+    ) -> Result<Option<crate::sqlite_storage::ResourceIndex>>;
+    async fn list_packages(&self) -> Result<Vec<crate::sqlite_storage::PackageInfo>>;
 }

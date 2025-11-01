@@ -1,9 +1,9 @@
 //! Search engine for FHIR resources
 
-use crate::binary_storage::{BinaryStorage, ResourceIndex};
 use crate::concurrency::ConcurrentMap;
 use crate::error::Result;
 use crate::package::FhirResource;
+use crate::sqlite_storage::{ResourceIndex, SqliteStorage};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -21,7 +21,7 @@ use tracing::{debug, info};
 ///
 /// ```rust,no_run
 /// use octofhir_canonical_manager::search::{SearchEngine, SearchQuery};
-/// use octofhir_canonical_manager::binary_storage::BinaryStorage;
+/// use octofhir_canonical_manager::sqlite_storage::SqliteStorage;
 /// use octofhir_canonical_manager::config::StorageConfig;
 /// use std::sync::Arc;
 /// use std::path::PathBuf;
@@ -29,11 +29,11 @@ use tracing::{debug, info};
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let config = StorageConfig {
 ///     cache_dir: PathBuf::from("/tmp/cache"),
-///     index_dir: PathBuf::from("/tmp/index"),
+///     
 ///     packages_dir: PathBuf::from("/tmp/packages"),
 ///     max_cache_size: "1GB".to_string(),
 /// };
-/// let storage = Arc::new(BinaryStorage::new(config).await?);
+/// let storage = Arc::new(SqliteStorage::new(config).await?);
 /// let engine = SearchEngine::new(storage);
 ///
 /// let query = SearchQuery {
@@ -48,7 +48,7 @@ use tracing::{debug, info};
 /// # }
 /// ```
 pub struct SearchEngine {
-    storage: Arc<BinaryStorage>,
+    storage: Arc<SqliteStorage>,
     text_index: TextIndex,
     filters: FilterEngine,
     // Simple LRU-style cache for search results
@@ -132,7 +132,7 @@ pub struct SearchFacets {
 ///
 /// ```rust,no_run
 /// use octofhir_canonical_manager::search::SearchQueryBuilder;
-/// use octofhir_canonical_manager::binary_storage::BinaryStorage;
+/// use octofhir_canonical_manager::sqlite_storage::SqliteStorage;
 /// use octofhir_canonical_manager::config::StorageConfig;
 /// use std::sync::Arc;
 /// use std::path::PathBuf;
@@ -140,11 +140,11 @@ pub struct SearchFacets {
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let config = StorageConfig {
 ///     cache_dir: PathBuf::from("/tmp/cache"),
-///     index_dir: PathBuf::from("/tmp/index"),
+///     
 ///     packages_dir: PathBuf::from("/tmp/packages"),
 ///     max_cache_size: "1GB".to_string(),
 /// };
-/// let storage = Arc::new(BinaryStorage::new(config).await?);
+/// let storage = Arc::new(SqliteStorage::new(config).await?);
 ///
 /// let results = SearchQueryBuilder::new(storage)
 ///     .text("Patient")
@@ -157,7 +157,7 @@ pub struct SearchFacets {
 /// # }
 /// ```
 pub struct SearchQueryBuilder {
-    storage: Arc<BinaryStorage>,
+    storage: Arc<SqliteStorage>,
     query: SearchQuery,
 }
 
@@ -521,7 +521,7 @@ impl FilterEngine {
     ///
     /// ```rust,no_run
     /// use octofhir_canonical_manager::search::{FilterEngine, SearchQuery};
-    /// use octofhir_canonical_manager::binary_storage::ResourceIndex;
+    /// use octofhir_canonical_manager::sqlite_storage::ResourceIndex;
     ///
     /// # fn example(resources: Vec<ResourceIndex>) {
     /// let filter_engine = FilterEngine::new();
@@ -613,7 +613,7 @@ impl SearchEngine {
     ///
     /// ```rust,no_run
     /// use octofhir_canonical_manager::search::SearchEngine;
-    /// use octofhir_canonical_manager::binary_storage::BinaryStorage;
+    /// use octofhir_canonical_manager::sqlite_storage::SqliteStorage;
     /// use octofhir_canonical_manager::config::StorageConfig;
     /// use std::sync::Arc;
     /// use std::path::PathBuf;
@@ -621,16 +621,16 @@ impl SearchEngine {
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let config = StorageConfig {
     ///     cache_dir: PathBuf::from("/tmp/cache"),
-    ///     index_dir: PathBuf::from("/tmp/index"),
+    ///     
     ///     packages_dir: PathBuf::from("/tmp/packages"),
     ///     max_cache_size: "1GB".to_string(),
     /// };
-    /// let storage = Arc::new(BinaryStorage::new(config).await?);
+    /// let storage = Arc::new(SqliteStorage::new(config).await?);
     /// let engine = SearchEngine::new(storage);
     /// # Ok(())
     /// # }
     /// ```
-    pub fn new(storage: Arc<BinaryStorage>) -> Self {
+    pub fn new(storage: Arc<SqliteStorage>) -> Self {
         Self {
             storage,
             text_index: TextIndex::new(),
@@ -1235,7 +1235,7 @@ impl SearchQueryBuilder {
     ///
     /// ```rust,no_run
     /// use octofhir_canonical_manager::search::SearchQueryBuilder;
-    /// use octofhir_canonical_manager::binary_storage::BinaryStorage;
+    /// use octofhir_canonical_manager::sqlite_storage::SqliteStorage;
     /// use octofhir_canonical_manager::config::StorageConfig;
     /// use std::sync::Arc;
     /// use std::path::PathBuf;
@@ -1243,16 +1243,16 @@ impl SearchQueryBuilder {
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let config = StorageConfig {
     ///     cache_dir: PathBuf::from("/tmp/cache"),
-    ///     index_dir: PathBuf::from("/tmp/index"),
+    ///     
     ///     packages_dir: PathBuf::from("/tmp/packages"),
     ///     max_cache_size: "1GB".to_string(),
     /// };
-    /// let storage = Arc::new(BinaryStorage::new(config).await?);
+    /// let storage = Arc::new(SqliteStorage::new(config).await?);
     /// let builder = SearchQueryBuilder::new(storage);
     /// # Ok(())
     /// # }
     /// ```
-    pub fn new(storage: Arc<BinaryStorage>) -> Self {
+    pub fn new(storage: Arc<SqliteStorage>) -> Self {
         Self {
             storage,
             query: SearchQuery::default(),
@@ -1421,18 +1421,18 @@ impl SearchQueryBuilder {
     ///
     /// ```rust,no_run
     /// # use octofhir_canonical_manager::search::SearchQueryBuilder;
-    /// # use octofhir_canonical_manager::binary_storage::BinaryStorage;
+    /// # use octofhir_canonical_manager::sqlite_storage::SqliteStorage;
     /// # use octofhir_canonical_manager::config::StorageConfig;
     /// # use std::sync::Arc;
     /// # use std::path::PathBuf;
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let config = StorageConfig {
     ///     cache_dir: PathBuf::from("/tmp/cache"),
-    ///     index_dir: PathBuf::from("/tmp/index"),
+    ///     
     ///     packages_dir: PathBuf::from("/tmp/packages"),
     ///     max_cache_size: "1GB".to_string(),
     /// };
-    /// let storage = Arc::new(BinaryStorage::new(config).await?);
+    /// let storage = Arc::new(SqliteStorage::new(config).await?);
     ///
     /// let results = SearchQueryBuilder::new(storage)
     ///     .text("Patient")
@@ -1462,12 +1462,11 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config = StorageConfig {
             cache_dir: temp_dir.path().join("cache"),
-            index_dir: temp_dir.path().join("index"),
             packages_dir: temp_dir.path().join("packages"),
             max_cache_size: "100MB".to_string(),
         };
 
-        let storage = Arc::new(BinaryStorage::new(config).await.unwrap());
+        let storage = Arc::new(SqliteStorage::new(config).await.unwrap());
         let engine = SearchEngine::new(storage);
 
         // Test basic search
@@ -1485,12 +1484,11 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config = StorageConfig {
             cache_dir: temp_dir.path().join("cache"),
-            index_dir: temp_dir.path().join("index"),
             packages_dir: temp_dir.path().join("packages"),
             max_cache_size: "100MB".to_string(),
         };
 
-        let storage = Arc::new(BinaryStorage::new(config).await.unwrap());
+        let storage = Arc::new(SqliteStorage::new(config).await.unwrap());
         let engine = SearchEngine::new(storage);
 
         // Test text search
@@ -1508,12 +1506,11 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config = StorageConfig {
             cache_dir: temp_dir.path().join("cache"),
-            index_dir: temp_dir.path().join("index"),
             packages_dir: temp_dir.path().join("packages"),
             max_cache_size: "100MB".to_string(),
         };
 
-        let storage = Arc::new(BinaryStorage::new(config).await.unwrap());
+        let storage = Arc::new(SqliteStorage::new(config).await.unwrap());
 
         // Test query builder
         let result = SearchQueryBuilder::new(storage)
@@ -1564,8 +1561,9 @@ mod tests {
                 resource_type: "Patient".to_string(),
                 package_name: "hl7.fhir.r4.core".to_string(),
                 package_version: "4.0.1".to_string(),
+                fhir_version: "4.0.1".to_string(),
                 file_path: std::path::PathBuf::from("/test/Patient1.json"),
-                metadata: crate::binary_storage::ResourceMetadata {
+                metadata: crate::sqlite_storage::ResourceMetadata {
                     id: "patient-1".to_string(),
                     version: Some("1.0.0".to_string()),
                     status: Some("active".to_string()),
@@ -1578,8 +1576,9 @@ mod tests {
                 resource_type: "Observation".to_string(),
                 package_name: "custom.package".to_string(),
                 package_version: "2.0.0".to_string(),
+                fhir_version: "4.0.1".to_string(),
                 file_path: std::path::PathBuf::from("/test/Observation1.json"),
-                metadata: crate::binary_storage::ResourceMetadata {
+                metadata: crate::sqlite_storage::ResourceMetadata {
                     id: "obs-1".to_string(),
                     version: Some("1.0.0".to_string()),
                     status: Some("final".to_string()),
@@ -1615,12 +1614,11 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config = StorageConfig {
             cache_dir: temp_dir.path().join("cache"),
-            index_dir: temp_dir.path().join("index"),
             packages_dir: temp_dir.path().join("packages"),
             max_cache_size: "100MB".to_string(),
         };
 
-        let storage = Arc::new(BinaryStorage::new(config).await.unwrap());
+        let storage = Arc::new(SqliteStorage::new(config).await.unwrap());
         let engine = SearchEngine::new(storage);
 
         // Test suggestions - all Vec::len() values are >= 0 by definition

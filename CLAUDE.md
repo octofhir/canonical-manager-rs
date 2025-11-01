@@ -66,12 +66,13 @@ just publish-dry-run    # Test packaging without publishing
 - Manages dependencies between components
 - Provides `get_search_parameters()` method for FHIR SearchParameter resource filtering
 
-**BinaryStorage** (`binary_storage.rs`)
-- High-performance binary storage system using bincode serialization + lz4 compression
-- In-memory cache with atomic disk persistence
-- Replaces SQLite for better read performance while maintaining data integrity
-- O(1) canonical URL resolution via in-memory HashMap cache
-- Automatic backup and atomic write operations for reliability
+**SqliteStorage** (`sqlite_storage.rs`)
+- Industry-standard SQLite database with rusqlite for FHIR package and resource storage
+- WAL (Write-Ahead Logging) mode for better concurrency and crash recovery
+- B-tree indexes for O(1) canonical URL lookups without manual index management
+- Single-query JOINs eliminate separate package lookups for faster resolution
+- Atomic transactions ensure data consistency
+- Batch installation API to eliminate O(n²) index rebuild problem
 
 
 **CanonicalResolver** (`resolver.rs`)
@@ -98,10 +99,10 @@ just publish-dry-run    # Test packaging without publishing
 
 ### Key Data Flows
 
-1. **Package Installation**: Registry query → Download → Extract → Validate → BinaryStorage.add_package() → Index + Cache update
-2. **URL Resolution**: In-memory cache lookup → Version fallback → Fuzzy match → BinaryStorage.get_resource() 
-3. **Search**: Text index → Filter → Score → Paginate → Resource loading from BinaryStorage
-4. **Cache Rebuild**: Package extraction → Resource indexing → Atomic in-memory cache update → Compressed binary serialization to disk
+1. **Package Installation**: Registry query → Download → Extract → Validate → SqliteStorage.add_package() → SQLite transaction commit
+2. **Batch Installation**: Multiple packages → SqliteStorage.install_packages_batch() → Single index rebuild → Better performance for N packages
+3. **URL Resolution**: SQLite B-tree index lookup (single JOIN query) → Version fallback → Fuzzy match
+4. **Search**: Text index → Filter → Score → Paginate → Resource loading from SQLite
 
 ### Configuration
 
@@ -133,12 +134,12 @@ Environment variable overrides: `FCM_REGISTRY_URL`, `FCM_CACHE_DIR`, etc.
 - Registry fallbacks when primary registry fails
 
 ### Performance Considerations
-- **BinaryStorage**: In-memory cache for O(1) canonical URL resolution
-- **Compression**: LZ4 compression reduces disk I/O while maintaining fast decompression
-- **Atomic Operations**: All cache updates are atomic to prevent inconsistent states
+- **SqliteStorage**: B-tree indexes provide O(1) canonical URL lookups without manual maintenance
+- **WAL Mode**: Write-Ahead Logging enables better concurrency and faster writes
+- **Single-Query Resolution**: JOINs eliminate separate package lookups (7ms average query time)
+- **Batch Installation**: Install N packages with single index rebuild instead of N rebuilds
 - **Streaming Downloads**: Large package downloads use streaming to minimize memory usage
-- **Sequential Processing**: Package installation and indexing is done sequentially to prevent deadlocks
-- **Binary Serialization**: Bincode provides faster serialization than JSON for storage
+- **JSON Storage**: SQLite's native JSON support enables efficient resource storage and querying
 
 ### Code Conventions
 - All async operations use Tokio
@@ -160,8 +161,9 @@ Environment variable overrides: `FCM_REGISTRY_URL`, `FCM_CACHE_DIR`, etc.
 
 ## Key Files to Understand
 
-- `src/lib.rs` - Main API and component orchestration
-- `src/binary_storage.rs` - High-performance binary storage with in-memory caching
+- `src/lib.rs` - Main API and component orchestration with batch installation support
+- `src/sqlite_storage.rs` - SQLite-based storage with WAL mode and B-tree indexes
+- `src/unified_storage.rs` - Unified storage facade (simplified to use only SqliteStorage)
 - `src/resolver.rs` - Resolution strategies and version handling
 - `src/registry.rs` - Network operations and registry interactions
 - `src/search.rs` - Full-text search engine with inverted index
@@ -175,10 +177,10 @@ Environment variable overrides: `FCM_REGISTRY_URL`, `FCM_CACHE_DIR`, etc.
 - **Doctest imports**: Always use `octofhir_canonical_manager::` crate name
 - **Test failures**: Check MockRegistry creates valid .tgz files, not JSON
 - **Version resolution**: Ensure base URL matching logic is precise
-- **Search not finding resources**: Verify cache rebuild after package installation - BinaryStorage.add_package() should update in-memory cache atomically
-- **Storage corruption**: Use BinaryStorage.integrity_check() to verify file consistency
-- **Performance issues**: Check if in-memory cache is properly loaded from binary storage file
-- **Package installation deadlocks**: System uses sequential processing to prevent deadlocks - parallel workers have been removed
+- **Search not finding resources**: Verify package installation completed successfully - SqliteStorage uses atomic transactions
+- **Database corruption**: SQLite WAL mode provides crash recovery; database file is at `~/.maki/index/fhir.db`
+- **Performance issues**: Check SQLite indexes are created; query performance should be ~7ms for canonical URL lookups
+- **Batch installation**: Use `install_packages_batch()` for multiple packages to avoid O(n²) index rebuilds
 - **Clippy warnings**: Pay attention to unused variables and dead code flags
 
 ---

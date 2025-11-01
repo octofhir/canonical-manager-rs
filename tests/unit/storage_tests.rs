@@ -1,7 +1,7 @@
 //! Unit tests for storage module
 
-use octofhir_canonical_manager::binary_storage::BinaryStorage;
 use octofhir_canonical_manager::package::{ExtractedPackage, FhirResource, PackageManifest};
+use octofhir_canonical_manager::sqlite_storage::SqliteStorage;
 use octofhir_canonical_manager::{StorageConfig, error::Validate};
 use serde_json::json;
 use std::collections::HashMap;
@@ -16,12 +16,11 @@ async fn test_indexed_storage_creation() {
     let temp_dir = setup_test_env();
     let config = StorageConfig {
         cache_dir: temp_dir.path().join("cache"),
-        index_dir: temp_dir.path().join("index"),
         packages_dir: temp_dir.path().join("packages"),
         max_cache_size: "100MB".to_string(),
     };
 
-    let storage = BinaryStorage::new(config).await.unwrap();
+    let storage = SqliteStorage::new(config).await.unwrap();
 
     // Verify empty storage
     let packages = storage.list_packages().await.unwrap();
@@ -37,7 +36,6 @@ fn test_storage_config_validation() {
     let temp_dir = TempDir::new().unwrap();
     let config = StorageConfig {
         cache_dir: temp_dir.path().join("cache"),
-        index_dir: temp_dir.path().join("index"),
         packages_dir: temp_dir.path().join("packages"),
         max_cache_size: "100MB".to_string(),
     };
@@ -62,12 +60,11 @@ async fn test_add_package_to_storage() {
     let temp_dir = setup_test_env();
     let config = StorageConfig {
         cache_dir: temp_dir.path().join("cache"),
-        index_dir: temp_dir.path().join("index"),
         packages_dir: temp_dir.path().join("packages"),
         max_cache_size: "100MB".to_string(),
     };
 
-    let storage = BinaryStorage::new(config).await.unwrap();
+    let storage = SqliteStorage::new(config).await.unwrap();
 
     // Create test package
     let extracted_package = create_test_extracted_package(&temp_dir);
@@ -85,7 +82,7 @@ async fn test_add_package_to_storage() {
 
     // Verify resources are indexed
     let cache_entries = storage.get_cache_entries();
-    assert_eq!(cache_entries.len(), 4); // 2 composite keys + 2 canonical URLs
+    assert_eq!(cache_entries.len(), 2); // 2 canonical URLs (no composite keys in SQLite implementation)
     assert!(cache_entries.contains_key("http://example.com/StructureDefinition/test-patient"));
     assert!(cache_entries.contains_key("http://example.com/ValueSet/test-codes"));
 }
@@ -96,12 +93,11 @@ async fn test_canonical_url_lookup() {
     let temp_dir = setup_test_env();
     let config = StorageConfig {
         cache_dir: temp_dir.path().join("cache"),
-        index_dir: temp_dir.path().join("index"),
         packages_dir: temp_dir.path().join("packages"),
         max_cache_size: "100MB".to_string(),
     };
 
-    let storage = BinaryStorage::new(config).await.unwrap();
+    let storage = SqliteStorage::new(config).await.unwrap();
 
     // Test lookup on empty storage
     let result = storage
@@ -137,12 +133,11 @@ async fn test_get_resource_content() {
     let temp_dir = setup_test_env();
     let config = StorageConfig {
         cache_dir: temp_dir.path().join("cache"),
-        index_dir: temp_dir.path().join("index"),
         packages_dir: temp_dir.path().join("packages"),
         max_cache_size: "100MB".to_string(),
     };
 
-    let storage = BinaryStorage::new(config).await.unwrap();
+    let storage = SqliteStorage::new(config).await.unwrap();
     let extracted_package = create_test_extracted_package(&temp_dir);
     storage.add_package(&extracted_package).await.unwrap();
 
@@ -172,12 +167,11 @@ async fn test_search_by_type() {
     let temp_dir = setup_test_env();
     let config = StorageConfig {
         cache_dir: temp_dir.path().join("cache"),
-        index_dir: temp_dir.path().join("index"),
         packages_dir: temp_dir.path().join("packages"),
         max_cache_size: "100MB".to_string(),
     };
 
-    let storage = BinaryStorage::new(config).await.unwrap();
+    let storage = SqliteStorage::new(config).await.unwrap();
     let extracted_package = create_test_extracted_package(&temp_dir);
     storage.add_package(&extracted_package).await.unwrap();
 
@@ -187,7 +181,7 @@ async fn test_search_by_type() {
         .values()
         .filter(|entry| entry.resource_type == "StructureDefinition")
         .collect();
-    assert_eq!(structure_defs.len(), 2); // composite key + canonical URL
+    assert_eq!(structure_defs.len(), 1); // Only canonical URL (no composite keys)
     assert_eq!(structure_defs[0].resource_type, "StructureDefinition");
     assert_eq!(
         structure_defs[0].canonical_url,
@@ -199,7 +193,7 @@ async fn test_search_by_type() {
         .values()
         .filter(|entry| entry.resource_type == "ValueSet")
         .collect();
-    assert_eq!(value_sets.len(), 2); // composite key + canonical URL
+    assert_eq!(value_sets.len(), 1); // Only canonical URL (no composite keys)
     assert_eq!(value_sets[0].resource_type, "ValueSet");
     assert_eq!(
         value_sets[0].canonical_url,

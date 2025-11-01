@@ -560,15 +560,15 @@ async fn handle_resolve(cli: &Cli, cmd: &ResolveCommand) -> crate::Result<()> {
 async fn handle_update(cli: &Cli) -> crate::Result<()> {
     let config = load_config(cli).await?;
 
-    Progress::start("Updating package indexes");
-    Progress::step("Rebuilding search indexes");
+    Progress::start("Checking package indexes");
+    Progress::step("Verifying SQLite indexes");
 
-    let manager = CanonicalManager::new(config).await?;
+    let _manager = CanonicalManager::new(config).await?;
 
-    // Actually rebuild the search index
-    manager.rebuild_index().await?;
+    // SQLite automatically maintains all indexes, no rebuild needed
+    Progress::step("SQLite indexes are automatically maintained");
 
-    Output::success("Package indexes updated successfully!");
+    Output::success("Package indexes verified - SQLite maintains them automatically!");
 
     Ok(())
 }

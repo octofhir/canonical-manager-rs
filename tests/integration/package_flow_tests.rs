@@ -28,23 +28,15 @@ async fn test_canonical_manager_creation_simple() {
         resource_directories: vec![],
         storage: StorageConfig {
             cache_dir: temp_dir.path().join("cache"),
-            index_dir: temp_dir.path().join("index"),
             packages_dir: temp_dir.path().join("packages"),
             max_cache_size: "10MB".to_string(),
         },
         optimization: OptimizationConfig {
-            incremental_indexing: true,
             parallel_workers: 1,
             batch_size: 100,
             enable_checksums: false,
             checksum_algorithm: "blake3".to_string(),
             checksum_cache_size: 1000,
-            full_rebuild_threshold: 0.5,
-            incremental_batch_size: 50,
-            compression: "none".to_string(),
-            compression_level: 3,
-            use_mmap: false,
-            max_index_size: "100MB".to_string(),
             enable_metrics: false,
             metrics_interval: "30s".to_string(),
         },
@@ -76,7 +68,6 @@ async fn test_canonical_manager_creation_simple() {
         }
     }
 }
-
 /// Test package installation with mock registry (with timeout)  
 #[tokio::test]
 async fn test_package_installation_with_timeout() {
@@ -103,23 +94,15 @@ async fn test_package_installation_with_timeout() {
         resource_directories: vec![],
         storage: StorageConfig {
             cache_dir: temp_dir.path().join("cache"),
-            index_dir: temp_dir.path().join("index"),
             packages_dir: temp_dir.path().join("packages"),
             max_cache_size: "10MB".to_string(),
         },
         optimization: OptimizationConfig {
-            incremental_indexing: true,
             parallel_workers: 1,
             batch_size: 100,
             enable_checksums: false,
             checksum_algorithm: "blake3".to_string(),
             checksum_cache_size: 1000,
-            full_rebuild_threshold: 0.5,
-            incremental_batch_size: 50,
-            compression: "none".to_string(),
-            compression_level: 3,
-            use_mmap: false,
-            max_index_size: "100MB".to_string(),
             enable_metrics: false,
             metrics_interval: "30s".to_string(),
         },
@@ -168,7 +151,6 @@ async fn test_package_installation_with_timeout() {
         }
     }
 }
-
 /// Test complete package installation workflow
 #[tokio::test]
 async fn test_full_package_installation_original() {
@@ -194,23 +176,15 @@ async fn test_full_package_installation_original() {
         resource_directories: vec![],
         storage: StorageConfig {
             cache_dir: temp_dir.path().join("cache"),
-            index_dir: temp_dir.path().join("index"),
             packages_dir: temp_dir.path().join("packages"),
             max_cache_size: "100MB".to_string(),
         },
         optimization: OptimizationConfig {
-            incremental_indexing: true,
             parallel_workers: 1,
             batch_size: 100,
             enable_checksums: false,
             checksum_algorithm: "blake3".to_string(),
             checksum_cache_size: 1000,
-            full_rebuild_threshold: 0.5,
-            incremental_batch_size: 50,
-            compression: "none".to_string(),
-            compression_level: 3,
-            use_mmap: false,
-            max_index_size: "100MB".to_string(),
             enable_metrics: false,
             metrics_interval: "30s".to_string(),
         },
@@ -249,7 +223,6 @@ async fn test_full_package_installation_original() {
             panic!("Package installation timed out");
         }
     }
-
     // Verify package is in the list
     let packages = manager.list_packages().await.unwrap();
     assert!(
@@ -257,7 +230,6 @@ async fn test_full_package_installation_original() {
         "Package should be in the installed list"
     );
 }
-
 /// Test package installation with dependencies
 #[tokio::test]
 async fn test_package_installation_with_dependencies() {
@@ -279,23 +251,15 @@ async fn test_package_installation_with_dependencies() {
         resource_directories: vec![],
         storage: StorageConfig {
             cache_dir: temp_dir.path().join("cache"),
-            index_dir: temp_dir.path().join("index"),
             packages_dir: temp_dir.path().join("packages"),
             max_cache_size: "100MB".to_string(),
         },
         optimization: OptimizationConfig {
-            incremental_indexing: true,
             parallel_workers: 1,
             batch_size: 100,
             enable_checksums: false,
             checksum_algorithm: "blake3".to_string(),
             checksum_cache_size: 1000,
-            full_rebuild_threshold: 0.5,
-            incremental_batch_size: 50,
-            compression: "none".to_string(),
-            compression_level: 3,
-            use_mmap: false,
-            max_index_size: "100MB".to_string(),
             enable_metrics: false,
             metrics_interval: "30s".to_string(),
         },
@@ -321,7 +285,6 @@ async fn test_package_installation_with_dependencies() {
         "Dependency should be installed"
     );
 }
-
 /// Test duplicate package installation (should not cause issues)
 #[tokio::test]
 async fn test_duplicate_package_installation() {
@@ -343,23 +306,15 @@ async fn test_duplicate_package_installation() {
         resource_directories: vec![],
         storage: StorageConfig {
             cache_dir: temp_dir.path().join("cache"),
-            index_dir: temp_dir.path().join("index"),
             packages_dir: temp_dir.path().join("packages"),
             max_cache_size: "100MB".to_string(),
         },
         optimization: OptimizationConfig {
-            incremental_indexing: true,
             parallel_workers: 1,
             batch_size: 100,
             enable_checksums: false,
             checksum_algorithm: "blake3".to_string(),
             checksum_cache_size: 1000,
-            full_rebuild_threshold: 0.5,
-            incremental_batch_size: 50,
-            compression: "none".to_string(),
-            compression_level: 3,
-            use_mmap: false,
-            max_index_size: "100MB".to_string(),
             enable_metrics: false,
             metrics_interval: "30s".to_string(),
         },
@@ -382,7 +337,6 @@ async fn test_duplicate_package_installation() {
         .count();
     assert_eq!(count, 1, "Package should not be duplicated in the list");
 }
-
 /// Test package removal workflow
 #[tokio::test]
 async fn test_package_removal() {
@@ -404,23 +358,15 @@ async fn test_package_removal() {
         resource_directories: vec![],
         storage: StorageConfig {
             cache_dir: temp_dir.path().join("cache"),
-            index_dir: temp_dir.path().join("index"),
             packages_dir: temp_dir.path().join("packages"),
             max_cache_size: "100MB".to_string(),
         },
         optimization: OptimizationConfig {
-            incremental_indexing: true,
             parallel_workers: 1,
             batch_size: 100,
             enable_checksums: false,
             checksum_algorithm: "blake3".to_string(),
             checksum_cache_size: 1000,
-            full_rebuild_threshold: 0.5,
-            incremental_batch_size: 50,
-            compression: "none".to_string(),
-            compression_level: 3,
-            use_mmap: false,
-            max_index_size: "100MB".to_string(),
             enable_metrics: false,
             metrics_interval: "30s".to_string(),
         },
@@ -446,7 +392,6 @@ async fn test_package_removal() {
     // Verify it's removed (Note: current implementation may not actually remove from storage)
     // This test verifies the remove method can be called without error
 }
-
 /// Test canonical URL resolution after package installation
 #[tokio::test]
 async fn test_canonical_resolution_after_installation() {
@@ -468,23 +413,15 @@ async fn test_canonical_resolution_after_installation() {
         resource_directories: vec![],
         storage: StorageConfig {
             cache_dir: temp_dir.path().join("cache"),
-            index_dir: temp_dir.path().join("index"),
             packages_dir: temp_dir.path().join("packages"),
             max_cache_size: "100MB".to_string(),
         },
         optimization: OptimizationConfig {
-            incremental_indexing: true,
             parallel_workers: 1,
             batch_size: 100,
             enable_checksums: false,
             checksum_algorithm: "blake3".to_string(),
             checksum_cache_size: 1000,
-            full_rebuild_threshold: 0.5,
-            incremental_batch_size: 50,
-            compression: "none".to_string(),
-            compression_level: 3,
-            use_mmap: false,
-            max_index_size: "100MB".to_string(),
             enable_metrics: false,
             metrics_interval: "30s".to_string(),
         },
@@ -512,7 +449,6 @@ async fn test_canonical_resolution_after_installation() {
     // But we test that the resolution method can be called
     assert!(resolve_result.is_err() || resolve_result.is_ok());
 }
-
 /// Test batch canonical URL resolution
 #[tokio::test]
 async fn test_batch_canonical_resolution() {
@@ -534,23 +470,15 @@ async fn test_batch_canonical_resolution() {
         resource_directories: vec![],
         storage: StorageConfig {
             cache_dir: temp_dir.path().join("cache"),
-            index_dir: temp_dir.path().join("index"),
             packages_dir: temp_dir.path().join("packages"),
             max_cache_size: "100MB".to_string(),
         },
         optimization: OptimizationConfig {
-            incremental_indexing: true,
             parallel_workers: 1,
             batch_size: 100,
             enable_checksums: false,
             checksum_algorithm: "blake3".to_string(),
             checksum_cache_size: 1000,
-            full_rebuild_threshold: 0.5,
-            incremental_batch_size: 50,
-            compression: "none".to_string(),
-            compression_level: 3,
-            use_mmap: false,
-            max_index_size: "100MB".to_string(),
             enable_metrics: false,
             metrics_interval: "30s".to_string(),
         },
@@ -580,7 +508,6 @@ async fn test_batch_canonical_resolution() {
         "Results should not exceed input URLs"
     );
 }
-
 /// Test error handling during package installation
 #[tokio::test]
 async fn test_package_installation_error_handling() {
@@ -602,23 +529,15 @@ async fn test_package_installation_error_handling() {
         resource_directories: vec![],
         storage: StorageConfig {
             cache_dir: temp_dir.path().join("cache"),
-            index_dir: temp_dir.path().join("index"),
             packages_dir: temp_dir.path().join("packages"),
             max_cache_size: "100MB".to_string(),
         },
         optimization: OptimizationConfig {
-            incremental_indexing: true,
             parallel_workers: 1,
             batch_size: 100,
             enable_checksums: false,
             checksum_algorithm: "blake3".to_string(),
             checksum_cache_size: 1000,
-            full_rebuild_threshold: 0.5,
-            incremental_batch_size: 50,
-            compression: "none".to_string(),
-            compression_level: 3,
-            use_mmap: false,
-            max_index_size: "100MB".to_string(),
             enable_metrics: false,
             metrics_interval: "30s".to_string(),
         },
@@ -642,7 +561,6 @@ async fn test_package_installation_error_handling() {
         "Failed package should not be in the list"
     );
 }
-
 /// Test concurrent package installations
 #[tokio::test]
 async fn test_concurrent_package_installations() {
@@ -664,23 +582,15 @@ async fn test_concurrent_package_installations() {
         resource_directories: vec![],
         storage: StorageConfig {
             cache_dir: temp_dir.path().join("cache"),
-            index_dir: temp_dir.path().join("index"),
             packages_dir: temp_dir.path().join("packages"),
             max_cache_size: "100MB".to_string(),
         },
         optimization: OptimizationConfig {
-            incremental_indexing: true,
             parallel_workers: 1,
             batch_size: 100,
             enable_checksums: false,
             checksum_algorithm: "blake3".to_string(),
             checksum_cache_size: 1000,
-            full_rebuild_threshold: 0.5,
-            incremental_batch_size: 50,
-            compression: "none".to_string(),
-            compression_level: 3,
-            use_mmap: false,
-            max_index_size: "100MB".to_string(),
             enable_metrics: false,
             metrics_interval: "30s".to_string(),
         },
@@ -709,7 +619,6 @@ async fn test_concurrent_package_installations() {
         "At least one concurrent installation should succeed"
     );
 }
-
 /// Test package counting functionality
 #[tokio::test]
 #[cfg(feature = "cli")]
@@ -732,23 +641,15 @@ async fn test_package_counting() {
         resource_directories: vec![],
         storage: StorageConfig {
             cache_dir: temp_dir.path().join("cache"),
-            index_dir: temp_dir.path().join("index"),
             packages_dir: temp_dir.path().join("packages"),
             max_cache_size: "100MB".to_string(),
         },
         optimization: OptimizationConfig {
-            incremental_indexing: true,
             parallel_workers: 1,
             batch_size: 100,
             enable_checksums: false,
             checksum_algorithm: "blake3".to_string(),
             checksum_cache_size: 1000,
-            full_rebuild_threshold: 0.5,
-            incremental_batch_size: 50,
-            compression: "none".to_string(),
-            compression_level: 3,
-            use_mmap: false,
-            max_index_size: "100MB".to_string(),
             enable_metrics: false,
             metrics_interval: "30s".to_string(),
         },
@@ -767,7 +668,6 @@ async fn test_package_counting() {
     );
     assert!(count <= 10, "Package count should be reasonable"); // Assuming not too many dependencies
 }
-
 /// Test installation with custom priorities
 #[tokio::test]
 async fn test_installation_with_priorities() {
@@ -801,23 +701,15 @@ async fn test_installation_with_priorities() {
         resource_directories: vec![],
         storage: StorageConfig {
             cache_dir: temp_dir.path().join("cache"),
-            index_dir: temp_dir.path().join("index"),
             packages_dir: temp_dir.path().join("packages"),
             max_cache_size: "100MB".to_string(),
         },
         optimization: OptimizationConfig {
-            incremental_indexing: true,
             parallel_workers: 1,
             batch_size: 100,
             enable_checksums: false,
             checksum_algorithm: "blake3".to_string(),
             checksum_cache_size: 1000,
-            full_rebuild_threshold: 0.5,
-            incremental_batch_size: 50,
-            compression: "none".to_string(),
-            compression_level: 3,
-            use_mmap: false,
-            max_index_size: "100MB".to_string(),
             enable_metrics: false,
             metrics_interval: "30s".to_string(),
         },
@@ -833,7 +725,6 @@ async fn test_installation_with_priorities() {
     assert!(result1.is_ok(), "High priority package should install");
     assert!(result2.is_ok(), "Lower priority package should install");
 }
-
 /// Test search parameter retrieval (without package installation)
 #[tokio::test]
 async fn test_search_parameter_retrieval_simple() {
@@ -850,23 +741,15 @@ async fn test_search_parameter_retrieval_simple() {
         resource_directories: vec![],
         storage: StorageConfig {
             cache_dir: temp_dir.path().join("cache"),
-            index_dir: temp_dir.path().join("index"),
             packages_dir: temp_dir.path().join("packages"),
             max_cache_size: "10MB".to_string(),
         },
         optimization: OptimizationConfig {
-            incremental_indexing: true,
             parallel_workers: 1,
             batch_size: 100,
             enable_checksums: false,
             checksum_algorithm: "blake3".to_string(),
             checksum_cache_size: 1000,
-            full_rebuild_threshold: 0.5,
-            incremental_batch_size: 50,
-            compression: "none".to_string(),
-            compression_level: 3,
-            use_mmap: false,
-            max_index_size: "100MB".to_string(),
             enable_metrics: false,
             metrics_interval: "30s".to_string(),
         },
@@ -896,7 +779,6 @@ async fn test_search_parameter_retrieval_simple() {
         "Should have no search parameters when no packages installed"
     );
 }
-
 /// Test search parameter retrieval
 #[tokio::test]
 #[ignore = "Test requires SearchParameter resources to be available in mock packages"]
@@ -915,23 +797,15 @@ async fn test_search_parameter_retrieval_with_installation() {
         resource_directories: vec![],
         storage: StorageConfig {
             cache_dir: temp_dir.path().join("cache"),
-            index_dir: temp_dir.path().join("index"),
             packages_dir: temp_dir.path().join("packages"),
             max_cache_size: "100MB".to_string(),
         },
         optimization: OptimizationConfig {
-            incremental_indexing: true,
             parallel_workers: 1,
             batch_size: 100,
             enable_checksums: false,
             checksum_algorithm: "blake3".to_string(),
             checksum_cache_size: 1000,
-            full_rebuild_threshold: 0.5,
-            incremental_batch_size: 50,
-            compression: "none".to_string(),
-            compression_level: 3,
-            use_mmap: false,
-            max_index_size: "100MB".to_string(),
             enable_metrics: false,
             metrics_interval: "30s".to_string(),
         },

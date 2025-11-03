@@ -56,7 +56,7 @@ pub struct SearchEngine {
     cache_ttl: Duration,
     // Lazily build the text index only when needed
     index_built: std::sync::atomic::AtomicBool,
-    index_build_lock: std::sync::Mutex<()>,
+    index_build_lock: tokio::sync::Mutex<()>,
 }
 
 /// Inverted text index for fast full-text search.
@@ -638,14 +638,14 @@ impl SearchEngine {
             search_cache: ConcurrentMap::new(),
             cache_ttl: Duration::from_secs(300), // 5 minutes cache TTL
             index_built: std::sync::atomic::AtomicBool::new(false),
-            index_build_lock: std::sync::Mutex::new(()),
+            index_build_lock: tokio::sync::Mutex::new(()),
         }
     }
 
     /// Build metadata index from current storage (fast - no file I/O)
-    fn build_metadata_index(&self) {
+    async fn build_metadata_index(&self) {
         debug!("Building text index from storage");
-        let cache_entries = self.storage.get_cache_entries();
+        let cache_entries = self.storage.get_cache_entries().await;
 
         for (canonical_url, resource_index) in cache_entries {
             // Index the canonical URL itself
@@ -903,10 +903,10 @@ impl SearchEngine {
     async fn get_candidate_resources(&self, query: &SearchQuery) -> Result<Vec<ResourceIndex>> {
         if let Some(text) = &query.text {
             // Ensure the text index is ready only when text search is requested
-            self.ensure_text_index_built();
+            self.ensure_text_index_built().await;
             // Text search - use text index
             let matching_urls = self.text_index.search(text);
-            let cache_entries = self.storage.get_cache_entries();
+            let cache_entries = self.storage.get_cache_entries().await;
 
             Ok(cache_entries
                 .into_iter()
@@ -915,7 +915,7 @@ impl SearchEngine {
                 .collect())
         } else {
             // No text search - prefilter by cheap criteria to reduce work
-            let cache_entries = self.storage.get_cache_entries();
+            let cache_entries = self.storage.get_cache_entries().await;
             if !query.resource_types.is_empty() {
                 Ok(cache_entries
                     .into_values()
@@ -927,13 +927,13 @@ impl SearchEngine {
         }
     }
 
-    fn ensure_text_index_built(&self) {
+    async fn ensure_text_index_built(&self) {
         if self.index_built.load(std::sync::atomic::Ordering::Acquire) {
             return;
         }
-        let _guard = self.index_build_lock.lock().unwrap();
+        let _guard = self.index_build_lock.lock().await;
         if !self.index_built.load(std::sync::atomic::Ordering::Acquire) {
-            self.build_metadata_index();
+            self.build_metadata_index().await;
             self.index_built
                 .store(true, std::sync::atomic::Ordering::Release);
         }
@@ -1111,7 +1111,7 @@ impl SearchEngine {
     /// }
     /// # }
     /// ```
-    pub fn suggest_completions(&self, prefix: &str) -> Vec<String> {
+    pub async fn suggest_completions(&self, prefix: &str) -> Vec<String> {
         if prefix.len() < 2 {
             return Vec::new();
         }
@@ -1120,7 +1120,7 @@ impl SearchEngine {
         let mut suggestions = Vec::new();
 
         // Suggest resource types
-        let cache_entries = self.storage.get_cache_entries();
+        let cache_entries = self.storage.get_cache_entries().await;
         let mut resource_types: Vec<String> = cache_entries
             .values()
             .map(|index| index.resource_type.clone())
@@ -1186,9 +1186,9 @@ impl SearchEngine {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn get_facets(&self, query: &SearchQuery) -> Result<SearchFacets> {
+    pub async fn get_facets(&self, query: &SearchQuery) -> Result<SearchFacets> {
         // Get candidate resources
-        let cache_entries = self.storage.get_cache_entries();
+        let cache_entries = self.storage.get_cache_entries().await;
         let resources: Vec<ResourceIndex> = if let Some(text) = &query.text {
             let matching_urls = self.text_index.search(text);
             cache_entries

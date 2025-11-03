@@ -34,10 +34,13 @@ impl UnifiedStorage {
 
     /// Add a package to storage
     pub async fn add_package(&self, package: &ExtractedPackage) -> Result<()> {
-        // Add to SQLite storage (indexes are automatically maintained)
-        self.package_storage.add_package(package).await?;
+        let package_name = package.name.clone();
 
-        info!("Package {} added to storage", package.name);
+        // Add to SQLite storage (indexes are automatically maintained)
+        // Clone the package to pass ownership
+        self.package_storage.add_package(package.clone()).await?;
+
+        info!("Package {} added to storage", package_name);
 
         Ok(())
     }

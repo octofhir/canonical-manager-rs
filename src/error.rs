@@ -74,8 +74,18 @@ pub enum FcmError {
     #[error("Task join error: {0}")]
     TaskJoin(#[from] tokio::task::JoinError),
 
+    #[error("Database error: {0}")]
+    Database(String),
+
     #[error("Generic error: {0}")]
     Generic(String),
+}
+
+// Implement From for tokio-rusqlite errors
+impl From<tokio_rusqlite::Error> for FcmError {
+    fn from(err: tokio_rusqlite::Error) -> Self {
+        FcmError::Database(err.to_string())
+    }
 }
 
 // Manual Clone implementation for types that can be cloned
@@ -88,6 +98,7 @@ impl Clone for FcmError {
             Self::Storage(e) => Self::Storage(e.clone()),
             Self::Resolution(e) => Self::Resolution(e.clone()),
             Self::Search(e) => Self::Search(e.clone()),
+            Self::Database(msg) => Self::Database(msg.clone()),
             Self::Generic(msg) => Self::Generic(msg.clone()),
             // For non-cloneable types, convert to generic error
             Self::Io(e) => Self::Generic(format!("IO error: {e}")),
@@ -246,6 +257,13 @@ pub enum StorageError {
 
     #[error("Package already exists: {name}@{version}")]
     PackageAlreadyExists { name: String, version: String },
+
+    #[error("Unsupported schema version: current={current}, required={required}. {message}")]
+    UnsupportedSchemaVersion {
+        current: i32,
+        required: i32,
+        message: String,
+    },
 }
 
 /// Errors related to canonical URL resolution.

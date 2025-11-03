@@ -5,6 +5,7 @@ use crate::error::{RegistryError, Result};
 use base64::Engine;
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
+use parking_lot::Mutex;
 use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize};
 use sha2::digest::Digest;
@@ -87,11 +88,11 @@ pub struct RegistryClient {
     cache_dir: PathBuf,
     fallback_registries: Vec<String>,
     // In-memory metadata cache keyed by metadata URL
-    metadata_cache: std::sync::Mutex<std::collections::HashMap<String, CachedResponse>>,
+    metadata_cache: Mutex<std::collections::HashMap<String, CachedResponse>>,
     // Persisted validators (etag/last-modified) across runs
-    persisted_validators: std::sync::Mutex<std::collections::HashMap<String, PersistedValidators>>,
+    persisted_validators: Mutex<std::collections::HashMap<String, PersistedValidators>>,
     validators_path: PathBuf,
-    last_save: std::sync::Mutex<std::time::Instant>,
+    last_save: Mutex<std::time::Instant>,
 }
 
 #[derive(Clone, Debug)]
@@ -319,7 +320,7 @@ impl RegistryClient {
         let validators_path = cache_dir.join("registry-cache.json");
         let persisted_validators = {
             // Best-effort load with warning on corruption
-            if let Ok(bytes) = std::fs::read(&validators_path) {
+            if let Ok(bytes) = tokio::fs::read(&validators_path).await {
                 match serde_json::from_slice::<std::collections::HashMap<String, PersistedValidators>>(
                     &bytes,
                 ) {
@@ -340,10 +341,10 @@ impl RegistryClient {
             config: config.clone(),
             cache_dir,
             fallback_registries,
-            metadata_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
-            persisted_validators: std::sync::Mutex::new(persisted_validators),
+            metadata_cache: Mutex::new(std::collections::HashMap::new()),
+            persisted_validators: Mutex::new(persisted_validators),
             validators_path,
-            last_save: std::sync::Mutex::new(
+            last_save: Mutex::new(
                 std::time::Instant::now() - std::time::Duration::from_secs(10),
             ),
         })
@@ -867,7 +868,6 @@ impl RegistryClient {
             if let Some(cached) = self
                 .metadata_cache
                 .lock()
-                .unwrap()
                 .get(metadata_url)
                 .cloned()
             {
@@ -882,7 +882,6 @@ impl RegistryClient {
                 if let Some(p) = self
                     .persisted_validators
                     .lock()
-                    .unwrap()
                     .get(metadata_url)
                     .cloned()
                 {
@@ -922,7 +921,7 @@ impl RegistryClient {
                     .map(|s| s.to_string());
                 let npm: NpmPackageResponse = resp.json().await?;
 
-                self.metadata_cache.lock().unwrap().insert(
+                self.metadata_cache.lock().insert(
                     metadata_url.to_string(),
                     CachedResponse {
                         etag,
@@ -935,14 +934,13 @@ impl RegistryClient {
                     metadata_url,
                     self.metadata_cache
                         .lock()
-                        .unwrap()
                         .get(metadata_url)
                         .unwrap(),
                 );
                 Ok(npm)
             }
             reqwest::StatusCode::NOT_MODIFIED => {
-                if let Some(cached) = self.metadata_cache.lock().unwrap().get(metadata_url) {
+                if let Some(cached) = self.metadata_cache.lock().get(metadata_url) {
                     // refresh persisted validators
                     self.update_and_save_validators(metadata_url, cached);
                     Ok(cached.npm.clone())
@@ -963,7 +961,7 @@ impl RegistryClient {
     }
 
     fn update_and_save_validators(&self, url: &str, cached: &CachedResponse) {
-        let mut map = self.persisted_validators.lock().unwrap();
+        let mut map = self.persisted_validators.lock();
         map.insert(
             url.to_string(),
             PersistedValidators {
@@ -973,12 +971,16 @@ impl RegistryClient {
             },
         );
         // Best-effort debounced save (min 500ms interval)
-        let mut last = self.last_save.lock().unwrap();
+        let mut last = self.last_save.lock();
         let now = std::time::Instant::now();
         if now.duration_since(*last) >= std::time::Duration::from_millis(500)
             && let Ok(json) = serde_json::to_vec_pretty(&*map)
         {
-            let _ = std::fs::write(&self.validators_path, json);
+            // Spawn blocking task for file write to avoid blocking tokio runtime
+            let validators_path = self.validators_path.clone();
+            tokio::task::spawn_blocking(move || {
+                let _ = std::fs::write(&validators_path, json);
+            });
             *last = now;
         }
     }

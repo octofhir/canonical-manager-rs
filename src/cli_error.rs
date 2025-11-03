@@ -25,6 +25,7 @@ impl CliError for FcmError {
             FcmError::TomlDe(e) => format!("{} TOML Parse Error: {}", "📝".red(), e),
             FcmError::TomlSer(e) => format!("{} TOML Write Error: {}", "📝".red(), e),
             FcmError::TaskJoin(e) => format!("{} Task Error: {}", "⚠️".red(), e),
+            FcmError::Database(msg) => format!("{} Database Error: {}", "💾".red(), msg),
             FcmError::Generic(msg) => format!("{} Generic Error: {}", "⚠️".red(), msg),
         }
     }
@@ -65,6 +66,11 @@ impl CliError for FcmError {
             }
             FcmError::Io(e) if e.kind() == std::io::ErrorKind::PermissionDenied => Some(format!(
                 "{} Check file permissions or run with appropriate privileges",
+                "💡".yellow()
+            )),
+            FcmError::Database(_) => Some(format!(
+                "{} Database operation failed - this may be due to file corruption or concurrent access\n{} Try removing ~/.maki/index/fhir.db and rebuilding the index",
+                "💡".yellow(),
                 "💡".yellow()
             )),
             _ => None,
@@ -301,6 +307,7 @@ fn log_error_details(error: &FcmError) {
         FcmError::TomlDe(_) => "toml_deserialize",
         FcmError::TomlSer(_) => "toml_serialize",
         FcmError::TaskJoin(_) => "task_join",
+        FcmError::Database(_) => "database",
         FcmError::Generic(_) => "generic",
     };
 

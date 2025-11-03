@@ -104,7 +104,7 @@ pub struct IndexEntry {
 /// println!("Extracted to: {}", package.extraction_path.display());
 /// # }
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ExtractedPackage {
     pub name: String,
     pub version: String,

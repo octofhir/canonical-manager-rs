@@ -175,10 +175,10 @@ impl CanonicalResolver {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn new(storage: Arc<SqliteStorage>) -> Self {
+    pub async fn new(storage: Arc<SqliteStorage>) -> Self {
         #[cfg(feature = "fuzzy-search")]
         let fuzzy_index = {
-            let urls: Vec<String> = storage.get_cache_entries().keys().cloned().collect();
+            let urls: Vec<String> = storage.get_cache_entries().await.keys().cloned().collect();
             crate::fuzzy::NGramIndex::build_from_urls(urls)
         };
         Self {
@@ -223,10 +223,10 @@ impl CanonicalResolver {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn with_config(storage: Arc<SqliteStorage>, config: ResolutionConfig) -> Self {
+    pub async fn with_config(storage: Arc<SqliteStorage>, config: ResolutionConfig) -> Self {
         #[cfg(feature = "fuzzy-search")]
         let fuzzy_index = {
-            let urls: Vec<String> = storage.get_cache_entries().keys().cloned().collect();
+            let urls: Vec<String> = storage.get_cache_entries().await.keys().cloned().collect();
             crate::fuzzy::NGramIndex::build_from_urls(urls)
         };
         Self {
@@ -635,9 +635,10 @@ impl CanonicalResolver {
     /// }
     /// # }
     /// ```
-    pub fn list_canonical_urls(&self) -> Vec<String> {
+    pub async fn list_canonical_urls(&self) -> Vec<String> {
         self.storage
             .get_cache_entries()
+            .await
             .keys()
             .filter(|key| !key.contains("#")) // Filter out composite keys
             .cloned()
@@ -704,7 +705,7 @@ impl CanonicalResolver {
                 .into_iter()
                 .map(|(u, _)| u)
                 .collect::<Vec<_>>();
-            let cache = self.storage.get_cache_entries();
+            let cache = self.storage.get_cache_entries().await;
             let mut best: Option<(crate::sqlite_storage::ResourceIndex, f64)> = None;
             for u in candidates {
                 if let Some(idx) = cache.get(&u) {
@@ -724,7 +725,7 @@ impl CanonicalResolver {
         }
         #[cfg(not(feature = "fuzzy-search"))]
         {
-            let cache_entries = self.storage.get_cache_entries();
+            let cache_entries = self.storage.get_cache_entries().await;
             let mut best_match = None;
             let mut best_similarity = 0.0;
             for (url, resource_index) in cache_entries {

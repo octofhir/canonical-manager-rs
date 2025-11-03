@@ -55,6 +55,10 @@ pub mod search;
 #[doc(hidden)]
 pub mod sqlite_storage;
 #[doc(hidden)]
+pub mod content_hash;
+#[doc(hidden)]
+pub mod cas_storage;
+#[doc(hidden)]
 #[doc(hidden)]
 pub mod traits;
 #[doc(hidden)]
@@ -235,6 +239,7 @@ impl std::fmt::Debug for CanonicalManager {
 impl CanonicalManager {
     /// Create a new CanonicalManager with the given configuration
     pub async fn new(mut config: FcmConfig) -> Result<Self> {
+        eprintln!("[DEBUG] CanonicalManager::new() START");
         // Add early timeout check for CI/test environments to avoid hanging
         if std::env::var("CI").is_ok() || std::env::var("FHIRPATH_QUICK_INIT").is_ok() {
             info!("Quick initialization mode detected (CI or FHIRPATH_QUICK_INIT set)");
@@ -243,6 +248,7 @@ impl CanonicalManager {
             config.optimization.enable_metrics = false;
             // config.optimization.use_mmap = false; // Field doesn't exist in current version
         }
+        eprintln!("[DEBUG] Config optimization check done");
 
         // Validate and optimize configuration before initialization
         // Skip optimization for test configurations (parallel_workers=1 and enable_metrics=false)
@@ -277,16 +283,21 @@ impl CanonicalManager {
         }
 
         // Initialize unified storage system with timeout to prevent hanging
+        eprintln!("[DEBUG] About to initialize UnifiedStorage");
         let storage_future = UnifiedStorage::new(config.storage.clone());
 
         let storage =
             match tokio::time::timeout(std::time::Duration::from_secs(30), storage_future).await {
-                Ok(Ok(s)) => Arc::new(s),
+                Ok(Ok(s)) => {
+                    eprintln!("[DEBUG] UnifiedStorage initialized successfully");
+                    Arc::new(s)
+                },
                 Ok(Err(e)) => {
                     tracing::error!("Failed to initialize unified storage: {}", e);
                     return Err(e);
                 }
                 Err(_) => {
+                    eprintln!("[DEBUG] UnifiedStorage initialization TIMED OUT!");
                     tracing::error!("Unified storage initialization timed out after 30 seconds");
                     return Err(FcmError::Config(
                         crate::error::ConfigError::ValidationFailed {
@@ -297,21 +308,30 @@ impl CanonicalManager {
             };
 
         // Initialize registry client
+        eprintln!("[DEBUG] About to initialize RegistryClient");
         let expanded_storage = config.get_expanded_storage_config();
         let registry_client =
             registry::RegistryClient::new(&config.registry, expanded_storage.cache_dir.clone())
                 .await?;
+        eprintln!("[DEBUG] RegistryClient initialized successfully");
 
         // Initialize resolver with unified storage
-        let resolver = CanonicalResolver::new(Arc::clone(storage.package_storage()));
+        eprintln!("[DEBUG] About to initialize CanonicalResolver");
+        let resolver = CanonicalResolver::new(Arc::clone(storage.package_storage())).await;
+        eprintln!("[DEBUG] CanonicalResolver initialized");
 
         // Initialize search engine with unified storage
+        eprintln!("[DEBUG] About to initialize SearchEngine");
         let search_engine = SearchEngine::new(Arc::clone(storage.package_storage()));
+        eprintln!("[DEBUG] SearchEngine initialized");
 
         // Initialize optimization components based on config
+        eprintln!("[DEBUG] About to initialize PackageChangeDetector");
         let change_detector = Arc::new(PackageChangeDetector::new());
+        eprintln!("[DEBUG] PackageChangeDetector initialized");
 
         // Initialize performance monitor
+        eprintln!("[DEBUG] About to initialize PerformanceMonitor");
         let perf_config = PerformanceConfig {
             enable_metrics: config.optimization.enable_metrics,
             metrics_interval: std::time::Duration::from_secs(30),
@@ -319,8 +339,10 @@ impl CanonicalManager {
             enable_detailed_logging: config.optimization.enable_metrics,
         };
         let performance_monitor = Arc::new(PerformanceMonitor::new(perf_config));
+        eprintln!("[DEBUG] PerformanceMonitor initialized");
 
         debug!("FHIR Canonical Manager initialized successfully with optimized configuration");
+        eprintln!("[DEBUG] CanonicalManager::new() COMPLETE");
 
         Ok(Self {
             config,
@@ -369,7 +391,7 @@ impl CanonicalManager {
         let storage = Arc::new(UnifiedStorage::new(config.storage.clone()).await?);
 
         // Resolver/Search backed by provided search_storage (SqliteStorage)
-        let resolver = CanonicalResolver::new(Arc::clone(&search_storage));
+        let resolver = CanonicalResolver::new(Arc::clone(&search_storage)).await;
         let search_engine = SearchEngine::new(Arc::clone(&search_storage));
 
         // Optimization components
@@ -697,16 +719,12 @@ impl CanonicalManager {
 
             // Check if already installed to avoid cycles and duplicates
             if installed.contains(&package_key) {
-                info!("Package already processed: {}", package_key);
+                debug!("Package already processed: {}", package_key);
                 return Ok(());
             }
 
             // Check if package already exists in storage (trait-aware)
             let packages = self.list_packages_via_store().await?;
-            for p in &packages {
-                debug!("- {}@{}", p.name, p.version);
-            }
-
             if packages
                 .iter()
                 .any(|p| p.name == name && p.version == version)

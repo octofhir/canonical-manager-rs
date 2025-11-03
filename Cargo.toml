@@ -49,6 +49,7 @@ sha2 = "0.10"
 base64 = "0.22"
 crossbeam-epoch = "0.9"
 async-trait = "0.1"
+parking_lot = "0.12"
 
 # Error handling
 thiserror = "2"
@@ -56,14 +57,14 @@ anyhow = "1.0"
 
 # CLI framework
 clap = { version = "4.0", features = ["derive"], optional = true }
-human-panic = "2.0.3"
+human-panic = "2.0.4"
 
 # Terminal UI
 colored = { version = "3", optional = true }
 
 # File handling
-zip = "4"
-flate2 = "1.0"
+zip = "6"
+flate2 = "1"
 tar = "0.4"
 
 # UUID generation
@@ -79,8 +80,9 @@ dirs = "6"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# SQLite database
-rusqlite = { version = "0.37", features = ["bundled", "serde_json"] }
+# SQLite database - async-first for tokio runtime
+tokio-rusqlite = "0.6"
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 # Performance optimization dependencies
 blake3 = "1.5"

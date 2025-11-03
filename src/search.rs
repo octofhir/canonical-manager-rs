@@ -1104,8 +1104,8 @@ impl SearchEngine {
     ///
     /// ```rust,no_run
     /// # use octofhir_canonical_manager::search::SearchEngine;
-    /// # fn example(engine: SearchEngine) {
-    /// let suggestions = engine.suggest_completions("pat");
+    /// # async fn example(engine: SearchEngine) {
+    /// let suggestions = engine.suggest_completions("pat").await;
     /// for suggestion in suggestions {
     ///     println!("Suggestion: {}", suggestion);
     /// }
@@ -1181,7 +1181,7 @@ impl SearchEngine {
     ///     ..Default::default()
     /// };
     ///
-    /// let facets = engine.get_facets(&query)?;
+    /// let facets = engine.get_facets(&query).await?;
     /// println!("Resource types: {:?}", facets.resource_types);
     /// # Ok(())
     /// # }

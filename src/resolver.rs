@@ -32,7 +32,7 @@ use url::Url;
 ///     max_cache_size: "1GB".to_string(),
 /// };
 /// let storage = Arc::new(SqliteStorage::new(config).await?);
-/// let resolver = CanonicalResolver::new(storage);
+/// let resolver = CanonicalResolver::new(storage).await;
 ///
 /// let resolved = resolver.resolve("http://hl7.org/fhir/Patient").await?;
 /// println!("Resolved to: {}", resolved.canonical_url);
@@ -627,12 +627,13 @@ impl CanonicalResolver {
     ///
     /// ```rust,no_run
     /// # use octofhir_canonical_manager::resolver::CanonicalResolver;
-    /// # fn example(resolver: CanonicalResolver) {
-    /// let urls = resolver.list_canonical_urls();
+    /// # async fn example(resolver: CanonicalResolver) -> Result<(), octofhir_canonical_manager::FcmError> {
+    /// let urls = resolver.list_canonical_urls().await;
     /// println!("Total resources available: {}", urls.len());
     /// for url in urls.iter().take(5) {
     ///     println!("  {}", url);
     /// }
+    /// # Ok(())
     /// # }
     /// ```
     pub async fn list_canonical_urls(&self) -> Vec<String> {

@@ -10,7 +10,7 @@ use dashmap::DashMap;
 use futures_util::{StreamExt, stream};
 use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize};
-use sha2::digest::Digest;
+use sha2::{Sha256, Sha384, Sha512, digest::Digest};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -635,6 +635,52 @@ impl RegistryClient {
 
         debug!("Download URL from metadata: {}", download_url);
 
+        let filename = format!("{}-{}.tgz", spec.name, spec.version);
+        let file_path = self.cache_dir.join(&filename);
+        let part_path = self.cache_dir.join(format!("{filename}.part"));
+
+        if fs::metadata(&part_path).await.is_ok() {
+            let _ = fs::remove_file(&part_path).await;
+        }
+
+        if fs::metadata(&file_path).await.is_ok() {
+            match self
+                .verify_cached_package(
+                    &file_path,
+                    expected_shasum.as_deref(),
+                    expected_integrity.as_deref(),
+                )
+                .await
+            {
+                Ok(()) => {
+                    let cas_path = self.store_in_cas(&file_path).await?;
+                    debug!(
+                        "Using cached package {}@{} (CAS: {})",
+                        spec.name,
+                        spec.version,
+                        cas_path.display()
+                    );
+                    if let Some(progress) = progress {
+                        let size = fs::metadata(&file_path).await.ok().map(|m| m.len());
+                        progress.on_start(size);
+                        progress.on_complete();
+                    }
+                    return Ok(PackageDownload {
+                        spec: spec.clone(),
+                        file_path,
+                        metadata,
+                    });
+                }
+                Err(e) => {
+                    warn!(
+                        "Cached package {}@{} failed verification ({}), re-downloading",
+                        spec.name, spec.version, e
+                    );
+                    let _ = fs::remove_file(&file_path).await;
+                }
+            }
+        }
+
         // Perform download with retries and progress
         let response = self.download_with_retries(&download_url).await?;
 
@@ -647,9 +693,7 @@ impl RegistryClient {
         }
 
         // Save to cache directory with streaming
-        let filename = format!("{}-{}.tgz", spec.name, spec.version);
         let file_path = self.cache_dir.join(&filename);
-        let part_path = self.cache_dir.join(format!("{filename}.part"));
         let mut file = fs::File::create(&part_path).await?;
 
         // Stream the download with progress updates
@@ -799,6 +843,66 @@ impl RegistryClient {
             file_path,
             metadata,
         })
+    }
+
+    async fn verify_cached_package(
+        &self,
+        file_path: &PathBuf,
+        expected_shasum: Option<&str>,
+        expected_integrity: Option<&str>,
+    ) -> std::result::Result<(), RegistryError> {
+        let content = fs::read(file_path)
+            .await
+            .map_err(|e| RegistryError::InvalidMetadata {
+                message: format!(
+                    "Failed to read cached package {}: {}",
+                    file_path.display(),
+                    e
+                ),
+            })?;
+
+        if let Some(expected) = expected_shasum {
+            let mut sha1_hasher = sha1::Sha1::new();
+            sha1_hasher.update(&content);
+            let actual = hex::encode(sha1_hasher.finalize());
+            if !actual.eq_ignore_ascii_case(expected) {
+                return Err(RegistryError::InvalidMetadata {
+                    message: format!(
+                        "Cached package checksum mismatch: expected {}, got {}",
+                        expected, actual
+                    ),
+                });
+            }
+        }
+
+        if let Some(integrity) = expected_integrity
+            && let Some((algo_raw, encoded)) = integrity.split_once('-')
+        {
+            let algo = algo_raw.to_ascii_lowercase();
+            let expected_bytes = base64::engine::general_purpose::STANDARD
+                .decode(encoded.as_bytes())
+                .map_err(|e| RegistryError::InvalidMetadata {
+                    message: format!("Invalid integrity value '{}': {}", integrity, e),
+                })?;
+
+            let matches = match algo.as_str() {
+                "sha256" => expected_bytes == Sha256::digest(&content).to_vec(),
+                "sha384" => expected_bytes == Sha384::digest(&content).to_vec(),
+                "sha512" => expected_bytes == Sha512::digest(&content).to_vec(),
+                other => {
+                    warn!("Unsupported integrity algorithm: {}", other);
+                    true
+                }
+            };
+
+            if !matches {
+                return Err(RegistryError::InvalidMetadata {
+                    message: "Cached package integrity mismatch".to_string(),
+                });
+            }
+        }
+
+        Ok(())
     }
 
     /// Store downloaded package file in content-addressable storage

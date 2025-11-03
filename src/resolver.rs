@@ -841,9 +841,9 @@ mod tests {
         };
 
         let storage = Arc::new(SqliteStorage::new(config).await.unwrap());
-        let resolver = CanonicalResolver::new(storage);
+        let resolver = CanonicalResolver::new(storage).await;
 
-        assert!(resolver.list_canonical_urls().is_empty());
+        assert!(resolver.list_canonical_urls().await.is_empty());
     }
 
     #[tokio::test]
@@ -856,7 +856,7 @@ mod tests {
         };
 
         let storage = Arc::new(SqliteStorage::new(config).await.unwrap());
-        let resolver = CanonicalResolver::new(storage);
+        let resolver = CanonicalResolver::new(storage).await;
 
         let result = resolver.resolve("http://example.com/missing").await;
         assert!(result.is_err());
@@ -872,7 +872,7 @@ mod tests {
         };
 
         let storage = Arc::new(SqliteStorage::new(config).await.unwrap());
-        let resolver = CanonicalResolver::new(storage);
+        let resolver = CanonicalResolver::new(storage).await;
 
         assert!(resolver.looks_like_version("1.0.0"));
         assert!(resolver.looks_like_version("v1.0.0"));

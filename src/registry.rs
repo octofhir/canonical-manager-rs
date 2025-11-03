@@ -1,16 +1,20 @@
 //! Registry client for downloading FHIR packages
 
+use crate::cas_storage::{CasStorage, ContentType};
 use crate::config::{PackageSpec, RegistryConfig};
+use crate::content_hash::ContentHash;
 use crate::error::{RegistryError, Result};
 use base64::Engine;
 use chrono::{DateTime, Utc};
-use futures_util::StreamExt;
-use parking_lot::Mutex;
+use dashmap::DashMap;
+use futures_util::{StreamExt, stream};
 use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize};
 use sha2::digest::Digest;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tracing::{debug, info, warn};
@@ -88,11 +92,13 @@ pub struct RegistryClient {
     cache_dir: PathBuf,
     fallback_registries: Vec<String>,
     // In-memory metadata cache keyed by metadata URL
-    metadata_cache: Mutex<std::collections::HashMap<String, CachedResponse>>,
+    metadata_cache: Arc<DashMap<String, CachedResponse>>,
     // Persisted validators (etag/last-modified) across runs
-    persisted_validators: Mutex<std::collections::HashMap<String, PersistedValidators>>,
+    persisted_validators: Arc<DashMap<String, PersistedValidators>>,
     validators_path: PathBuf,
-    last_save: Mutex<std::time::Instant>,
+    last_save: Arc<AtomicU64>, // Stores timestamp as milliseconds since UNIX_EPOCH
+    // Content-addressable storage for downloaded packages
+    cas: Arc<CasStorage>,
 }
 
 #[derive(Clone, Debug)]
@@ -335,19 +341,35 @@ impl RegistryClient {
             }
         };
 
+        // Initialize content-addressable storage
+        let cas_path = cache_dir.join("cas");
+        let cas = Arc::new(CasStorage::new(cas_path).await?);
+
         Ok(Self {
             client,
             base_url,
             config: config.clone(),
             cache_dir,
             fallback_registries,
-            metadata_cache: Mutex::new(std::collections::HashMap::new()),
-            persisted_validators: Mutex::new(persisted_validators),
+            metadata_cache: Arc::new(DashMap::new()),
+            persisted_validators: {
+                let map = Arc::new(DashMap::new());
+                for (k, v) in persisted_validators {
+                    map.insert(k, v);
+                }
+                map
+            },
             validators_path,
-            last_save: Mutex::new(
-                std::time::Instant::now() - std::time::Duration::from_secs(10),
-            ),
+            last_save: Arc::new(AtomicU64::new(Self::now_millis().saturating_sub(1_000))),
+            cas,
         })
+    }
+
+    fn now_millis() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_else(|_| std::time::Duration::from_secs(0))
+            .as_millis() as u64
     }
 
     /// Downloads a FHIR package from the registry.
@@ -508,6 +530,95 @@ impl RegistryClient {
             }
             .into()
         }))
+    }
+
+    /// Downloads multiple packages in parallel with deduplication
+    ///
+    /// This method downloads multiple packages concurrently (up to 8 at a time)
+    /// and automatically deduplicates downloads using content-addressable storage.
+    /// Packages with the same content hash are only downloaded once.
+    ///
+    /// # Arguments
+    ///
+    /// * `specs` - List of package specifications to download
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Vec<PackageDownload>)` - Successfully downloaded packages
+    /// * The order of results may differ from input order due to parallel execution
+    ///
+    /// # Performance
+    ///
+    /// Downloads are parallelized with a concurrency limit of 8. This provides
+    /// significant speedup for batch operations while avoiding overwhelming the
+    /// registry server.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use octofhir_canonical_manager::registry::RegistryClient;
+    /// # use octofhir_canonical_manager::config::PackageSpec;
+    /// # async fn example(client: RegistryClient) -> Result<(), Box<dyn std::error::Error>> {
+    /// let specs = vec![
+    ///     PackageSpec {
+    ///         name: "hl7.fhir.r4.core".to_string(),
+    ///         version: "4.0.1".to_string(),
+    ///         priority: 1,
+    ///     },
+    ///     PackageSpec {
+    ///         name: "hl7.fhir.us.core".to_string(),
+    ///         version: "6.1.0".to_string(),
+    ///         priority: 2,
+    ///     },
+    /// ];
+    ///
+    /// let downloads = client.download_packages_parallel(specs).await?;
+    /// println!("Downloaded {} packages", downloads.len());
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[tracing::instrument(name = "registry.download_parallel", skip(self), fields(count = specs.len()))]
+    pub async fn download_packages_parallel(
+        &self,
+        specs: Vec<PackageSpec>,
+    ) -> Result<Vec<PackageDownload>> {
+        info!("Starting parallel download of {} packages", specs.len());
+
+        let results: Vec<Result<PackageDownload>> = stream::iter(specs)
+            .map(|spec| async move {
+                // Each download is independent and uses CAS for deduplication
+                self.download_package(&spec).await
+            })
+            .buffer_unordered(8) // 8 concurrent downloads
+            .collect()
+            .await;
+
+        // Separate successes from failures
+        let mut downloads = Vec::new();
+        let mut errors = Vec::new();
+
+        for (idx, result) in results.into_iter().enumerate() {
+            match result {
+                Ok(download) => downloads.push(download),
+                Err(e) => {
+                    warn!("Package download #{} failed: {}", idx, e);
+                    errors.push(e);
+                }
+            }
+        }
+
+        if downloads.is_empty() && !errors.is_empty() {
+            // All downloads failed
+            return Err(errors.into_iter().next().unwrap());
+        }
+
+        info!(
+            "Parallel download complete: {} succeeded, {} failed",
+            downloads.len(),
+            errors.len()
+        );
+
+        Ok(downloads)
     }
 
     /// Try downloading from a specific registry
@@ -679,11 +790,33 @@ impl RegistryClient {
         fs::rename(&part_path, &file_path).await?;
         info!("Package downloaded to: {}", file_path.display());
 
+        // Store in CAS for future reuse and deduplication
+        let cas_path = self.store_in_cas(&file_path).await?;
+        debug!("Package stored in CAS: {}", cas_path.display());
+
         Ok(PackageDownload {
             spec: spec.clone(),
             file_path,
             metadata,
         })
+    }
+
+    /// Store downloaded package file in content-addressable storage
+    ///
+    /// Computes Blake3 hash of the file and stores it in CAS for future deduplication.
+    /// Returns the path in CAS.
+    async fn store_in_cas(&self, file_path: &PathBuf) -> Result<PathBuf> {
+        // Read file and compute hash
+        let content = fs::read(file_path).await?;
+        let hash = ContentHash::from_bytes(&content);
+
+        // Store in CAS (idempotent - if exists, returns existing path)
+        let cas_path = self
+            .cas
+            .store(&content, &hash, ContentType::Package)
+            .await?;
+
+        Ok(cas_path)
     }
 
     /// Retrieves metadata for a specific package version.
@@ -867,9 +1000,8 @@ impl RegistryClient {
             // In-memory cache
             if let Some(cached) = self
                 .metadata_cache
-                .lock()
                 .get(metadata_url)
-                .cloned()
+                .map(|entry| entry.value().clone())
             {
                 if let Some(etag) = &cached.etag {
                     req = req.header(reqwest::header::IF_NONE_MATCH, etag);
@@ -877,30 +1009,29 @@ impl RegistryClient {
                 if let Some(lm) = &cached.last_modified {
                     req = req.header(reqwest::header::IF_MODIFIED_SINCE, lm);
                 }
-            } else {
+            } else if let Some(persisted) = self
+                .persisted_validators
+                .get(metadata_url)
+                .map(|entry| entry.value().clone())
+            {
                 // Persisted validators
-                if let Some(p) = self
-                    .persisted_validators
-                    .lock()
-                    .get(metadata_url)
-                    .cloned()
-                {
-                    // Simple TTL: 24h
-                    let ttl = chrono::Duration::hours(24);
-                    let fresh = chrono::Utc::now() - p.updated_at < ttl;
-                    if fresh {
-                        if let Some(etag) = p.etag {
-                            req = req.header(reqwest::header::IF_NONE_MATCH, etag);
-                        }
-                        if let Some(lm) = p.last_modified {
-                            req = req.header(reqwest::header::IF_MODIFIED_SINCE, lm);
-                        }
-                    } else {
-                        tracing::debug!(
-                            "Validators expired by TTL for {}. Forcing full fetch.",
-                            metadata_url
-                        );
+                // Simple TTL: 24h
+                let ttl = chrono::Duration::hours(24);
+                let fresh = chrono::Utc::now().signed_duration_since(persisted.updated_at) < ttl;
+                if fresh {
+                    let etag = persisted.etag.clone();
+                    let last_modified = persisted.last_modified.clone();
+                    if let Some(etag) = etag {
+                        req = req.header(reqwest::header::IF_NONE_MATCH, etag);
                     }
+                    if let Some(lm) = last_modified {
+                        req = req.header(reqwest::header::IF_MODIFIED_SINCE, lm);
+                    }
+                } else {
+                    tracing::debug!(
+                        "Validators expired by TTL for {}. Forcing full fetch.",
+                        metadata_url
+                    );
                 }
             }
         }
@@ -920,29 +1051,26 @@ impl RegistryClient {
                     .and_then(|v| v.to_str().ok())
                     .map(|s| s.to_string());
                 let npm: NpmPackageResponse = resp.json().await?;
+                let cached = CachedResponse {
+                    etag,
+                    last_modified,
+                    npm: npm.clone(),
+                };
 
-                self.metadata_cache.lock().insert(
-                    metadata_url.to_string(),
-                    CachedResponse {
-                        etag,
-                        last_modified,
-                        npm: npm.clone(),
-                    },
-                );
+                self.metadata_cache
+                    .insert(metadata_url.to_string(), cached.clone());
                 // Update persisted validators and save
-                self.update_and_save_validators(
-                    metadata_url,
-                    self.metadata_cache
-                        .lock()
-                        .get(metadata_url)
-                        .unwrap(),
-                );
+                self.update_and_save_validators(metadata_url, &cached);
                 Ok(npm)
             }
             reqwest::StatusCode::NOT_MODIFIED => {
-                if let Some(cached) = self.metadata_cache.lock().get(metadata_url) {
+                if let Some(cached) = self
+                    .metadata_cache
+                    .get(metadata_url)
+                    .map(|entry| entry.value().clone())
+                {
                     // refresh persisted validators
-                    self.update_and_save_validators(metadata_url, cached);
+                    self.update_and_save_validators(metadata_url, &cached);
                     Ok(cached.npm.clone())
                 } else {
                     // No cache to use; fallback to a fresh fetch
@@ -961,8 +1089,7 @@ impl RegistryClient {
     }
 
     fn update_and_save_validators(&self, url: &str, cached: &CachedResponse) {
-        let mut map = self.persisted_validators.lock();
-        map.insert(
+        self.persisted_validators.insert(
             url.to_string(),
             PersistedValidators {
                 etag: cached.etag.clone(),
@@ -970,18 +1097,26 @@ impl RegistryClient {
                 updated_at: Utc::now(),
             },
         );
+
         // Best-effort debounced save (min 500ms interval)
-        let mut last = self.last_save.lock();
-        let now = std::time::Instant::now();
-        if now.duration_since(*last) >= std::time::Duration::from_millis(500)
-            && let Ok(json) = serde_json::to_vec_pretty(&*map)
-        {
-            // Spawn blocking task for file write to avoid blocking tokio runtime
-            let validators_path = self.validators_path.clone();
-            tokio::task::spawn_blocking(move || {
-                let _ = std::fs::write(&validators_path, json);
-            });
-            *last = now;
+        let now_ms = Self::now_millis();
+        let last_ms = self.last_save.load(Ordering::Relaxed);
+        if now_ms.saturating_sub(last_ms) >= 500 {
+            let snapshot: HashMap<String, PersistedValidators> = self
+                .persisted_validators
+                .iter()
+                .map(|entry| (entry.key().clone(), entry.value().clone()))
+                .collect();
+
+            if let Ok(json) = serde_json::to_vec_pretty(&snapshot) {
+                let validators_path = self.validators_path.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = tokio::fs::write(&validators_path, json).await {
+                        warn!("Failed to persist registry validators cache: {}", e);
+                    }
+                });
+                self.last_save.store(now_ms, Ordering::Relaxed);
+            }
         }
     }
 

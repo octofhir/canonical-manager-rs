@@ -112,7 +112,7 @@ impl CasStorage {
         }
 
         // Write to temporary file first (atomic operation)
-        let temp_path = final_path.with_extension(&format!("{}.tmp", extension));
+        let temp_path = final_path.with_extension(format!("{}.tmp", extension));
 
         let mut file = fs::File::create(&temp_path).await?;
         file.write_all(content).await?;
@@ -120,9 +120,17 @@ impl CasStorage {
         drop(file); // Close file before rename
 
         // Atomic rename to final destination
-        fs::rename(&temp_path, &final_path).await?;
-
-        Ok(final_path)
+        match fs::rename(&temp_path, &final_path).await {
+            Ok(()) => Ok(final_path),
+            Err(e) => {
+                let _ = fs::remove_file(&temp_path).await;
+                if final_path.exists() || e.kind() == std::io::ErrorKind::AlreadyExists {
+                    Ok(final_path)
+                } else {
+                    Err(e)
+                }
+            }
+        }
     }
 
     /// Retrieve content from CAS by hash
@@ -195,7 +203,11 @@ impl CasStorage {
     ///
     /// # Errors
     /// Returns error if file doesn't exist or can't be deleted
-    pub async fn delete(&self, hash: &ContentHash, content_type: ContentType) -> std::io::Result<()> {
+    pub async fn delete(
+        &self,
+        hash: &ContentHash,
+        content_type: ContentType,
+    ) -> std::io::Result<()> {
         let path = self.path_for(hash, content_type);
         fs::remove_file(&path).await
     }
@@ -458,13 +470,11 @@ mod tests {
         let hash1 = hash;
         let hash2 = hash;
 
-        let handle1 = tokio::spawn(async move {
-            cas1.store(content, &hash1, ContentType::Resource).await
-        });
+        let handle1 =
+            tokio::spawn(async move { cas1.store(content, &hash1, ContentType::Resource).await });
 
-        let handle2 = tokio::spawn(async move {
-            cas2.store(content, &hash2, ContentType::Resource).await
-        });
+        let handle2 =
+            tokio::spawn(async move { cas2.store(content, &hash2, ContentType::Resource).await });
 
         let (result1, result2) = tokio::join!(handle1, handle2);
         assert!(result1.unwrap().is_ok());

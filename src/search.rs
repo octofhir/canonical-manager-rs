@@ -1565,6 +1565,7 @@ mod tests {
                 file_path: std::path::PathBuf::from("/test/Patient1.json"),
                 metadata: crate::sqlite_storage::ResourceMetadata {
                     id: "patient-1".to_string(),
+                    name: Some("Patient One".to_string()),
                     version: Some("1.0.0".to_string()),
                     status: Some("active".to_string()),
                     date: None,
@@ -1580,6 +1581,7 @@ mod tests {
                 file_path: std::path::PathBuf::from("/test/Observation1.json"),
                 metadata: crate::sqlite_storage::ResourceMetadata {
                     id: "obs-1".to_string(),
+                    name: Some("Observation One".to_string()),
                     version: Some("1.0.0".to_string()),
                     status: Some("final".to_string()),
                     date: None,
@@ -1622,10 +1624,10 @@ mod tests {
         let engine = SearchEngine::new(storage);
 
         // Test suggestions - all Vec::len() values are >= 0 by definition
-        let _suggestions = engine.suggest_completions("pa");
+        let _suggestions = engine.suggest_completions("pa").await;
         // No need to check >= 0 since Vec::len() is always >= 0
 
-        let suggestions = engine.suggest_completions("a"); // Too short
+        let suggestions = engine.suggest_completions("a").await; // Too short
         assert_eq!(suggestions.len(), 0);
     }
 }

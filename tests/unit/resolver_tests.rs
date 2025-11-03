@@ -24,10 +24,10 @@ async fn test_resolver_creation() {
     };
 
     let storage = Arc::new(SqliteStorage::new(config).await.unwrap());
-    let resolver = CanonicalResolver::new(storage.clone());
+    let resolver = CanonicalResolver::new(storage.clone()).await;
 
     // Test default configuration
-    assert!(resolver.list_canonical_urls().is_empty());
+    assert!(resolver.list_canonical_urls().await.is_empty());
 
     // Test with custom configuration
     let custom_config = ResolutionConfig {
@@ -39,8 +39,8 @@ async fn test_resolver_creation() {
         fuzzy_max_candidates: 200,
     };
 
-    let custom_resolver = CanonicalResolver::with_config(storage, custom_config);
-    assert!(custom_resolver.list_canonical_urls().is_empty());
+    let custom_resolver = CanonicalResolver::with_config(storage, custom_config).await;
+    assert!(custom_resolver.list_canonical_urls().await.is_empty());
 }
 
 /// Test exact canonical URL resolution
@@ -55,10 +55,10 @@ async fn test_exact_canonical_resolution() {
 
     let storage = SqliteStorage::new(config).await.unwrap();
     let extracted_package = create_test_extracted_package(&temp_dir);
-    storage.add_package(&extracted_package).await.unwrap();
+    storage.add_package(extracted_package).await.unwrap();
 
     let storage = Arc::new(storage);
-    let resolver = CanonicalResolver::new(storage);
+    let resolver = CanonicalResolver::new(storage).await;
 
     // Test exact match resolution
     let result = resolver
@@ -94,7 +94,7 @@ async fn test_canonical_url_not_found() {
     };
 
     let storage = Arc::new(SqliteStorage::new(config).await.unwrap());
-    let resolver = CanonicalResolver::new(storage);
+    let resolver = CanonicalResolver::new(storage).await;
 
     // Test non-existent URL
     let result = resolver
@@ -117,10 +117,10 @@ async fn test_version_fallback_resolution() {
 
     // Create a resource with versioned URL
     let versioned_package = create_versioned_extracted_package(&temp_dir);
-    storage.add_package(&versioned_package).await.unwrap();
+    storage.add_package(versioned_package).await.unwrap();
 
     let storage = Arc::new(storage);
-    let resolver = CanonicalResolver::new(storage);
+    let resolver = CanonicalResolver::new(storage).await;
 
     // Try to resolve base URL (without version)
     let result = resolver
@@ -163,10 +163,10 @@ async fn test_resolution_with_specific_version() {
     // This test verifies basic version resolution with a single version.
     let package_v1 = create_test_extracted_package(&temp_dir);
 
-    storage.add_package(&package_v1).await.unwrap();
+    storage.add_package(package_v1).await.unwrap();
 
     let storage = Arc::new(storage);
-    let resolver = CanonicalResolver::new(storage);
+    let resolver = CanonicalResolver::new(storage).await;
 
     // Test resolving specific version
     let result = resolver
@@ -196,10 +196,10 @@ async fn test_batch_resolution() {
 
     let storage = SqliteStorage::new(config).await.unwrap();
     let extracted_package = create_test_extracted_package(&temp_dir);
-    storage.add_package(&extracted_package).await.unwrap();
+    storage.add_package(extracted_package).await.unwrap();
 
     let storage = Arc::new(storage);
-    let resolver = CanonicalResolver::new(storage);
+    let resolver = CanonicalResolver::new(storage).await;
 
     // Test batch resolution with mixed success/failure
     let urls = vec![
@@ -236,7 +236,7 @@ async fn test_fuzzy_matching() {
 
     let storage = SqliteStorage::new(config).await.unwrap();
     let extracted_package = create_test_extracted_package(&temp_dir);
-    storage.add_package(&extracted_package).await.unwrap();
+    storage.add_package(extracted_package).await.unwrap();
 
     let storage = Arc::new(storage);
 
@@ -250,7 +250,7 @@ async fn test_fuzzy_matching() {
         fuzzy_max_candidates: 200,
     };
 
-    let resolver = CanonicalResolver::with_config(storage, fuzzy_config);
+    let resolver = CanonicalResolver::with_config(storage, fuzzy_config).await;
 
     // Test fuzzy matching with slight URL differences
     let result = resolver
@@ -281,7 +281,7 @@ async fn test_fuzzy_matching_disabled() {
 
     let storage = SqliteStorage::new(config).await.unwrap();
     let extracted_package = create_test_extracted_package(&temp_dir);
-    storage.add_package(&extracted_package).await.unwrap();
+    storage.add_package(extracted_package).await.unwrap();
 
     let storage = Arc::new(storage);
 
@@ -295,7 +295,7 @@ async fn test_fuzzy_matching_disabled() {
         fuzzy_max_candidates: 200,
     };
 
-    let resolver = CanonicalResolver::with_config(storage, strict_config);
+    let resolver = CanonicalResolver::with_config(storage, strict_config).await;
 
     // Test that fuzzy matching doesn't work when disabled
     let result = resolver
@@ -318,10 +318,10 @@ async fn test_version_detection_through_resolution() {
 
     // Add a versioned package
     let versioned_package = create_versioned_extracted_package(&temp_dir);
-    storage.add_package(&versioned_package).await.unwrap();
+    storage.add_package(versioned_package).await.unwrap();
 
     let storage = Arc::new(storage);
-    let resolver = CanonicalResolver::new(storage);
+    let resolver = CanonicalResolver::new(storage).await;
 
     // Test that version detection works by trying to resolve base URL
     let result = resolver
@@ -353,12 +353,12 @@ async fn test_list_canonical_urls() {
 
     let storage = SqliteStorage::new(config).await.unwrap();
     let extracted_package = create_test_extracted_package(&temp_dir);
-    storage.add_package(&extracted_package).await.unwrap();
+    storage.add_package(extracted_package).await.unwrap();
 
     let storage = Arc::new(storage);
-    let resolver = CanonicalResolver::new(storage);
+    let resolver = CanonicalResolver::new(storage).await;
 
-    let urls = resolver.list_canonical_urls();
+    let urls = resolver.list_canonical_urls().await;
     assert_eq!(urls.len(), 2);
     assert!(urls.contains(&"http://example.com/StructureDefinition/test-patient".to_string()));
     assert!(urls.contains(&"http://example.com/ValueSet/test-codes".to_string()));

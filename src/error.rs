@@ -81,13 +81,6 @@ pub enum FcmError {
     Generic(String),
 }
 
-// Implement From for tokio-rusqlite errors
-impl From<tokio_rusqlite::Error> for FcmError {
-    fn from(err: tokio_rusqlite::Error) -> Self {
-        FcmError::Database(err.to_string())
-    }
-}
-
 // Manual Clone implementation for types that can be cloned
 impl Clone for FcmError {
     fn clone(&self) -> Self {

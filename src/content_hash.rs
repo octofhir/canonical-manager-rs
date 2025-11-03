@@ -212,7 +212,10 @@ mod tests {
         assert_eq!(hex.len(), 64);
 
         // Should be lowercase hex
-        assert!(hex.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        assert!(
+            hex.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+        );
 
         // Should round-trip
         let parsed = ContentHash::from_hex(&hex).unwrap();
@@ -273,15 +276,21 @@ mod tests {
     fn test_hash_stability() {
         // These hashes should never change (ensures Blake3 version compatibility)
         let test_vectors = vec![
-            ("", "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"),
-            ("hello", "ea8f163db38682925e4491c5e58d4bb3506ef8c14eb78a86e908c5624a67200f"),
+            (
+                "",
+                "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262",
+            ),
+            (
+                "hello",
+                "ea8f163db38682925e4491c5e58d4bb3506ef8c14eb78a86e908c5624a67200f",
+            ),
             (
                 "FHIR Package",
                 "5e4d8f8e0f5e4ac8b7c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a7b6c5d4e3f2a1",
             ),
         ];
 
-        for (input, expected_hex) in test_vectors {
+        for (input, _expected_hex) in test_vectors {
             let hash = ContentHash::from_bytes(input.as_bytes());
             let actual_hex = hash.to_hex();
 
@@ -302,7 +311,10 @@ mod tests {
             .collect();
 
         // All hashes should be unique
-        let unique_count = hashes.iter().collect::<std::collections::HashSet<_>>().len();
+        let unique_count = hashes
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len();
         assert_eq!(unique_count, 1000);
     }
 

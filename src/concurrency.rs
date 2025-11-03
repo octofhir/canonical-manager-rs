@@ -2,10 +2,11 @@
 //!
 //! A thin wrapper to allow swapping backends without touching call sites.
 
+use dashmap::DashMap;
 use std::hash::Hash;
 
 pub struct ConcurrentMap<K, V> {
-    inner: papaya::HashMap<K, V>,
+    inner: DashMap<K, V>,
 }
 
 impl<K, V> ConcurrentMap<K, V>
@@ -15,66 +16,55 @@ where
 {
     pub fn new() -> Self {
         Self {
-            inner: papaya::HashMap::new(),
+            inner: DashMap::new(),
         }
     }
 
-    pub fn with_capacity(_capacity: usize) -> Self {
+    pub fn with_capacity(capacity: usize) -> Self {
         Self {
-            inner: papaya::HashMap::new(),
+            inner: DashMap::with_capacity(capacity),
         }
     }
 
     pub fn get_cloned(&self, key: &K) -> Option<V> {
-        let guard = self.inner.guard();
-        self.inner.get(key, &guard).cloned()
+        self.inner.get(key).map(|value| value.clone())
     }
 
     pub fn insert(&self, key: K, value: V) {
-        let guard = self.inner.guard();
-        let _ = self.inner.insert(key, value, &guard);
+        self.inner.insert(key, value);
     }
 
     pub fn remove(&self, key: &K) -> Option<V> {
-        let guard = self.inner.guard();
-        self.inner.remove(key, &guard).cloned()
+        self.inner.remove(key).map(|(_, value)| value)
     }
 
     pub fn len(&self) -> usize {
-        let guard = self.inner.guard();
-        self.inner.iter(&guard).count()
+        self.inner.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.inner.is_empty()
     }
 
     pub fn clear(&self) {
-        let guard = self.inner.guard();
-        let keys: Vec<K> = self.inner.iter(&guard).map(|(k, _)| k.clone()).collect();
-        drop(guard);
-        for k in keys {
-            let guard2 = self.inner.guard();
-            let _ = self.inner.remove(&k, &guard2);
-        }
+        self.inner.clear();
     }
 
     pub fn keys(&self) -> Vec<K> {
-        let guard = self.inner.guard();
-        self.inner.iter(&guard).map(|(k, _)| k.clone()).collect()
+        self.inner.iter().map(|entry| entry.key().clone()).collect()
     }
 
     pub fn iter_cloned(&self) -> Vec<(K, V)> {
-        let guard = self.inner.guard();
         self.inner
-            .iter(&guard)
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
             .collect()
     }
 
     pub fn modify<F: FnOnce(V) -> V>(&self, key: &K, f: F) {
-        if let Some(current) = self.get_cloned(key) {
-            self.insert(key.clone(), f(current));
+        if let Some(mut entry) = self.inner.get_mut(key) {
+            let current = entry.clone();
+            *entry = f(current);
         }
     }
 }
@@ -95,8 +85,7 @@ where
     V: Clone + std::fmt::Debug,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let guard = self.inner.guard();
-        let len = self.inner.iter(&guard).count();
+        let len = self.inner.len();
         f.debug_struct("ConcurrentMap").field("len", &len).finish()
     }
 }

@@ -26,7 +26,7 @@ async fn test_indexed_storage_creation() {
     let packages = storage.list_packages().await.unwrap();
     assert_eq!(packages.len(), 0);
 
-    let cache_entries = storage.get_cache_entries();
+    let cache_entries = storage.get_cache_entries().await;
     assert_eq!(cache_entries.len(), 0);
 }
 
@@ -70,7 +70,7 @@ async fn test_add_package_to_storage() {
     let extracted_package = create_test_extracted_package(&temp_dir);
 
     // Add package
-    let result = storage.add_package(&extracted_package).await;
+    let result = storage.add_package(extracted_package).await;
     assert!(result.is_ok(), "Package addition should succeed");
 
     // Verify package is stored
@@ -81,7 +81,7 @@ async fn test_add_package_to_storage() {
     assert_eq!(packages[0].resource_count, 2);
 
     // Verify resources are indexed
-    let cache_entries = storage.get_cache_entries();
+    let cache_entries = storage.get_cache_entries().await;
     assert_eq!(cache_entries.len(), 2); // 2 canonical URLs (no composite keys in SQLite implementation)
     assert!(cache_entries.contains_key("http://example.com/StructureDefinition/test-patient"));
     assert!(cache_entries.contains_key("http://example.com/ValueSet/test-codes"));
@@ -108,7 +108,7 @@ async fn test_canonical_url_lookup() {
 
     // Add package
     let extracted_package = create_test_extracted_package(&temp_dir);
-    storage.add_package(&extracted_package).await.unwrap();
+    storage.add_package(extracted_package).await.unwrap();
 
     // Test successful lookup
     let result = storage
@@ -139,7 +139,7 @@ async fn test_get_resource_content() {
 
     let storage = SqliteStorage::new(config).await.unwrap();
     let extracted_package = create_test_extracted_package(&temp_dir);
-    storage.add_package(&extracted_package).await.unwrap();
+    storage.add_package(extracted_package).await.unwrap();
 
     // Get resource index
     let resource_index = storage
@@ -173,10 +173,10 @@ async fn test_search_by_type() {
 
     let storage = SqliteStorage::new(config).await.unwrap();
     let extracted_package = create_test_extracted_package(&temp_dir);
-    storage.add_package(&extracted_package).await.unwrap();
+    storage.add_package(extracted_package).await.unwrap();
 
     // Search for StructureDefinition resources
-    let cache_entries = storage.get_cache_entries();
+    let cache_entries = storage.get_cache_entries().await;
     let structure_defs: Vec<_> = cache_entries
         .values()
         .filter(|entry| entry.resource_type == "StructureDefinition")

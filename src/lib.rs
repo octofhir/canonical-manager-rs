@@ -1257,6 +1257,32 @@ impl CanonicalManager {
         search::SearchQueryBuilder::new(Arc::clone(self.storage.package_storage()))
     }
 
+    /// Find resource by exact resource type and ID match (fast path, no text search)
+    /// This is much faster than using search() for exact ID lookups
+    pub async fn find_by_type_and_id(
+        &self,
+        resource_type: &str,
+        id: &str,
+    ) -> Result<Vec<sqlite_storage::ResourceIndex>> {
+        self.storage
+            .package_storage()
+            .find_by_type_and_id(resource_type.to_string(), id.to_string())
+            .await
+    }
+
+    /// Find resource by exact resource type and Name match (fast path, no text search)
+    /// Useful for US Core profiles with names like "USCoreMedicationRequestProfile"
+    pub async fn find_by_type_and_name(
+        &self,
+        resource_type: &str,
+        name: &str,
+    ) -> Result<Vec<sqlite_storage::ResourceIndex>> {
+        self.storage
+            .package_storage()
+            .find_by_type_and_name(resource_type.to_string(), name.to_string())
+            .await
+    }
+
     /// Get direct access to the search engine
     pub fn search_engine(&self) -> &search::SearchEngine {
         &self.search_engine

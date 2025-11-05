@@ -101,13 +101,23 @@ impl SqliteStorage {
         tokio::fs::create_dir_all(&config.packages_dir).await?;
         let db_path = config.packages_dir.join("storage.db");
 
-        let pool_config = DeadpoolConfig::new(db_path.clone());
-        // Allow tuning later if needed; for now rely on defaults.
-        let pool = pool_config.create_pool(Runtime::Tokio1).map_err(|e| {
-            FcmError::Storage(StorageError::InitializationFailed {
-                message: format!("Failed to create SQLite pool: {e}"),
-            })
-        })?;
+        let pool = DeadpoolConfig::new(db_path.clone())
+            .builder(Runtime::Tokio1)
+            .map_err(|e| {
+                FcmError::Storage(StorageError::InitializationFailed {
+                    message: format!("Failed to create SQLite pool builder: {e}"),
+                })
+            })?
+            .max_size(config.connection_pool_size)
+            .wait_timeout(Some(std::time::Duration::from_secs(30)))
+            .create_timeout(Some(std::time::Duration::from_secs(30)))
+            .recycle_timeout(Some(std::time::Duration::from_secs(30)))
+            .build()
+            .map_err(|e| {
+                FcmError::Storage(StorageError::InitializationFailed {
+                    message: format!("Failed to create SQLite pool: {e}"),
+                })
+            })?;
 
         let cas_path = config
             .packages_dir
@@ -653,6 +663,36 @@ impl SqliteStorage {
         })
     }
 
+    /// Find a resource by its name field (from metadata JSON).
+    /// This enables SUSHI-compatible resolution where Parent: USCoreVitalSignsProfile
+    /// can find a resource with name="USCoreVitalSignsProfile".
+    pub async fn find_resource_by_name(&self, name: &str) -> Result<Option<ResourceIndex>> {
+        let name_query = name.to_string();
+        self.with_connection(move |conn| {
+            conn.query_row(
+                r#"
+                SELECT r.canonical_url, r.resource_type, p.name, p.version, r.content_path, r.metadata, r.fhir_version
+                FROM resources r
+                JOIN packages p ON r.package_id = p.id
+                WHERE json_extract(r.metadata, '$.name') = ?1
+                LIMIT 1
+                "#,
+                rusqlite::params![name_query],
+                extract_resource_index,
+            )
+            .optional()
+        })
+        .await
+        .map_err(|err| match err {
+            FcmError::Storage(StorageError::DatabaseError { message }) => {
+                FcmError::Storage(StorageError::IoError {
+                    message: format!("Failed to query resource by name: {message}"),
+                })
+            }
+            other => other,
+        })
+    }
+
     pub async fn find_latest_by_base_url(&self, base_url: &str) -> Result<Option<ResourceIndex>> {
         let resources = self.find_by_base_url(base_url).await?;
         Ok(resources.into_iter().next())
@@ -718,6 +758,64 @@ impl SqliteStorage {
             content: json_content,
             file_path,
         })
+    }
+
+    /// Find resource by exact resource type and metadata ID match
+    /// This is much faster than text search for exact lookups
+    pub async fn find_by_type_and_id(
+        &self,
+        resource_type: String,
+        id: String,
+    ) -> Result<Vec<ResourceIndex>> {
+        self.with_connection(move |conn| {
+            let mut stmt = conn.prepare(
+                r#"
+                SELECT r.canonical_url, r.resource_type, p.name, p.version, r.content_path, r.metadata, r.fhir_version
+                FROM resources r
+                JOIN packages p ON r.package_id = p.id
+                WHERE r.resource_type = ?1
+                  AND json_extract(r.metadata, '$.id') = ?2
+                "#,
+            )?;
+
+            let resources = stmt
+                .query_map(rusqlite::params![resource_type, id], |row| {
+                    extract_resource_index(row)
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+
+            Ok(resources)
+        })
+        .await
+    }
+
+    /// Find resource by exact resource type and metadata name match
+    /// Useful for US Core profiles that have names like "USCoreMedicationRequestProfile"
+    pub async fn find_by_type_and_name(
+        &self,
+        resource_type: String,
+        name: String,
+    ) -> Result<Vec<ResourceIndex>> {
+        self.with_connection(move |conn| {
+            let mut stmt = conn.prepare(
+                r#"
+                SELECT r.canonical_url, r.resource_type, p.name, p.version, r.content_path, r.metadata, r.fhir_version
+                FROM resources r
+                JOIN packages p ON r.package_id = p.id
+                WHERE r.resource_type = ?1
+                  AND json_extract(r.metadata, '$.name') = ?2
+                "#,
+            )?;
+
+            let resources = stmt
+                .query_map(rusqlite::params![resource_type, name], |row| {
+                    extract_resource_index(row)
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+
+            Ok(resources)
+        })
+        .await
     }
 
     pub async fn list_packages(&self) -> Result<Vec<PackageInfo>> {

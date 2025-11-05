@@ -18,6 +18,7 @@ async fn test_indexed_storage_creation() {
         cache_dir: temp_dir.path().join("cache"),
         packages_dir: temp_dir.path().join("packages"),
         max_cache_size: "100MB".to_string(),
+        connection_pool_size: 8,
     };
 
     let storage = SqliteStorage::new(config).await.unwrap();
@@ -38,6 +39,7 @@ fn test_storage_config_validation() {
         cache_dir: temp_dir.path().join("cache"),
         packages_dir: temp_dir.path().join("packages"),
         max_cache_size: "100MB".to_string(),
+        connection_pool_size: 8,
     };
 
     // Valid config should pass
@@ -62,6 +64,7 @@ async fn test_add_package_to_storage() {
         cache_dir: temp_dir.path().join("cache"),
         packages_dir: temp_dir.path().join("packages"),
         max_cache_size: "100MB".to_string(),
+        connection_pool_size: 8,
     };
 
     let storage = SqliteStorage::new(config).await.unwrap();
@@ -95,6 +98,7 @@ async fn test_canonical_url_lookup() {
         cache_dir: temp_dir.path().join("cache"),
         packages_dir: temp_dir.path().join("packages"),
         max_cache_size: "100MB".to_string(),
+        connection_pool_size: 8,
     };
 
     let storage = SqliteStorage::new(config).await.unwrap();
@@ -135,6 +139,7 @@ async fn test_get_resource_content() {
         cache_dir: temp_dir.path().join("cache"),
         packages_dir: temp_dir.path().join("packages"),
         max_cache_size: "100MB".to_string(),
+        connection_pool_size: 8,
     };
 
     let storage = SqliteStorage::new(config).await.unwrap();
@@ -169,6 +174,7 @@ async fn test_search_by_type() {
         cache_dir: temp_dir.path().join("cache"),
         packages_dir: temp_dir.path().join("packages"),
         max_cache_size: "100MB".to_string(),
+        connection_pool_size: 8,
     };
 
     let storage = SqliteStorage::new(config).await.unwrap();

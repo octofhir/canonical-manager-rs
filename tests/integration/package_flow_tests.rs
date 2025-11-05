@@ -30,6 +30,7 @@ async fn test_canonical_manager_creation_simple() {
             cache_dir: temp_dir.path().join("cache"),
             packages_dir: temp_dir.path().join("packages"),
             max_cache_size: "10MB".to_string(),
+            connection_pool_size: 8,
         },
         optimization: OptimizationConfig {
             parallel_workers: 1,
@@ -96,6 +97,7 @@ async fn test_package_installation_with_timeout() {
             cache_dir: temp_dir.path().join("cache"),
             packages_dir: temp_dir.path().join("packages"),
             max_cache_size: "10MB".to_string(),
+            connection_pool_size: 8,
         },
         optimization: OptimizationConfig {
             parallel_workers: 1,
@@ -178,6 +180,7 @@ async fn test_full_package_installation_original() {
             cache_dir: temp_dir.path().join("cache"),
             packages_dir: temp_dir.path().join("packages"),
             max_cache_size: "100MB".to_string(),
+            connection_pool_size: 8,
         },
         optimization: OptimizationConfig {
             parallel_workers: 1,
@@ -253,6 +256,7 @@ async fn test_package_installation_with_dependencies() {
             cache_dir: temp_dir.path().join("cache"),
             packages_dir: temp_dir.path().join("packages"),
             max_cache_size: "100MB".to_string(),
+            connection_pool_size: 8,
         },
         optimization: OptimizationConfig {
             parallel_workers: 1,
@@ -308,6 +312,7 @@ async fn test_duplicate_package_installation() {
             cache_dir: temp_dir.path().join("cache"),
             packages_dir: temp_dir.path().join("packages"),
             max_cache_size: "100MB".to_string(),
+            connection_pool_size: 8,
         },
         optimization: OptimizationConfig {
             parallel_workers: 1,
@@ -360,6 +365,7 @@ async fn test_package_removal() {
             cache_dir: temp_dir.path().join("cache"),
             packages_dir: temp_dir.path().join("packages"),
             max_cache_size: "100MB".to_string(),
+            connection_pool_size: 8,
         },
         optimization: OptimizationConfig {
             parallel_workers: 1,
@@ -415,6 +421,7 @@ async fn test_canonical_resolution_after_installation() {
             cache_dir: temp_dir.path().join("cache"),
             packages_dir: temp_dir.path().join("packages"),
             max_cache_size: "100MB".to_string(),
+            connection_pool_size: 8,
         },
         optimization: OptimizationConfig {
             parallel_workers: 1,
@@ -472,6 +479,7 @@ async fn test_batch_canonical_resolution() {
             cache_dir: temp_dir.path().join("cache"),
             packages_dir: temp_dir.path().join("packages"),
             max_cache_size: "100MB".to_string(),
+            connection_pool_size: 8,
         },
         optimization: OptimizationConfig {
             parallel_workers: 1,
@@ -531,6 +539,7 @@ async fn test_package_installation_error_handling() {
             cache_dir: temp_dir.path().join("cache"),
             packages_dir: temp_dir.path().join("packages"),
             max_cache_size: "100MB".to_string(),
+            connection_pool_size: 8,
         },
         optimization: OptimizationConfig {
             parallel_workers: 1,
@@ -584,6 +593,7 @@ async fn test_concurrent_package_installations() {
             cache_dir: temp_dir.path().join("cache"),
             packages_dir: temp_dir.path().join("packages"),
             max_cache_size: "100MB".to_string(),
+            connection_pool_size: 8,
         },
         optimization: OptimizationConfig {
             parallel_workers: 1,
@@ -643,6 +653,7 @@ async fn test_package_counting() {
             cache_dir: temp_dir.path().join("cache"),
             packages_dir: temp_dir.path().join("packages"),
             max_cache_size: "100MB".to_string(),
+            connection_pool_size: 8,
         },
         optimization: OptimizationConfig {
             parallel_workers: 1,
@@ -703,6 +714,7 @@ async fn test_installation_with_priorities() {
             cache_dir: temp_dir.path().join("cache"),
             packages_dir: temp_dir.path().join("packages"),
             max_cache_size: "100MB".to_string(),
+            connection_pool_size: 8,
         },
         optimization: OptimizationConfig {
             parallel_workers: 1,
@@ -743,6 +755,7 @@ async fn test_search_parameter_retrieval_simple() {
             cache_dir: temp_dir.path().join("cache"),
             packages_dir: temp_dir.path().join("packages"),
             max_cache_size: "10MB".to_string(),
+            connection_pool_size: 8,
         },
         optimization: OptimizationConfig {
             parallel_workers: 1,
@@ -799,6 +812,7 @@ async fn test_search_parameter_retrieval_with_installation() {
             cache_dir: temp_dir.path().join("cache"),
             packages_dir: temp_dir.path().join("packages"),
             max_cache_size: "100MB".to_string(),
+            connection_pool_size: 8,
         },
         optimization: OptimizationConfig {
             parallel_workers: 1,

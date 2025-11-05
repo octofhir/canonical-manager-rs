@@ -43,6 +43,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         cache_dir: PathBuf::from("/tmp/fcm-example/cache"),
         packages_dir: PathBuf::from("/tmp/fcm-example/packages"),
         max_cache_size: "2GB".to_string(), // Larger cache
+        connection_pool_size: 32,
     };
 
     println!("✅ Storage settings updated");

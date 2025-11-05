@@ -157,6 +157,7 @@ pub struct ResourceDirectorySpec {
 ///     cache_dir: PathBuf::from("~/.fcm/cache"),
 ///     packages_dir: PathBuf::from("~/.fcm/packages"),
 ///     max_cache_size: "1GB".to_string(),
+///     connection_pool_size: 4,
 /// };
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -165,6 +166,9 @@ pub struct StorageConfig {
     pub packages_dir: PathBuf,
     #[serde(default = "default_max_cache_size")]
     pub max_cache_size: String,
+    /// SQLite connection pool size (for concurrent workloads)
+    #[serde(default = "default_connection_pool_size")]
+    pub connection_pool_size: usize,
 }
 
 /// Configuration for performance optimization settings.
@@ -233,6 +237,7 @@ impl Default for StorageConfig {
             cache_dir: fcm_dir.join("cache"),
             packages_dir: fcm_dir.join("packages"),
             max_cache_size: default_max_cache_size(),
+            connection_pool_size: default_connection_pool_size(),
         }
     }
 }
@@ -512,6 +517,7 @@ impl FcmConfig {
             cache_dir: Self::expand_path(&self.storage.cache_dir),
             packages_dir: Self::expand_path(&self.storage.packages_dir),
             max_cache_size: self.storage.max_cache_size.clone(),
+            connection_pool_size: self.storage.connection_pool_size,
         }
     }
 }
@@ -655,6 +661,9 @@ fn default_local_priority() -> i32 {
 }
 fn default_max_cache_size() -> String {
     "1GB".to_string()
+}
+fn default_connection_pool_size() -> usize {
+    32
 }
 
 // Optimization config defaults
@@ -957,6 +966,7 @@ impl FcmConfig {
                 cache_dir: temp_dir.join("cache"),
                 packages_dir: temp_dir.join("packages"),
                 max_cache_size: "100MB".to_string(),
+                connection_pool_size: default_connection_pool_size(),
             },
             optimization: OptimizationConfig::default(),
             local_packages: vec![],

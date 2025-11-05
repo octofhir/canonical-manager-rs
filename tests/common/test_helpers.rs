@@ -18,6 +18,7 @@ pub fn create_test_config(temp_dir: &Path) -> FcmConfig {
             cache_dir: temp_dir.join("cache"),
             packages_dir: temp_dir.join("packages"),
             max_cache_size: "100MB".to_string(),
+            connection_pool_size: 8,
         },
         optimization: OptimizationConfig::default(),
         local_packages: vec![],

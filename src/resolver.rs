@@ -30,6 +30,7 @@ use url::Url;
 ///     cache_dir: PathBuf::from("/tmp/cache"),
 ///     packages_dir: PathBuf::from("/tmp/packages"),
 ///     max_cache_size: "1GB".to_string(),
+///     connection_pool_size: 4,
 /// };
 /// let storage = Arc::new(SqliteStorage::new(config).await?);
 /// let resolver = CanonicalResolver::new(storage).await;
@@ -169,6 +170,7 @@ impl CanonicalResolver {
     ///     cache_dir: PathBuf::from("/tmp/cache"),
     ///     packages_dir: PathBuf::from("/tmp/packages"),
     ///     max_cache_size: "1GB".to_string(),
+    ///     connection_pool_size: 4,
     /// };
     /// let storage = Arc::new(SqliteStorage::new(config).await?);
     /// let resolver = CanonicalResolver::new(storage);
@@ -210,6 +212,7 @@ impl CanonicalResolver {
     ///     cache_dir: PathBuf::from("/tmp/cache"),
     ///     packages_dir: PathBuf::from("/tmp/packages"),
     ///     max_cache_size: "1GB".to_string(),
+    ///     connection_pool_size: 4,
     /// };
     /// let storage = Arc::new(SqliteStorage::new(storage_config).await?);
     ///
@@ -614,6 +617,50 @@ impl CanonicalResolver {
         Ok(results)
     }
 
+    /// Resolves a resource by its name field (SUSHI-compatible).
+    ///
+    /// This method enables resolution of resources by their `name` field,
+    /// which is necessary for SUSHI compatibility. For example, when a FSH file uses
+    /// `Parent: USCoreVitalSignsProfile`, SUSHI can find the resource with
+    /// `name="USCoreVitalSignsProfile"` even though the canonical URL is different.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The name of the resource to find
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(ResolvedResource)` - Successfully resolved resource by name
+    /// * `Err(ResolutionError)` - If no resource with that name is found
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use octofhir_canonical_manager::resolver::CanonicalResolver;
+    /// # async fn example(resolver: CanonicalResolver) -> Result<(), Box<dyn std::error::Error>> {
+    /// // Find US Core Patient profile by its name field
+    /// let resolved = resolver.resolve_by_name("USCorePatientProfile").await?;
+    /// println!("Found: {}", resolved.canonical_url);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn resolve_by_name(&self, name: &str) -> Result<ResolvedResource> {
+        info!("Resolving by name: {}", name);
+
+        if let Some(resource_index) = self.storage.find_resource_by_name(name).await? {
+            debug!("Found resource by name: {}", name);
+            let canonical_url = resource_index.canonical_url.clone();
+            return self
+                .build_resolved_resource(&canonical_url, resource_index, ResolutionPath::ExactMatch)
+                .await;
+        }
+
+        Err(ResolutionError::CanonicalUrlNotFound {
+            url: format!("No resource found with name: {}", name),
+        }
+        .into())
+    }
+
     /// Returns a list of all canonical URLs available in storage.
     ///
     /// This provides a complete inventory of all FHIR resources that can
@@ -839,6 +886,7 @@ mod tests {
             cache_dir: temp_dir.path().join("cache"),
             packages_dir: temp_dir.path().join("packages"),
             max_cache_size: "100MB".to_owned(),
+            connection_pool_size: 8,
         };
 
         let storage = Arc::new(SqliteStorage::new(config).await.unwrap());
@@ -854,6 +902,7 @@ mod tests {
             cache_dir: temp_dir.path().join("cache"),
             packages_dir: temp_dir.path().join("packages"),
             max_cache_size: "100MB".to_owned(),
+            connection_pool_size: 8,
         };
 
         let storage = Arc::new(SqliteStorage::new(config).await.unwrap());
@@ -870,6 +919,7 @@ mod tests {
             cache_dir: temp_dir.path().join("cache"),
             packages_dir: temp_dir.path().join("packages"),
             max_cache_size: "100MB".to_owned(),
+            connection_pool_size: 8,
         };
 
         let storage = Arc::new(SqliteStorage::new(config).await.unwrap());

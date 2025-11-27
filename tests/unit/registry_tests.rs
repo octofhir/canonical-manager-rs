@@ -324,6 +324,9 @@ async fn test_persistent_metadata_cache_etag_and_304() {
         .await
         .unwrap();
 
+    // Wait for the async save to complete (validators are saved in a spawned task with 500ms debounce)
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
     // Second client with same cache dir: should send If-None-Match and hit 304 on server
     let client2 = RegistryClient::new(&config, temp_dir.path().to_path_buf())
         .await

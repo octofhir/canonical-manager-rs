@@ -9,7 +9,7 @@ use crate::content_hash::ContentHash;
 use crate::error::{FcmError, Result, StorageError};
 use crate::package::{ExtractedPackage, FhirResource};
 use chrono::{DateTime, Utc};
-use deadpool_sqlite::rusqlite::{self, OptionalExtension, types::Type};
+use deadpool_sqlite::rusqlite::{self, OptionalExtension};
 use deadpool_sqlite::{Config as DeadpoolConfig, Pool, Runtime};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -17,8 +17,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
-const SCHEMA_VERSION: i32 = 3;
+// Reset to version 1 - following fhir-package-loader schema pattern
+const SCHEMA_VERSION: i32 = 1;
 
+/// SD flavors (StructureDefinition subtypes) - same as fhir-package-loader
+pub const SD_FLAVORS: &[&str] = &["Extension", "Profile", "Type", "Resource", "Logical"];
+
+/// Resource index returned from queries - extended with SD-specific fields
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResourceIndex {
     pub canonical_url: String,
@@ -27,9 +32,22 @@ pub struct ResourceIndex {
     pub package_version: String,
     pub fhir_version: String,
     pub file_path: PathBuf,
-    pub metadata: ResourceMetadata,
+    // Core metadata
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub version: Option<String>,
+    // StructureDefinition specific fields (following fhir-package-loader)
+    pub sd_kind: Option<String>,
+    pub sd_derivation: Option<String>,
+    pub sd_type: Option<String>,
+    pub sd_base_definition: Option<String>,
+    pub sd_abstract: Option<bool>,
+    pub sd_impose_profiles: Option<Vec<String>>,
+    pub sd_characteristics: Option<Vec<String>>,
+    pub sd_flavor: Option<String>,
 }
 
+/// Legacy metadata struct for backward compatibility during migration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResourceMetadata {
     pub id: String,
@@ -52,6 +70,28 @@ pub struct SqliteStorage {
     pool: Pool,
     db_path: PathBuf,
     cas: Arc<CasStorage>,
+}
+
+/// Internal struct for building resource rows during insertion
+#[derive(Debug, Clone)]
+struct ResourceRow {
+    resource_type: String,
+    id: Option<String>,
+    url: Option<String>,
+    name: Option<String>,
+    version: Option<String>,
+    sd_kind: Option<String>,
+    sd_derivation: Option<String>,
+    sd_type: Option<String>,
+    sd_base_definition: Option<String>,
+    sd_abstract: Option<bool>,
+    sd_impose_profiles: Option<Vec<String>>,
+    sd_characteristics: Option<Vec<String>>,
+    sd_flavor: Option<String>,
+    content_hash: String,
+    content_path: String,
+    id_lower: Option<String>,
+    name_lower: Option<String>,
 }
 
 impl SqliteStorage {
@@ -197,35 +237,60 @@ impl SqliteStorage {
         self.with_connection(move |conn| {
             conn.execute_batch(
                 r#"
-                -- Packages table: metadata only, no large content
+                -- Packages table (following fhir-package-loader pattern)
                 CREATE TABLE IF NOT EXISTS packages (
-                    id TEXT PRIMARY KEY,
+                    rowid INTEGER PRIMARY KEY,
                     name TEXT NOT NULL,
                     version TEXT NOT NULL,
+                    package_path TEXT,
+                    fhir_version TEXT,
                     manifest_hash TEXT NOT NULL,
                     installed_at TEXT NOT NULL,
                     resource_count INTEGER NOT NULL,
+                    priority INTEGER DEFAULT 0,
                     UNIQUE(name, version)
                 );
 
-                -- Resources table: content-addressable, no JSON BLOBs
+                -- Resources table (following fhir-package-loader pattern with extensions)
                 CREATE TABLE IF NOT EXISTS resources (
-                    canonical_url TEXT NOT NULL,
-                    package_id TEXT NOT NULL,
+                    rowid INTEGER PRIMARY KEY,
+                    -- Core fields
                     resource_type TEXT NOT NULL,
+                    id TEXT,
+                    url TEXT,
+                    name TEXT,
+                    version TEXT,
+                    -- StructureDefinition specific fields (like fhir-package-loader)
+                    sd_kind TEXT,
+                    sd_derivation TEXT,
+                    sd_type TEXT,
+                    sd_base_definition TEXT,
+                    sd_abstract INTEGER,
+                    sd_impose_profiles TEXT,   -- JSON array as string
+                    sd_characteristics TEXT,   -- JSON array as string
+                    sd_flavor TEXT,            -- 'Extension', 'Profile', 'Type', 'Resource', 'Logical'
+                    -- Package reference
+                    package_name TEXT NOT NULL,
+                    package_version TEXT NOT NULL,
                     fhir_version TEXT NOT NULL,
                     content_hash TEXT NOT NULL,
                     content_path TEXT NOT NULL,
-                    metadata JSON NOT NULL,
-                    PRIMARY KEY (canonical_url, package_id),
-                    FOREIGN KEY(package_id) REFERENCES packages(id) ON DELETE CASCADE
+                    -- Lowercase variants for case-insensitive search (our extension)
+                    id_lower TEXT,
+                    name_lower TEXT,
+                    FOREIGN KEY(package_name, package_version) REFERENCES packages(name, version) ON DELETE CASCADE
                 );
 
-                -- Indexes for efficient queries
-                CREATE INDEX IF NOT EXISTS idx_resource_type ON resources(resource_type);
-                CREATE INDEX IF NOT EXISTS idx_package_id ON resources(package_id);
-                CREATE INDEX IF NOT EXISTS idx_canonical_fhir_version ON resources(canonical_url, fhir_version);
+                -- Indexes (following fhir-package-loader pattern)
                 CREATE INDEX IF NOT EXISTS idx_package_name_version ON packages(name, version);
+                CREATE INDEX IF NOT EXISTS idx_package_priority ON packages(priority);
+
+                CREATE INDEX IF NOT EXISTS idx_resource_id_type_flavor ON resources(id_lower, resource_type, sd_flavor);
+                CREATE INDEX IF NOT EXISTS idx_resource_name_type_flavor ON resources(name_lower, resource_type, sd_flavor);
+                CREATE INDEX IF NOT EXISTS idx_resource_url_type_flavor ON resources(url, resource_type, sd_flavor);
+                CREATE INDEX IF NOT EXISTS idx_resource_sd_flavor ON resources(sd_flavor) WHERE sd_flavor IS NOT NULL;
+                CREATE INDEX IF NOT EXISTS idx_resource_package ON resources(package_name, package_version);
+                CREATE INDEX IF NOT EXISTS idx_resource_fhir_version ON resources(fhir_version);
                 CREATE INDEX IF NOT EXISTS idx_content_hash ON resources(content_hash);
                 "#,
             )?;
@@ -247,17 +312,37 @@ impl SqliteStorage {
         Ok(())
     }
 
+    /// Set package priority (higher = more preferred for resolution)
+    pub async fn set_package_priority(
+        &self,
+        package_name: &str,
+        package_version: &str,
+        priority: i32,
+    ) -> Result<()> {
+        let name = package_name.to_string();
+        let version = package_version.to_string();
+        self.with_connection(move |conn| {
+            conn.execute(
+                "UPDATE packages SET priority = ?1 WHERE name = ?2 AND version = ?3",
+                rusqlite::params![priority, name, version],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
     pub async fn add_package(&self, package: ExtractedPackage) -> Result<()> {
-        let package_id = format!("{}:{}", package.name, package.version);
         let package_name = package.name.clone();
         let package_version = package.version.clone();
 
-        let package_id_lookup = package_id.clone();
+        // Check if package already exists
+        let name_check = package_name.clone();
+        let version_check = package_version.clone();
         let exists: bool = self
             .with_connection(move |conn| {
                 conn.query_row(
-                    "SELECT 1 FROM packages WHERE id = ?1",
-                    rusqlite::params![package_id_lookup],
+                    "SELECT 1 FROM packages WHERE name = ?1 AND version = ?2",
+                    rusqlite::params![name_check, version_check],
                     |_| Ok(true),
                 )
                 .optional()
@@ -280,7 +365,8 @@ impl SqliteStorage {
             .cloned()
             .unwrap_or_else(|| "4.0.1".to_string());
 
-        let mut resource_data = Vec::new();
+        // Prepare resource data with new schema fields
+        let mut resource_data: Vec<ResourceRow> = Vec::new();
         for resource in &package.resources {
             let content_json = serde_json::to_string(&resource.content).map_err(|e| {
                 FcmError::Storage(StorageError::IoError {
@@ -308,44 +394,36 @@ impl SqliteStorage {
                 .clone()
                 .unwrap_or_else(|| format!("{}/{}", resource.resource_type, resource.id));
 
-            let metadata = ResourceMetadata {
-                id: resource.id.clone(),
-                name: resource
-                    .content
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .map(String::from),
+            // Extract name from content
+            let name = resource
+                .content
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+
+            // Extract SD-specific fields (following fhir-package-loader)
+            let sd_fields = extract_sd_fields(&resource.content);
+
+            resource_data.push(ResourceRow {
+                resource_type: resource.resource_type.clone(),
+                id: Some(resource.id.clone()),
+                url: Some(canonical_url),
+                name: name.clone(),
                 version: resource.version.clone(),
-                status: resource
-                    .content
-                    .get("status")
-                    .and_then(|v| v.as_str())
-                    .map(String::from),
-                date: resource
-                    .content
-                    .get("date")
-                    .and_then(|v| v.as_str())
-                    .map(String::from),
-                publisher: resource
-                    .content
-                    .get("publisher")
-                    .and_then(|v| v.as_str())
-                    .map(String::from),
-            };
-
-            let metadata_json = serde_json::to_string(&metadata).map_err(|e| {
-                FcmError::Storage(StorageError::IoError {
-                    message: format!("Failed to serialize metadata: {e}"),
-                })
-            })?;
-
-            resource_data.push((
-                canonical_url,
-                resource.resource_type.clone(),
-                content_hash.to_hex(),
+                sd_kind: sd_fields.sd_kind,
+                sd_derivation: sd_fields.sd_derivation,
+                sd_type: sd_fields.sd_type,
+                sd_base_definition: sd_fields.sd_base_definition,
+                sd_abstract: sd_fields.sd_abstract,
+                sd_impose_profiles: sd_fields.sd_impose_profiles,
+                sd_characteristics: sd_fields.sd_characteristics,
+                sd_flavor: sd_fields.sd_flavor,
+                content_hash: content_hash.to_hex(),
                 content_path,
-                metadata_json,
-            ));
+                // Case-insensitive search columns
+                id_lower: Some(resource.id.to_lowercase()),
+                name_lower: name.map(|n| n.to_lowercase()),
+            });
         }
 
         let manifest_json = serde_json::to_string(&package.manifest).map_err(|e| {
@@ -357,41 +435,71 @@ impl SqliteStorage {
         let installed_at = Utc::now().to_rfc3339();
         let resource_count = resource_data.len();
 
-        let package_id_tx = package_id.clone();
+        let name_tx = package_name.clone();
+        let version_tx = package_version.clone();
         let fhir_version_tx = fhir_version.clone();
         let manifest_hash_hex = manifest_hash.to_hex();
 
-        let package_for_tx = package;
         self.with_connection(move |conn| {
             let tx = conn.unchecked_transaction()?;
 
             tx.execute(
-                "INSERT INTO packages (id, name, version, manifest_hash, installed_at, resource_count)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO packages (name, version, fhir_version, manifest_hash, installed_at, resource_count, priority)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 rusqlite::params![
-                    &package_id_tx,
-                    &package_for_tx.name,
-                    &package_for_tx.version,
+                    &name_tx,
+                    &version_tx,
+                    &fhir_version_tx,
                     &manifest_hash_hex,
                     &installed_at,
                     resource_count,
+                    0,  // default priority
                 ],
             )?;
 
-            for (canonical_url, resource_type, content_hash, content_path, metadata_json) in
-                resource_data
-            {
+            for r in resource_data {
+                let sd_impose_profiles_json = r.sd_impose_profiles
+                    .as_ref()
+                    .map(|v| serde_json::to_string(v).unwrap_or_default());
+                let sd_characteristics_json = r.sd_characteristics
+                    .as_ref()
+                    .map(|v| serde_json::to_string(v).unwrap_or_default());
+
                 tx.execute(
-                    "INSERT OR REPLACE INTO resources (canonical_url, package_id, resource_type, fhir_version, content_hash, content_path, metadata)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    r#"INSERT OR REPLACE INTO resources (
+                        resource_type, id, url, name, version,
+                        sd_kind, sd_derivation, sd_type, sd_base_definition, sd_abstract,
+                        sd_impose_profiles, sd_characteristics, sd_flavor,
+                        package_name, package_version, fhir_version,
+                        content_hash, content_path, id_lower, name_lower
+                    ) VALUES (
+                        ?1, ?2, ?3, ?4, ?5,
+                        ?6, ?7, ?8, ?9, ?10,
+                        ?11, ?12, ?13,
+                        ?14, ?15, ?16,
+                        ?17, ?18, ?19, ?20
+                    )"#,
                     rusqlite::params![
-                        &canonical_url,
-                        &package_id_tx,
-                        &resource_type,
+                        &r.resource_type,
+                        &r.id,
+                        &r.url,
+                        &r.name,
+                        &r.version,
+                        &r.sd_kind,
+                        &r.sd_derivation,
+                        &r.sd_type,
+                        &r.sd_base_definition,
+                        r.sd_abstract.map(|b| if b { 1 } else { 0 }),
+                        &sd_impose_profiles_json,
+                        &sd_characteristics_json,
+                        &r.sd_flavor,
+                        &name_tx,
+                        &version_tx,
                         &fhir_version_tx,
-                        &content_hash,
-                        &content_path,
-                        &metadata_json,
+                        &r.content_hash,
+                        &r.content_path,
+                        &r.id_lower,
+                        &r.name_lower,
                     ],
                 )?;
             }
@@ -402,8 +510,8 @@ impl SqliteStorage {
         .await?;
 
         info!(
-            "Package {} added to SQLite ({} resources)",
-            package_id, resource_count
+            "Package {}@{} added to SQLite ({} resources)",
+            package_name, package_version, resource_count
         );
         Ok(())
     }
@@ -413,10 +521,19 @@ impl SqliteStorage {
         info!("Adding {} packages in batch mode", packages.len());
         let start = std::time::Instant::now();
 
-        let mut batch_data = Vec::new();
-        for package in packages {
-            let package_id = format!("{}:{}", package.name, package.version);
+        // Build batch data with new schema
+        struct BatchPackage {
+            name: String,
+            version: String,
+            fhir_version: String,
+            manifest_hash: String,
+            resource_count: usize,
+            resources: Vec<ResourceRow>,
+        }
 
+        let mut batch_data: Vec<BatchPackage> = Vec::new();
+
+        for package in packages {
             let fhir_version = package
                 .manifest
                 .fhir_versions
@@ -432,7 +549,7 @@ impl SqliteStorage {
             })?;
             let manifest_hash = ContentHash::from_bytes(manifest_json.as_bytes());
 
-            let mut resource_data = Vec::new();
+            let mut resource_data: Vec<ResourceRow> = Vec::new();
             for resource in &package.resources {
                 let content_json = serde_json::to_string(&resource.content).map_err(|e| {
                     FcmError::Storage(StorageError::IoError {
@@ -460,55 +577,45 @@ impl SqliteStorage {
                     .clone()
                     .unwrap_or_else(|| format!("{}/{}", resource.resource_type, resource.id));
 
-                let metadata = ResourceMetadata {
-                    id: resource.id.clone(),
-                    name: resource
-                        .content
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .map(String::from),
+                // Extract name from content
+                let name = resource
+                    .content
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+
+                // Extract SD-specific fields (following fhir-package-loader)
+                let sd_fields = extract_sd_fields(&resource.content);
+
+                resource_data.push(ResourceRow {
+                    resource_type: resource.resource_type.clone(),
+                    id: Some(resource.id.clone()),
+                    url: Some(canonical_url),
+                    name: name.clone(),
                     version: resource.version.clone(),
-                    status: resource
-                        .content
-                        .get("status")
-                        .and_then(|v| v.as_str())
-                        .map(String::from),
-                    date: resource
-                        .content
-                        .get("date")
-                        .and_then(|v| v.as_str())
-                        .map(String::from),
-                    publisher: resource
-                        .content
-                        .get("publisher")
-                        .and_then(|v| v.as_str())
-                        .map(String::from),
-                };
-
-                let metadata_json = serde_json::to_string(&metadata).map_err(|e| {
-                    FcmError::Storage(StorageError::IoError {
-                        message: format!("Failed to serialize metadata: {e}"),
-                    })
-                })?;
-
-                resource_data.push((
-                    canonical_url,
-                    resource.resource_type.clone(),
-                    content_hash.to_hex(),
+                    sd_kind: sd_fields.sd_kind,
+                    sd_derivation: sd_fields.sd_derivation,
+                    sd_type: sd_fields.sd_type,
+                    sd_base_definition: sd_fields.sd_base_definition,
+                    sd_abstract: sd_fields.sd_abstract,
+                    sd_impose_profiles: sd_fields.sd_impose_profiles,
+                    sd_characteristics: sd_fields.sd_characteristics,
+                    sd_flavor: sd_fields.sd_flavor,
+                    content_hash: content_hash.to_hex(),
                     content_path,
-                    metadata_json,
-                ));
+                    id_lower: Some(resource.id.to_lowercase()),
+                    name_lower: name.map(|n| n.to_lowercase()),
+                });
             }
 
-            batch_data.push((
-                package_id,
-                package.name,
-                package.version,
-                manifest_hash.to_hex(),
-                package.resources.len(),
+            batch_data.push(BatchPackage {
+                name: package.name,
+                version: package.version,
                 fhir_version,
-                resource_data,
-            ));
+                manifest_hash: manifest_hash.to_hex(),
+                resource_count: resource_data.len(),
+                resources: resource_data,
+            });
         }
 
         let package_count = batch_data.len();
@@ -516,38 +623,68 @@ impl SqliteStorage {
             let tx = conn.unchecked_transaction()?;
 
             let mut package_stmt = tx.prepare(
-                "INSERT OR REPLACE INTO packages (id, name, version, manifest_hash, installed_at, resource_count)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT OR REPLACE INTO packages (name, version, fhir_version, manifest_hash, installed_at, resource_count, priority)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             )?;
 
             let mut resource_stmt = tx.prepare(
-                "INSERT OR REPLACE INTO resources (canonical_url, package_id, resource_type, fhir_version, content_hash, content_path, metadata)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                r#"INSERT OR REPLACE INTO resources (
+                    resource_type, id, url, name, version,
+                    sd_kind, sd_derivation, sd_type, sd_base_definition, sd_abstract,
+                    sd_impose_profiles, sd_characteristics, sd_flavor,
+                    package_name, package_version, fhir_version,
+                    content_hash, content_path, id_lower, name_lower
+                ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5,
+                    ?6, ?7, ?8, ?9, ?10,
+                    ?11, ?12, ?13,
+                    ?14, ?15, ?16,
+                    ?17, ?18, ?19, ?20
+                )"#,
             )?;
 
             let now = Utc::now().to_rfc3339();
 
-            for (package_id, name, version, manifest_hash, resource_count, fhir_version, resources) in
-                batch_data
-            {
+            for pkg in batch_data {
                 package_stmt.execute(rusqlite::params![
-                    &package_id,
-                    &name,
-                    &version,
-                    &manifest_hash,
+                    &pkg.name,
+                    &pkg.version,
+                    &pkg.fhir_version,
+                    &pkg.manifest_hash,
                     &now,
-                    resource_count,
+                    pkg.resource_count,
+                    0,  // default priority
                 ])?;
 
-                for (canonical_url, resource_type, content_hash, content_path, metadata_json) in resources {
+                for r in pkg.resources {
+                    let sd_impose_profiles_json = r.sd_impose_profiles
+                        .as_ref()
+                        .map(|v| serde_json::to_string(v).unwrap_or_default());
+                    let sd_characteristics_json = r.sd_characteristics
+                        .as_ref()
+                        .map(|v| serde_json::to_string(v).unwrap_or_default());
+
                     resource_stmt.execute(rusqlite::params![
-                        &canonical_url,
-                        &package_id,
-                        &resource_type,
-                        &fhir_version,
-                        &content_hash,
-                        &content_path,
-                        &metadata_json,
+                        &r.resource_type,
+                        &r.id,
+                        &r.url,
+                        &r.name,
+                        &r.version,
+                        &r.sd_kind,
+                        &r.sd_derivation,
+                        &r.sd_type,
+                        &r.sd_base_definition,
+                        r.sd_abstract.map(|b| if b { 1 } else { 0 }),
+                        &sd_impose_profiles_json,
+                        &sd_characteristics_json,
+                        &r.sd_flavor,
+                        &pkg.name,
+                        &pkg.version,
+                        &pkg.fhir_version,
+                        &r.content_hash,
+                        &r.content_path,
+                        &r.id_lower,
+                        &r.name_lower,
                     ])?;
                 }
             }
@@ -574,22 +711,23 @@ impl SqliteStorage {
         Ok(())
     }
 
+    /// Standard SELECT clause for resource queries (new schema)
+    const RESOURCE_SELECT: &'static str = r#"
+        SELECT r.url, r.resource_type, r.package_name, r.package_version, r.content_path, r.fhir_version,
+               r.id, r.name, r.version,
+               r.sd_kind, r.sd_derivation, r.sd_type, r.sd_base_definition, r.sd_abstract,
+               r.sd_impose_profiles, r.sd_characteristics, r.sd_flavor
+        FROM resources r
+        JOIN packages p ON r.package_name = p.name AND r.package_version = p.version
+    "#;
+
     #[tracing::instrument(name = "sqlite.find_resource", skip(self), fields(key = %canonical_url))]
     pub async fn find_resource(&self, canonical_url: &str) -> Result<Option<ResourceIndex>> {
         let url = canonical_url.to_string();
         self.with_connection(move |conn| {
-            conn.query_row(
-                r#"
-            SELECT r.canonical_url, r.resource_type, p.name, p.version, r.content_path, r.metadata, r.fhir_version
-            FROM resources r
-            JOIN packages p ON r.package_id = p.id
-            WHERE r.canonical_url = ?1
-            LIMIT 1
-            "#,
-                rusqlite::params![url],
-                extract_resource_index,
-            )
-            .optional()
+            let query = format!("{} WHERE r.url = ?1 LIMIT 1", Self::RESOURCE_SELECT);
+            conn.query_row(&query, rusqlite::params![url], extract_resource_index)
+                .optional()
         })
         .await
         .map_err(|err| match err {
@@ -610,14 +748,12 @@ impl SqliteStorage {
         let url = canonical_url.to_string();
         let version = fhir_version.to_string();
         self.with_connection(move |conn| {
+            let query = format!(
+                "{} WHERE r.url = ?1 AND r.fhir_version = ?2 LIMIT 1",
+                Self::RESOURCE_SELECT
+            );
             conn.query_row(
-                r#"
-            SELECT r.canonical_url, r.resource_type, p.name, p.version, r.content_path, r.metadata, r.fhir_version
-            FROM resources r
-            JOIN packages p ON r.package_id = p.id
-            WHERE r.canonical_url = ?1 AND r.fhir_version = ?2
-            LIMIT 1
-            "#,
+                &query,
                 rusqlite::params![url, version],
                 extract_resource_index,
             )
@@ -637,19 +773,11 @@ impl SqliteStorage {
     pub async fn find_by_base_url(&self, base_url: &str) -> Result<Vec<ResourceIndex>> {
         let pattern = format!("{}%", base_url);
         self.with_connection(move |conn| {
-            let mut stmt = conn.prepare(
-                r#"
-                SELECT r.canonical_url, r.resource_type, p.name, p.version, r.content_path, r.metadata, r.fhir_version
-                FROM resources r
-                JOIN packages p ON r.package_id = p.id
-                WHERE r.canonical_url LIKE ?1
-                "#,
-            )?;
-
+            let query = format!("{} WHERE r.url LIKE ?1", Self::RESOURCE_SELECT);
+            let mut stmt = conn.prepare(&query)?;
             let results = stmt
                 .query_map(rusqlite::params![pattern], extract_resource_index)?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-
             Ok(results)
         })
         .await
@@ -663,21 +791,16 @@ impl SqliteStorage {
         })
     }
 
-    /// Find a resource by its name field (from metadata JSON).
+    /// Find a resource by its name field (case-insensitive).
     /// This enables SUSHI-compatible resolution where Parent: USCoreVitalSignsProfile
     /// can find a resource with name="USCoreVitalSignsProfile".
     pub async fn find_resource_by_name(&self, name: &str) -> Result<Option<ResourceIndex>> {
-        let name_query = name.to_string();
+        let name_lower = name.to_lowercase();
         self.with_connection(move |conn| {
+            let query = format!("{} WHERE r.name_lower = ?1 LIMIT 1", Self::RESOURCE_SELECT);
             conn.query_row(
-                r#"
-                SELECT r.canonical_url, r.resource_type, p.name, p.version, r.content_path, r.metadata, r.fhir_version
-                FROM resources r
-                JOIN packages p ON r.package_id = p.id
-                WHERE json_extract(r.metadata, '$.name') = ?1
-                LIMIT 1
-                "#,
-                rusqlite::params![name_query],
+                &query,
+                rusqlite::params![name_lower],
                 extract_resource_index,
             )
             .optional()
@@ -701,15 +824,15 @@ impl SqliteStorage {
     pub async fn get_resource(&self, resource_index: &ResourceIndex) -> Result<FhirResource> {
         let canonical_url = resource_index.canonical_url.clone();
         let resource_type = resource_index.resource_type.clone();
-        let metadata_id = resource_index.metadata.id.clone();
-        let metadata_version = resource_index.metadata.version.clone();
+        let resource_id = resource_index.id.clone().unwrap_or_default();
+        let resource_version = resource_index.version.clone();
         let file_path = resource_index.file_path.clone();
 
         let content_path: String = tokio::time::timeout(
             std::time::Duration::from_secs(30),
             self.with_connection(move |conn| {
                 conn.query_row(
-                    "SELECT content_path FROM resources WHERE canonical_url = ?1",
+                    "SELECT content_path FROM resources WHERE url = ?1",
                     rusqlite::params![canonical_url],
                     |row| row.get(0),
                 )
@@ -752,67 +875,59 @@ impl SqliteStorage {
 
         Ok(FhirResource {
             resource_type,
-            id: metadata_id,
+            id: resource_id,
             url: Some(resource_index.canonical_url.clone()),
-            version: metadata_version,
+            version: resource_version,
             content: json_content,
             file_path,
         })
     }
 
-    /// Find resource by exact resource type and metadata ID match
+    /// Find resource by exact resource type and ID match (case-insensitive)
     /// This is much faster than text search for exact lookups
     pub async fn find_by_type_and_id(
         &self,
         resource_type: String,
         id: String,
     ) -> Result<Vec<ResourceIndex>> {
+        let id_lower = id.to_lowercase();
         self.with_connection(move |conn| {
-            let mut stmt = conn.prepare(
-                r#"
-                SELECT r.canonical_url, r.resource_type, p.name, p.version, r.content_path, r.metadata, r.fhir_version
-                FROM resources r
-                JOIN packages p ON r.package_id = p.id
-                WHERE r.resource_type = ?1
-                  AND json_extract(r.metadata, '$.id') = ?2
-                "#,
-            )?;
-
+            let query = format!(
+                "{} WHERE r.resource_type = ?1 AND r.id_lower = ?2",
+                Self::RESOURCE_SELECT
+            );
+            let mut stmt = conn.prepare(&query)?;
             let resources = stmt
-                .query_map(rusqlite::params![resource_type, id], |row| {
-                    extract_resource_index(row)
-                })?
+                .query_map(
+                    rusqlite::params![resource_type, id_lower],
+                    extract_resource_index,
+                )?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-
             Ok(resources)
         })
         .await
     }
 
-    /// Find resource by exact resource type and metadata name match
+    /// Find resource by exact resource type and name match (case-insensitive)
     /// Useful for US Core profiles that have names like "USCoreMedicationRequestProfile"
     pub async fn find_by_type_and_name(
         &self,
         resource_type: String,
         name: String,
     ) -> Result<Vec<ResourceIndex>> {
+        let name_lower = name.to_lowercase();
         self.with_connection(move |conn| {
-            let mut stmt = conn.prepare(
-                r#"
-                SELECT r.canonical_url, r.resource_type, p.name, p.version, r.content_path, r.metadata, r.fhir_version
-                FROM resources r
-                JOIN packages p ON r.package_id = p.id
-                WHERE r.resource_type = ?1
-                  AND json_extract(r.metadata, '$.name') = ?2
-                "#,
-            )?;
-
+            let query = format!(
+                "{} WHERE r.resource_type = ?1 AND r.name_lower = ?2",
+                Self::RESOURCE_SELECT
+            );
+            let mut stmt = conn.prepare(&query)?;
             let resources = stmt
-                .query_map(rusqlite::params![resource_type, name], |row| {
-                    extract_resource_index(row)
-                })?
+                .query_map(
+                    rusqlite::params![resource_type, name_lower],
+                    extract_resource_index,
+                )?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-
             Ok(resources)
         })
         .await
@@ -843,18 +958,19 @@ impl SqliteStorage {
     }
 
     pub async fn remove_package(&self, name: &str, version: &str) -> Result<bool> {
-        let package_id = format!("{}:{}", name, version);
+        let pkg_name = name.to_string();
+        let pkg_version = version.to_string();
         self.with_connection(move |conn| {
             let tx = conn.unchecked_transaction()?;
 
             tx.execute(
-                "DELETE FROM resources WHERE package_id = ?1",
-                rusqlite::params![package_id],
+                "DELETE FROM resources WHERE package_name = ?1 AND package_version = ?2",
+                rusqlite::params![pkg_name, pkg_version],
             )?;
 
             let deleted = tx.execute(
-                "DELETE FROM packages WHERE id = ?1",
-                rusqlite::params![package_id],
+                "DELETE FROM packages WHERE name = ?1 AND version = ?2",
+                rusqlite::params![pkg_name, pkg_version],
             )?;
 
             tx.commit()?;
@@ -866,22 +982,14 @@ impl SqliteStorage {
     pub async fn get_cache_entries(&self) -> HashMap<String, ResourceIndex> {
         match self
             .with_connection(move |conn| {
-                let mut stmt = conn.prepare(
-                    r#"
-                    SELECT r.canonical_url, r.resource_type, p.name, p.version, r.content_path, r.metadata, r.fhir_version
-                    FROM resources r
-                    JOIN packages p ON r.package_id = p.id
-                    "#,
-                )?;
-
+                let query = Self::RESOURCE_SELECT;
+                let mut stmt = conn.prepare(query)?;
                 let rows = stmt
                     .query_map([], |row| {
-                        let key: String = row.get(0)?;
                         let value = extract_resource_index(row)?;
-                        Ok((key, value))
+                        Ok((value.canonical_url.clone(), value))
                     })?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
-
                 Ok(rows)
             })
             .await
@@ -892,6 +1000,211 @@ impl SqliteStorage {
                 HashMap::new()
             }
         }
+    }
+
+    /// Find resource by key (matches id, name, or url - case-insensitive for id/name)
+    /// Following fhir-package-loader pattern for type filtering and priority ordering.
+    ///
+    /// # Arguments
+    /// * `key` - The identifier to search for (matches id, name, or url)
+    /// * `types` - Optional list of SD flavors or resource types to filter by
+    /// * `exclude_extensions` - If true, excludes resources with sd_flavor = 'Extension'
+    /// * `sort_by_priority` - If true, orders by package priority DESC then rowid DESC
+    pub async fn find_resource_info(
+        &self,
+        key: &str,
+        types: Option<&[&str]>,
+        exclude_extensions: bool,
+        sort_by_priority: bool,
+    ) -> Result<Option<ResourceIndex>> {
+        let key_lower = key.to_lowercase();
+        let key_url = key.to_string();
+
+        // Build type conditions
+        let types_owned: Option<Vec<String>> =
+            types.map(|t| t.iter().map(|s| s.to_string()).collect());
+
+        self.with_connection(move |conn| {
+            let mut conditions =
+                vec!["(r.id_lower = ?1 OR r.name_lower = ?1 OR r.url = ?2)".to_string()];
+
+            let mut params: Vec<Box<dyn rusqlite::ToSql>> =
+                vec![Box::new(key_lower.clone()), Box::new(key_url.clone())];
+
+            if let Some(ref types) = types_owned {
+                let sd_flavors: Vec<&str> = types
+                    .iter()
+                    .filter(|t| SD_FLAVORS.contains(&t.as_str()))
+                    .map(|s| s.as_str())
+                    .collect();
+                let resource_types: Vec<&str> = types
+                    .iter()
+                    .filter(|t| !SD_FLAVORS.contains(&t.as_str()))
+                    .map(|s| s.as_str())
+                    .collect();
+
+                let mut type_conditions = Vec::new();
+
+                if !sd_flavors.is_empty() {
+                    let placeholders: Vec<String> = sd_flavors
+                        .iter()
+                        .enumerate()
+                        .map(|(i, _)| format!("?{}", params.len() + i + 1))
+                        .collect();
+                    type_conditions.push(format!(
+                        "(r.resource_type = 'StructureDefinition' AND r.sd_flavor IN ({}))",
+                        placeholders.join(", ")
+                    ));
+                    for flavor in sd_flavors {
+                        params.push(Box::new(flavor.to_string()));
+                    }
+                }
+
+                if !resource_types.is_empty() {
+                    let placeholders: Vec<String> = resource_types
+                        .iter()
+                        .enumerate()
+                        .map(|(i, _)| format!("?{}", params.len() + i + 1))
+                        .collect();
+                    type_conditions
+                        .push(format!("r.resource_type IN ({})", placeholders.join(", ")));
+                    for rt in resource_types {
+                        params.push(Box::new(rt.to_string()));
+                    }
+                }
+
+                if !type_conditions.is_empty() {
+                    conditions.push(format!("({})", type_conditions.join(" OR ")));
+                }
+            }
+
+            if exclude_extensions {
+                conditions.push("(r.sd_flavor IS NULL OR r.sd_flavor != 'Extension')".to_string());
+            }
+
+            let order = if sort_by_priority {
+                "ORDER BY p.priority DESC, r.rowid DESC"
+            } else {
+                "ORDER BY r.rowid ASC"
+            };
+
+            let query = format!(
+                "{} WHERE {} {} LIMIT 1",
+                Self::RESOURCE_SELECT,
+                conditions.join(" AND "),
+                order
+            );
+
+            let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+
+            conn.query_row(&query, param_refs.as_slice(), extract_resource_index)
+                .optional()
+        })
+        .await
+        .map_err(|err| match err {
+            FcmError::Storage(StorageError::DatabaseError { message }) => {
+                FcmError::Storage(StorageError::IoError {
+                    message: format!("Failed to find resource info: {message}"),
+                })
+            }
+            other => other,
+        })
+    }
+
+    /// Find all matching resources by key with type filtering and priority ordering.
+    /// Returns all matches instead of just the first one.
+    pub async fn find_resource_infos(
+        &self,
+        key: &str,
+        types: Option<&[&str]>,
+        limit: Option<usize>,
+    ) -> Result<Vec<ResourceIndex>> {
+        let key_lower = key.to_lowercase();
+        let key_url = key.to_string();
+        let types_owned: Option<Vec<String>> =
+            types.map(|t| t.iter().map(|s| s.to_string()).collect());
+
+        self.with_connection(move |conn| {
+            let mut conditions =
+                vec!["(r.id_lower = ?1 OR r.name_lower = ?1 OR r.url = ?2)".to_string()];
+
+            let mut params: Vec<Box<dyn rusqlite::ToSql>> =
+                vec![Box::new(key_lower.clone()), Box::new(key_url.clone())];
+
+            if let Some(ref types) = types_owned {
+                let sd_flavors: Vec<&str> = types
+                    .iter()
+                    .filter(|t| SD_FLAVORS.contains(&t.as_str()))
+                    .map(|s| s.as_str())
+                    .collect();
+                let resource_types: Vec<&str> = types
+                    .iter()
+                    .filter(|t| !SD_FLAVORS.contains(&t.as_str()))
+                    .map(|s| s.as_str())
+                    .collect();
+
+                let mut type_conditions = Vec::new();
+
+                if !sd_flavors.is_empty() {
+                    let placeholders: Vec<String> = sd_flavors
+                        .iter()
+                        .enumerate()
+                        .map(|(i, _)| format!("?{}", params.len() + i + 1))
+                        .collect();
+                    type_conditions.push(format!(
+                        "(r.resource_type = 'StructureDefinition' AND r.sd_flavor IN ({}))",
+                        placeholders.join(", ")
+                    ));
+                    for flavor in sd_flavors {
+                        params.push(Box::new(flavor.to_string()));
+                    }
+                }
+
+                if !resource_types.is_empty() {
+                    let placeholders: Vec<String> = resource_types
+                        .iter()
+                        .enumerate()
+                        .map(|(i, _)| format!("?{}", params.len() + i + 1))
+                        .collect();
+                    type_conditions
+                        .push(format!("r.resource_type IN ({})", placeholders.join(", ")));
+                    for rt in resource_types {
+                        params.push(Box::new(rt.to_string()));
+                    }
+                }
+
+                if !type_conditions.is_empty() {
+                    conditions.push(format!("({})", type_conditions.join(" OR ")));
+                }
+            }
+
+            let mut query = format!(
+                "{} WHERE {} ORDER BY r.rowid ASC",
+                Self::RESOURCE_SELECT,
+                conditions.join(" AND ")
+            );
+
+            if let Some(lim) = limit {
+                query.push_str(&format!(" LIMIT {}", lim));
+            }
+
+            let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+
+            let mut stmt = conn.prepare(&query)?;
+            let resources = stmt
+                .query_map(param_refs.as_slice(), extract_resource_index)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(resources)
+        })
+        .await
+        .map_err(|err| match err {
+            FcmError::Storage(StorageError::DatabaseError { message }) => {
+                FcmError::Storage(StorageError::IoError {
+                    message: format!("Failed to find resource infos: {message}"),
+                })
+            }
+            other => other,
+        })
     }
 
     pub async fn compact(&self) -> Result<()> {
@@ -946,19 +1259,164 @@ impl SqliteStorage {
     }
 }
 
+/// Extracted StructureDefinition-specific fields (following fhir-package-loader)
+#[derive(Debug, Clone, Default)]
+pub struct SdFields {
+    pub sd_kind: Option<String>,
+    pub sd_derivation: Option<String>,
+    pub sd_type: Option<String>,
+    pub sd_base_definition: Option<String>,
+    pub sd_abstract: Option<bool>,
+    pub sd_impose_profiles: Option<Vec<String>>,
+    pub sd_characteristics: Option<Vec<String>>,
+    pub sd_flavor: Option<String>,
+}
+
+/// Compute SD flavor from FHIR resource JSON (same logic as fhir-package-loader)
+pub fn compute_sd_flavor(content: &serde_json::Value) -> Option<&'static str> {
+    if content.get("resourceType")?.as_str()? != "StructureDefinition" {
+        return None;
+    }
+
+    let type_val = content.get("type").and_then(|v| v.as_str());
+    let kind = content.get("kind").and_then(|v| v.as_str());
+    let derivation = content.get("derivation").and_then(|v| v.as_str());
+    let base_def = content.get("baseDefinition").and_then(|v| v.as_str());
+
+    // Extension: type='Extension' and not base Element (same as fhir-package-loader)
+    if type_val == Some("Extension")
+        && base_def != Some("http://hl7.org/fhir/StructureDefinition/Element")
+    {
+        return Some("Extension");
+    }
+
+    // Profile: derivation='constraint'
+    if derivation == Some("constraint") {
+        return Some("Profile");
+    }
+
+    // Type: kind contains 'type' (primitive-type, complex-type, datatype)
+    if let Some(k) = kind
+        && k.contains("type")
+    {
+        return Some("Type");
+    }
+
+    // Resource: kind='resource'
+    if kind == Some("resource") {
+        return Some("Resource");
+    }
+
+    // Logical: kind='logical'
+    if kind == Some("logical") {
+        return Some("Logical");
+    }
+
+    None
+}
+
+/// Extract all SD-specific fields from FHIR resource JSON
+pub fn extract_sd_fields(content: &serde_json::Value) -> SdFields {
+    if content.get("resourceType").and_then(|v| v.as_str()) != Some("StructureDefinition") {
+        return SdFields::default();
+    }
+
+    let sd_kind = content
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let sd_derivation = content
+        .get("derivation")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let sd_type = content
+        .get("type")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let sd_base_definition = content
+        .get("baseDefinition")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let sd_abstract = content.get("abstract").and_then(|v| v.as_bool());
+
+    // Extract imposeProfile extension (like fhir-package-loader)
+    let sd_impose_profiles = content
+        .get("extension")
+        .and_then(|v| v.as_array())
+        .map(|exts| {
+            exts.iter()
+                .filter(|ext| {
+                    ext.get("url").and_then(|u| u.as_str())
+                        == Some("http://hl7.org/fhir/StructureDefinition/structuredefinition-imposeProfile")
+                })
+                .filter_map(|ext| {
+                    ext.get("valueCanonical")
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                })
+                .collect::<Vec<_>>()
+        })
+        .filter(|v| !v.is_empty());
+
+    // Extract type-characteristics extension (like fhir-package-loader)
+    let sd_characteristics = content
+        .get("extension")
+        .and_then(|v| v.as_array())
+        .map(|exts| {
+            exts.iter()
+                .filter(|ext| {
+                    ext.get("url").and_then(|u| u.as_str())
+                        == Some("http://hl7.org/fhir/StructureDefinition/structuredefinition-type-characteristics")
+                })
+                .filter_map(|ext| {
+                    ext.get("valueCode")
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                })
+                .collect::<Vec<_>>()
+        })
+        .filter(|v| !v.is_empty());
+
+    let sd_flavor = compute_sd_flavor(content).map(String::from);
+
+    SdFields {
+        sd_kind,
+        sd_derivation,
+        sd_type,
+        sd_base_definition,
+        sd_abstract,
+        sd_impose_profiles,
+        sd_characteristics,
+        sd_flavor,
+    }
+}
+
 fn extract_resource_index(row: &rusqlite::Row<'_>) -> rusqlite::Result<ResourceIndex> {
-    let metadata_json: String = row.get(5)?;
-    let metadata: ResourceMetadata = serde_json::from_str(&metadata_json)
-        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(5, Type::Text, Box::new(e)))?;
+    // New schema: columns are in order of the SELECT statement
+    // url, resource_type, package_name, package_version, content_path, fhir_version,
+    // id, name, version, sd_kind, sd_derivation, sd_type, sd_base_definition, sd_abstract,
+    // sd_impose_profiles, sd_characteristics, sd_flavor
+    let sd_impose_profiles_json: Option<String> = row.get(14)?;
+    let sd_characteristics_json: Option<String> = row.get(15)?;
 
     Ok(ResourceIndex {
         canonical_url: row.get(0)?,
         resource_type: row.get(1)?,
         package_name: row.get(2)?,
         package_version: row.get(3)?,
-        fhir_version: row.get(6)?,
         file_path: PathBuf::from(row.get::<_, String>(4)?),
-        metadata,
+        fhir_version: row.get(5)?,
+        id: row.get(6)?,
+        name: row.get(7)?,
+        version: row.get(8)?,
+        sd_kind: row.get(9)?,
+        sd_derivation: row.get(10)?,
+        sd_type: row.get(11)?,
+        sd_base_definition: row.get(12)?,
+        sd_abstract: row.get::<_, Option<i32>>(13)?.map(|v| v != 0),
+        sd_impose_profiles: sd_impose_profiles_json.and_then(|s| serde_json::from_str(&s).ok()),
+        sd_characteristics: sd_characteristics_json.and_then(|s| serde_json::from_str(&s).ok()),
+        sd_flavor: row.get(16)?,
     })
 }
 

@@ -659,8 +659,9 @@ impl SearchEngine {
                 .add_resource(&canonical_url, &resource_index.resource_type);
 
             // Index the resource ID
-            self.text_index
-                .add_resource(&canonical_url, &resource_index.metadata.id);
+            if let Some(id) = &resource_index.id {
+                self.text_index.add_resource(&canonical_url, id);
+            }
 
             // Index package information
             let package_text = format!(
@@ -669,15 +670,12 @@ impl SearchEngine {
             );
             self.text_index.add_resource(&canonical_url, &package_text);
 
-            // Index metadata fields
-            if let Some(version) = &resource_index.metadata.version {
+            // Index name and version fields
+            if let Some(name) = &resource_index.name {
+                self.text_index.add_resource(&canonical_url, name);
+            }
+            if let Some(version) = &resource_index.version {
                 self.text_index.add_resource(&canonical_url, version);
-            }
-            if let Some(status) = &resource_index.metadata.status {
-                self.text_index.add_resource(&canonical_url, status);
-            }
-            if let Some(publisher) = &resource_index.metadata.publisher {
-                self.text_index.add_resource(&canonical_url, publisher);
             }
 
             // Skip loading actual FHIR resource content during initialization for performance
@@ -701,8 +699,9 @@ impl SearchEngine {
             .add_resource(canonical_url, &resource_index.resource_type);
 
         // Index the resource ID
-        self.text_index
-            .add_resource(canonical_url, &resource_index.metadata.id);
+        if let Some(id) = &resource_index.id {
+            self.text_index.add_resource(canonical_url, id);
+        }
 
         // Index package information
         let package_text = format!(
@@ -711,15 +710,12 @@ impl SearchEngine {
         );
         self.text_index.add_resource(canonical_url, &package_text);
 
-        // Index metadata fields
-        if let Some(version) = &resource_index.metadata.version {
+        // Index name and version fields
+        if let Some(name) = &resource_index.name {
+            self.text_index.add_resource(canonical_url, name);
+        }
+        if let Some(version) = &resource_index.version {
             self.text_index.add_resource(canonical_url, version);
-        }
-        if let Some(status) = &resource_index.metadata.status {
-            self.text_index.add_resource(canonical_url, status);
-        }
-        if let Some(publisher) = &resource_index.metadata.publisher {
-            self.text_index.add_resource(canonical_url, publisher);
         }
 
         // Try to index actual FHIR resource content
@@ -998,9 +994,9 @@ impl SearchEngine {
                 "{} {} {} {} {}",
                 resource_index.canonical_url,
                 resource_index.resource_type,
-                resource_index.metadata.id,
+                resource_index.id.as_deref().unwrap_or(""),
                 resource_index.package_name,
-                resource_index.metadata.publisher.as_deref().unwrap_or("")
+                resource_index.name.as_deref().unwrap_or("")
             )
             .to_lowercase();
 
@@ -1214,7 +1210,7 @@ impl SearchEngine {
         for resource in filtered_resources {
             *resource_types.entry(resource.resource_type).or_insert(0) += 1;
             *packages.entry(resource.package_name.clone()).or_insert(0) += 1;
-            if let Some(version) = resource.metadata.version {
+            if let Some(version) = resource.version {
                 *versions.entry(version).or_insert(0) += 1;
             }
         }
@@ -1571,14 +1567,17 @@ mod tests {
                 package_version: "4.0.1".to_string(),
                 fhir_version: "4.0.1".to_string(),
                 file_path: std::path::PathBuf::from("/test/Patient1.json"),
-                metadata: crate::sqlite_storage::ResourceMetadata {
-                    id: "patient-1".to_string(),
-                    name: Some("Patient One".to_string()),
-                    version: Some("1.0.0".to_string()),
-                    status: Some("active".to_string()),
-                    date: None,
-                    publisher: Some("HL7".to_string()),
-                },
+                id: Some("patient-1".to_string()),
+                name: Some("Patient One".to_string()),
+                version: Some("1.0.0".to_string()),
+                sd_kind: None,
+                sd_derivation: None,
+                sd_type: None,
+                sd_base_definition: None,
+                sd_abstract: None,
+                sd_impose_profiles: None,
+                sd_characteristics: None,
+                sd_flavor: None,
             },
             ResourceIndex {
                 canonical_url: "http://example.com/Observation/1".to_string(),
@@ -1587,14 +1586,17 @@ mod tests {
                 package_version: "2.0.0".to_string(),
                 fhir_version: "4.0.1".to_string(),
                 file_path: std::path::PathBuf::from("/test/Observation1.json"),
-                metadata: crate::sqlite_storage::ResourceMetadata {
-                    id: "obs-1".to_string(),
-                    name: Some("Observation One".to_string()),
-                    version: Some("1.0.0".to_string()),
-                    status: Some("final".to_string()),
-                    date: None,
-                    publisher: Some("Custom".to_string()),
-                },
+                id: Some("obs-1".to_string()),
+                name: Some("Observation One".to_string()),
+                version: Some("1.0.0".to_string()),
+                sd_kind: None,
+                sd_derivation: None,
+                sd_type: None,
+                sd_base_definition: None,
+                sd_abstract: None,
+                sd_impose_profiles: None,
+                sd_characteristics: None,
+                sd_flavor: None,
             },
         ];
 

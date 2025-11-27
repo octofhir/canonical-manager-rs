@@ -364,10 +364,9 @@ impl CanonicalResolver {
             return Ok(None);
         }
 
-        // Try exact metadata.version match
+        // Try exact version match
         if let Some(exact) = candidates.iter().find(|ri| {
-            ri.metadata
-                .version
+            ri.version
                 .as_ref()
                 .map(|v| v == &desired.original)
                 .unwrap_or(false)
@@ -384,8 +383,8 @@ impl CanonicalResolver {
             let req =
                 semver::VersionReq::parse(&format!("^{want}")).unwrap_or(semver::VersionReq::STAR);
             candidates.sort_by(|a, b| {
-                let va = a.metadata.version.as_deref().unwrap_or("");
-                let vb = b.metadata.version.as_deref().unwrap_or("");
+                let va = a.version.as_deref().unwrap_or("");
+                let vb = b.version.as_deref().unwrap_or("");
                 match (
                     semver::Version::parse(va.trim_start_matches('v')),
                     semver::Version::parse(vb.trim_start_matches('v')),
@@ -395,7 +394,7 @@ impl CanonicalResolver {
                 }
             });
             for ri in candidates {
-                if let Some(vs) = ri.metadata.version.as_deref()
+                if let Some(vs) = ri.version.as_deref()
                     && let Ok(v) = semver::Version::parse(vs.trim_start_matches('v'))
                     && req.matches(&v)
                 {
@@ -459,13 +458,13 @@ impl CanonicalResolver {
                 .await;
         }
 
-        // Try to find resource with specific version in metadata
+        // Try to find resource with specific version
         let resources_by_type = self.get_resources_by_base_url(canonical_url).await?;
         for resource_index in resources_by_type {
-            if let Some(resource_version) = &resource_index.metadata.version
+            if let Some(resource_version) = &resource_index.version
                 && resource_version == version
             {
-                debug!("Found resource with matching version in metadata");
+                debug!("Found resource with matching version");
                 return self
                     .build_resolved_resource(
                         canonical_url,
@@ -863,12 +862,22 @@ impl CanonicalResolver {
                 ),
             })?;
 
+        // Build legacy ResourceMetadata from new ResourceIndex fields
+        let metadata = ResourceMetadata {
+            id: resource_index.id.clone().unwrap_or_default(),
+            name: resource_index.name.clone(),
+            version: resource_index.version.clone(),
+            status: None,    // Not stored in new schema - get from content if needed
+            date: None,      // Not stored in new schema
+            publisher: None, // Not stored in new schema
+        };
+
         Ok(ResolvedResource {
             canonical_url: requested_url.to_string(),
             resource,
             package_info,
             resolution_path,
-            metadata: resource_index.metadata,
+            metadata,
         })
     }
 }

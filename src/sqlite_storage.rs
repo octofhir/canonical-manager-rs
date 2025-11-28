@@ -933,6 +933,26 @@ impl SqliteStorage {
         .await
     }
 
+    /// List all base FHIR resource type names (e.g., "Patient", "Observation")
+    /// These are StructureDefinitions with sd_flavor = 'Resource'
+    pub async fn list_base_resource_type_names(&self, fhir_version: &str) -> Result<Vec<String>> {
+        let version = fhir_version.to_string();
+        self.with_connection(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT DISTINCT name FROM resources
+                 WHERE resource_type = 'StructureDefinition'
+                   AND sd_flavor = 'Resource'
+                   AND fhir_version = ?1
+                   AND name IS NOT NULL",
+            )?;
+            let names = stmt
+                .query_map(rusqlite::params![version], |row| row.get(0))?
+                .collect::<rusqlite::Result<Vec<String>>>()?;
+            Ok(names)
+        })
+        .await
+    }
+
     pub async fn list_packages(&self) -> Result<Vec<PackageInfo>> {
         self.with_connection(move |conn| {
             let mut stmt = conn.prepare(

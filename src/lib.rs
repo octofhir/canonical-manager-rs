@@ -1283,6 +1283,15 @@ impl CanonicalManager {
             .await
     }
 
+    /// List all base FHIR resource type names for a given FHIR version
+    /// Returns names like "Patient", "Observation", "Condition", etc.
+    pub async fn list_base_resource_type_names(&self, fhir_version: &str) -> Result<Vec<String>> {
+        self.storage
+            .package_storage()
+            .list_base_resource_type_names(fhir_version)
+            .await
+    }
+
     /// Get direct access to the search engine
     pub fn search_engine(&self) -> &search::SearchEngine {
         &self.search_engine

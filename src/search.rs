@@ -1,9 +1,10 @@
 //! Search engine for FHIR resources
 
 use crate::concurrency::ConcurrentMap;
+use crate::domain::ResourceIndex;
 use crate::error::Result;
 use crate::package::FhirResource;
-use crate::sqlite_storage::{ResourceIndex, SqliteStorage};
+use crate::traits::SearchStorage;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -49,7 +50,7 @@ use tracing::{debug, info};
 /// # }
 /// ```
 pub struct SearchEngine {
-    storage: Arc<SqliteStorage>,
+    storage: Arc<dyn SearchStorage + Send + Sync>,
     text_index: TextIndex,
     filters: FilterEngine,
     // Simple LRU-style cache for search results
@@ -159,7 +160,7 @@ pub struct SearchFacets {
 /// # }
 /// ```
 pub struct SearchQueryBuilder {
-    storage: Arc<SqliteStorage>,
+    storage: Arc<dyn SearchStorage + Send + Sync>,
     query: SearchQuery,
 }
 
@@ -523,7 +524,7 @@ impl FilterEngine {
     ///
     /// ```rust,no_run
     /// use octofhir_canonical_manager::search::{FilterEngine, SearchQuery};
-    /// use octofhir_canonical_manager::sqlite_storage::ResourceIndex;
+    /// use octofhir_canonical_manager::domain::ResourceIndex;
     ///
     /// # fn example(resources: Vec<ResourceIndex>) {
     /// let filter_engine = FilterEngine::new();
@@ -633,7 +634,7 @@ impl SearchEngine {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn new(storage: Arc<SqliteStorage>) -> Self {
+    pub fn new(storage: Arc<dyn SearchStorage + Send + Sync>) -> Self {
         Self {
             storage,
             text_index: TextIndex::new(),
@@ -1252,7 +1253,7 @@ impl SearchQueryBuilder {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn new(storage: Arc<SqliteStorage>) -> Self {
+    pub fn new(storage: Arc<dyn SearchStorage + Send + Sync>) -> Self {
         Self {
             storage,
             query: SearchQuery::default(),
@@ -1456,6 +1457,7 @@ impl SearchQueryBuilder {
 mod tests {
     use super::*;
     use crate::config::StorageConfig;
+    use crate::sqlite_storage::SqliteStorage;
     use tempfile::TempDir;
 
     #[tokio::test]

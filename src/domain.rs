@@ -1,6 +1,8 @@
-//! Domain types: canonical URLs and versions
+//! Domain types: canonical URLs, versions, and storage-agnostic data structures
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 /// Normalized canonical URL newtype.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -122,4 +124,62 @@ impl FhirVersion {
             other => FhirVersion::Other(other.to_string()),
         }
     }
+}
+
+// ============================================================================
+// Storage-Agnostic Data Structures
+// ============================================================================
+// These structures are decoupled from any specific storage implementation
+// (SQLite, PostgreSQL, etc.) and can be used across different storage backends.
+
+/// SD flavors (StructureDefinition subtypes) - same as fhir-package-loader
+pub const SD_FLAVORS: &[&str] = &["Extension", "Profile", "Type", "Resource", "Logical"];
+
+/// Resource index returned from queries - extended with SD-specific fields.
+///
+/// This structure is storage-agnostic and can be used with any storage backend.
+/// It contains all metadata needed to identify and locate a FHIR resource.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceIndex {
+    pub canonical_url: String,
+    pub resource_type: String,
+    pub package_name: String,
+    pub package_version: String,
+    pub fhir_version: String,
+    pub file_path: PathBuf,
+    // Core metadata
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub version: Option<String>,
+    // StructureDefinition specific fields (following fhir-package-loader)
+    pub sd_kind: Option<String>,
+    pub sd_derivation: Option<String>,
+    pub sd_type: Option<String>,
+    pub sd_base_definition: Option<String>,
+    pub sd_abstract: Option<bool>,
+    pub sd_impose_profiles: Option<Vec<String>>,
+    pub sd_characteristics: Option<Vec<String>>,
+    pub sd_flavor: Option<String>,
+}
+
+/// Legacy metadata struct for backward compatibility during migration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceMetadata {
+    pub id: String,
+    pub name: Option<String>,
+    pub version: Option<String>,
+    pub status: Option<String>,
+    pub date: Option<String>,
+    pub publisher: Option<String>,
+}
+
+/// Package information returned from storage queries.
+///
+/// This structure is storage-agnostic and represents installed package metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackageInfo {
+    pub name: String,
+    pub version: String,
+    pub installed_at: DateTime<Utc>,
+    pub resource_count: usize,
 }

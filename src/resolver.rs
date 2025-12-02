@@ -1,9 +1,9 @@
 //! Canonical URL resolution
 
-use crate::domain::{CanonicalWithVersion, PackageVersion};
+use crate::domain::{CanonicalWithVersion, PackageInfo, PackageVersion, ResourceMetadata};
 use crate::error::{ResolutionError, Result};
 use crate::package::FhirResource;
-use crate::sqlite_storage::{PackageInfo, ResourceMetadata, SqliteStorage};
+use crate::traits::SearchStorage;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -41,7 +41,7 @@ use url::Url;
 /// # }
 /// ```
 pub struct CanonicalResolver {
-    storage: Arc<SqliteStorage>,
+    storage: Arc<dyn SearchStorage + Send + Sync>,
     resolution_config: ResolutionConfig,
     #[cfg(feature = "fuzzy-search")]
     fuzzy_index: crate::fuzzy::NGramIndex,
@@ -177,7 +177,7 @@ impl CanonicalResolver {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn new(storage: Arc<SqliteStorage>) -> Self {
+    pub async fn new(storage: Arc<dyn SearchStorage + Send + Sync>) -> Self {
         #[cfg(feature = "fuzzy-search")]
         let fuzzy_index = {
             let urls: Vec<String> = storage.get_cache_entries().await.keys().cloned().collect();
@@ -226,7 +226,10 @@ impl CanonicalResolver {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn with_config(storage: Arc<SqliteStorage>, config: ResolutionConfig) -> Self {
+    pub async fn with_config(
+        storage: Arc<dyn SearchStorage + Send + Sync>,
+        config: ResolutionConfig,
+    ) -> Self {
         #[cfg(feature = "fuzzy-search")]
         let fuzzy_index = {
             let urls: Vec<String> = storage.get_cache_entries().await.keys().cloned().collect();
@@ -357,7 +360,7 @@ impl CanonicalResolver {
         &self,
         base_canonical: &str,
         desired: &PackageVersion,
-    ) -> Result<Option<crate::sqlite_storage::ResourceIndex>> {
+    ) -> Result<Option<crate::domain::ResourceIndex>> {
         // Collect candidates under the same base
         let mut candidates = self.storage.find_by_base_url(base_canonical).await?;
         if candidates.is_empty() {
@@ -733,7 +736,7 @@ impl CanonicalResolver {
     async fn get_resources_by_base_url(
         &self,
         base_url: &str,
-    ) -> Result<Vec<crate::sqlite_storage::ResourceIndex>> {
+    ) -> Result<Vec<crate::domain::ResourceIndex>> {
         // Use storage pre-index for base URL lookups
         self.storage.find_by_base_url(base_url).await
     }
@@ -742,7 +745,7 @@ impl CanonicalResolver {
     async fn fuzzy_match(
         &self,
         canonical_url: &str,
-    ) -> Result<Option<(crate::sqlite_storage::ResourceIndex, f64)>> {
+    ) -> Result<Option<(crate::domain::ResourceIndex, f64)>> {
         #[cfg(feature = "fuzzy-search")]
         {
             let max_candidates = self.resolution_config.fuzzy_max_candidates;
@@ -753,7 +756,7 @@ impl CanonicalResolver {
                 .map(|(u, _)| u)
                 .collect::<Vec<_>>();
             let cache = self.storage.get_cache_entries().await;
-            let mut best: Option<(crate::sqlite_storage::ResourceIndex, f64)> = None;
+            let mut best: Option<(crate::domain::ResourceIndex, f64)> = None;
             for u in candidates {
                 if let Some(idx) = cache.get(&u) {
                     let sim = self.calculate_similarity(canonical_url, &u);
@@ -822,8 +825,8 @@ impl CanonicalResolver {
         for (i, item) in matrix.iter_mut().enumerate().take(len1 + 1) {
             item[0] = i;
         }
-        for j in 0..=len2 {
-            matrix[0][j] = j;
+        for (j, item) in matrix[0].iter_mut().enumerate().take(len2 + 1) {
+            *item = j;
         }
 
         for i in 1..=len1 {
@@ -842,7 +845,7 @@ impl CanonicalResolver {
     async fn build_resolved_resource(
         &self,
         requested_url: &str,
-        resource_index: crate::sqlite_storage::ResourceIndex,
+        resource_index: crate::domain::ResourceIndex,
         resolution_path: ResolutionPath,
     ) -> Result<ResolvedResource> {
         // Get the full resource content
@@ -886,6 +889,7 @@ impl CanonicalResolver {
 mod tests {
     use super::*;
     use crate::config::StorageConfig;
+    use crate::sqlite_storage::SqliteStorage;
     use tempfile::TempDir;
 
     #[tokio::test]

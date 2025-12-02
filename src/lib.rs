@@ -73,7 +73,10 @@ pub mod cli_error;
 
 // Public facade: configs, domain, resolver/search entrypoints, storage stats, and top-level errors
 pub use config::{FcmConfig, OptimizationConfig, PackageSpec, RegistryConfig, StorageConfig};
-pub use domain::{CanonicalUrl, CanonicalWithVersion, FhirVersion, PackageVersion};
+pub use domain::{
+    CanonicalUrl, CanonicalWithVersion, FhirVersion, PackageInfo, PackageVersion, ResourceIndex,
+    ResourceMetadata,
+};
 pub use error::{FcmError, Result};
 pub use resolver::CanonicalResolver;
 pub use search::SearchEngine;
@@ -93,7 +96,6 @@ use crate::performance::{
     PackageOperationType, PerformanceAnalysis, PerformanceConfig, PerformanceMetrics,
     PerformanceMonitor,
 };
-use crate::sqlite_storage::PackageInfo;
 use crate::unified_storage::UnifiedStorage;
 
 #[cfg(feature = "cli")]
@@ -289,11 +291,11 @@ impl CanonicalManager {
             registry::RegistryClient::new(&config.registry, expanded_storage.cache_dir.clone())
                 .await?;
 
-        // Initialize resolver with unified storage
-        let resolver = CanonicalResolver::new(Arc::clone(storage.package_storage())).await;
+        // Initialize resolver with unified storage (using trait object)
+        let resolver = CanonicalResolver::new(storage.search_storage()).await;
 
-        // Initialize search engine with unified storage
-        let search_engine = SearchEngine::new(Arc::clone(storage.package_storage()));
+        // Initialize search engine with unified storage (using trait object)
+        let search_engine = SearchEngine::new(storage.search_storage());
 
         // Initialize optimization components based on config
         let change_detector = Arc::new(PackageChangeDetector::new());
@@ -327,13 +329,13 @@ impl CanonicalManager {
         Self::new(config).await
     }
 
-    /// Advanced constructor using trait-based components. Caller must provide a SqliteStorage-backed
-    /// search storage for resolver/search.
+    /// Advanced constructor using trait-based components. Caller can provide any SearchStorage
+    /// implementation (SqliteStorage, PostgresPackageStore, etc.) for resolver/search.
     pub async fn new_with_components(
         config: FcmConfig,
         package_store: Arc<dyn crate::traits::PackageStore + Send + Sync>,
         registry: Arc<dyn crate::traits::AsyncRegistry + Send + Sync>,
-        search_storage: Arc<crate::sqlite_storage::SqliteStorage>,
+        search_storage: Arc<dyn crate::traits::SearchStorage + Send + Sync>,
     ) -> Result<Self> {
         // Reuse config optimization/validation
         let skip_optimization =
@@ -352,8 +354,11 @@ impl CanonicalManager {
             ));
         }
 
-        // Build a minimal UnifiedStorage for compatibility where needed (index store may still be used separately)
-        let storage = Arc::new(UnifiedStorage::new(config.storage.clone()).await?);
+        // Build UnifiedStorage using the provided custom storage backends
+        let storage = Arc::new(UnifiedStorage::new_with_custom_storage(
+            Arc::clone(&package_store),
+            Arc::clone(&search_storage),
+        ));
 
         // Resolver/Search backed by provided search_storage (SqliteStorage)
         let resolver = CanonicalResolver::new(Arc::clone(&search_storage)).await;
@@ -1254,7 +1259,7 @@ impl CanonicalManager {
 
     /// Search for FHIR resources
     pub async fn search(&self) -> search::SearchQueryBuilder {
-        search::SearchQueryBuilder::new(Arc::clone(self.storage.package_storage()))
+        search::SearchQueryBuilder::new(self.storage.search_storage())
     }
 
     /// Find resource by exact resource type and ID match (fast path, no text search)
@@ -1263,9 +1268,9 @@ impl CanonicalManager {
         &self,
         resource_type: &str,
         id: &str,
-    ) -> Result<Vec<sqlite_storage::ResourceIndex>> {
+    ) -> Result<Vec<ResourceIndex>> {
         self.storage
-            .package_storage()
+            .search_storage()
             .find_by_type_and_id(resource_type.to_string(), id.to_string())
             .await
     }
@@ -1276,9 +1281,9 @@ impl CanonicalManager {
         &self,
         resource_type: &str,
         name: &str,
-    ) -> Result<Vec<sqlite_storage::ResourceIndex>> {
+    ) -> Result<Vec<ResourceIndex>> {
         self.storage
-            .package_storage()
+            .search_storage()
             .find_by_type_and_name(resource_type.to_string(), name.to_string())
             .await
     }
@@ -1287,7 +1292,7 @@ impl CanonicalManager {
     /// Returns names like "Patient", "Observation", "Condition", etc.
     pub async fn list_base_resource_type_names(&self, fhir_version: &str) -> Result<Vec<String>> {
         self.storage
-            .package_storage()
+            .search_storage()
             .list_base_resource_type_names(fhir_version)
             .await
     }

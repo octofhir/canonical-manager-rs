@@ -6,6 +6,7 @@
 use crate::cas_storage::{CasStorage, ContentType};
 use crate::config::StorageConfig;
 use crate::content_hash::ContentHash;
+use crate::domain::{PackageInfo, ResourceIndex, SD_FLAVORS};
 use crate::error::{FcmError, Result, StorageError};
 use crate::package::{ExtractedPackage, FhirResource};
 use chrono::{DateTime, Utc};
@@ -19,52 +20,6 @@ use tracing::{debug, info, warn};
 
 // Reset to version 1 - following fhir-package-loader schema pattern
 const SCHEMA_VERSION: i32 = 1;
-
-/// SD flavors (StructureDefinition subtypes) - same as fhir-package-loader
-pub const SD_FLAVORS: &[&str] = &["Extension", "Profile", "Type", "Resource", "Logical"];
-
-/// Resource index returned from queries - extended with SD-specific fields
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ResourceIndex {
-    pub canonical_url: String,
-    pub resource_type: String,
-    pub package_name: String,
-    pub package_version: String,
-    pub fhir_version: String,
-    pub file_path: PathBuf,
-    // Core metadata
-    pub id: Option<String>,
-    pub name: Option<String>,
-    pub version: Option<String>,
-    // StructureDefinition specific fields (following fhir-package-loader)
-    pub sd_kind: Option<String>,
-    pub sd_derivation: Option<String>,
-    pub sd_type: Option<String>,
-    pub sd_base_definition: Option<String>,
-    pub sd_abstract: Option<bool>,
-    pub sd_impose_profiles: Option<Vec<String>>,
-    pub sd_characteristics: Option<Vec<String>>,
-    pub sd_flavor: Option<String>,
-}
-
-/// Legacy metadata struct for backward compatibility during migration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ResourceMetadata {
-    pub id: String,
-    pub name: Option<String>,
-    pub version: Option<String>,
-    pub status: Option<String>,
-    pub date: Option<String>,
-    pub publisher: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PackageInfo {
-    pub name: String,
-    pub version: String,
-    pub installed_at: DateTime<Utc>,
-    pub resource_count: usize,
-}
 
 pub struct SqliteStorage {
     pool: Pool,
@@ -1440,7 +1395,7 @@ fn extract_resource_index(row: &rusqlite::Row<'_>) -> rusqlite::Result<ResourceI
     })
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StorageStats {
     pub package_count: usize,
     pub resource_count: usize,
@@ -1452,4 +1407,104 @@ pub struct IntegrityReport {
     pub is_valid: bool,
     pub errors: Vec<String>,
     pub warnings: Vec<String>,
+}
+
+// Implement SearchStorage trait for SqliteStorage
+#[async_trait::async_trait]
+impl crate::traits::SearchStorage for SqliteStorage {
+    async fn find_resource(&self, canonical_url: &str) -> Result<Option<ResourceIndex>> {
+        SqliteStorage::find_resource(self, canonical_url).await
+    }
+
+    async fn find_resource_with_fhir_version(
+        &self,
+        canonical_url: &str,
+        fhir_version: &str,
+    ) -> Result<Option<ResourceIndex>> {
+        SqliteStorage::find_resource_with_fhir_version(self, canonical_url, fhir_version).await
+    }
+
+    async fn find_by_base_url(&self, base_url: &str) -> Result<Vec<ResourceIndex>> {
+        SqliteStorage::find_by_base_url(self, base_url).await
+    }
+
+    async fn find_latest_by_base_url(&self, base_url: &str) -> Result<Option<ResourceIndex>> {
+        SqliteStorage::find_latest_by_base_url(self, base_url).await
+    }
+
+    async fn find_resource_by_name(&self, name: &str) -> Result<Option<ResourceIndex>> {
+        SqliteStorage::find_resource_by_name(self, name).await
+    }
+
+    async fn find_by_type_and_id(
+        &self,
+        resource_type: String,
+        id: String,
+    ) -> Result<Vec<ResourceIndex>> {
+        SqliteStorage::find_by_type_and_id(self, resource_type, id).await
+    }
+
+    async fn find_by_type_and_name(
+        &self,
+        resource_type: String,
+        name: String,
+    ) -> Result<Vec<ResourceIndex>> {
+        SqliteStorage::find_by_type_and_name(self, resource_type, name).await
+    }
+
+    async fn find_resource_info(
+        &self,
+        key: &str,
+        types: Option<&[&str]>,
+        exclude_extensions: bool,
+        sort_by_priority: bool,
+    ) -> Result<Option<ResourceIndex>> {
+        SqliteStorage::find_resource_info(self, key, types, exclude_extensions, sort_by_priority)
+            .await
+    }
+
+    async fn find_resource_infos(
+        &self,
+        key: &str,
+        types: Option<&[&str]>,
+        limit: Option<usize>,
+    ) -> Result<Vec<ResourceIndex>> {
+        SqliteStorage::find_resource_infos(self, key, types, limit).await
+    }
+
+    async fn list_base_resource_type_names(&self, fhir_version: &str) -> Result<Vec<String>> {
+        SqliteStorage::list_base_resource_type_names(self, fhir_version).await
+    }
+
+    async fn get_resource(&self, resource_index: &ResourceIndex) -> Result<FhirResource> {
+        SqliteStorage::get_resource(self, resource_index).await
+    }
+
+    async fn get_cache_entries(&self) -> HashMap<String, ResourceIndex> {
+        SqliteStorage::get_cache_entries(self).await
+    }
+
+    async fn list_packages(&self) -> Result<Vec<PackageInfo>> {
+        SqliteStorage::list_packages(self).await
+    }
+}
+
+// Implement PackageStore trait for SqliteStorage
+#[async_trait::async_trait]
+impl crate::traits::PackageStore for SqliteStorage {
+    async fn add_package(&self, package: &crate::package::ExtractedPackage) -> Result<()> {
+        SqliteStorage::add_package(self, package.clone()).await
+    }
+
+    async fn remove_package(&self, name: &str, version: &str) -> Result<bool> {
+        SqliteStorage::remove_package(self, name, version).await
+    }
+
+    async fn find_resource(&self, canonical_url: &str) -> Result<Option<ResourceIndex>> {
+        SqliteStorage::find_resource(self, canonical_url).await
+    }
+
+    async fn list_packages(&self) -> Result<Vec<PackageInfo>> {
+        SqliteStorage::list_packages(self).await
+    }
 }

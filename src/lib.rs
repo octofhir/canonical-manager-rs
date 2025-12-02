@@ -3,15 +3,27 @@
 //! A library-first solution for managing FHIR Implementation Guide packages,
 //! providing fast canonical URL resolution and resource search capabilities.
 //!
-//! ## Quick Start
+//! ## Storage Backend
+//!
+//! By default, CanonicalManager uses **SQLite storage** for package and resource management.
+//! This provides:
+//! - Fast canonical URL lookups with B-tree indexes (O(1) average query time)
+//! - WAL mode for better concurrency and crash recovery
+//! - Single-query JOINs for efficient resolution
+//! - Atomic transactions for data consistency
+//!
+//! Advanced users can provide custom storage backends via the [`CanonicalManager::new_with_components`]
+//! method to integrate with PostgreSQL, custom databases, or other storage solutions.
+//!
+//! ## Quick Start (Simplest)
 //!
 //! ```rust,no_run
-//! use octofhir_canonical_manager::{CanonicalManager, FcmConfig};
+//! use octofhir_canonical_manager::CanonicalManager;
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     let config = FcmConfig::load().await?;
-//!     let manager = CanonicalManager::new(config).await?;
+//!     // Create manager with default configuration and SQLite storage
+//!     let manager = CanonicalManager::with_default_config().await?;
 //!
 //!     // Install a package
 //!     manager.install_package("hl7.fhir.us.core", "6.1.0").await?;
@@ -24,6 +36,27 @@
 //!     for param in search_params {
 //!         println!("{}: {} ({})", param.code, param.name, param.type_field);
 //!     }
+//!
+//!     Ok(())
+//! }
+//! ```
+//!
+//! ## Quick Start (With Custom Configuration)
+//!
+//! ```rust,no_run
+//! use octofhir_canonical_manager::{CanonicalManager, FcmConfig};
+//!
+//! #[tokio::main]
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     // Load or create custom configuration
+//!     let config = FcmConfig::load().await?;
+//!     let manager = CanonicalManager::new(config).await?;
+//!
+//!     // Install a package
+//!     manager.install_package("hl7.fhir.us.core", "6.1.0").await?;
+//!
+//!     // Resolve a canonical URL
+//!     let resource = manager.resolve("http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient").await?;
 //!
 //!     Ok(())
 //! }
@@ -240,6 +273,9 @@ impl std::fmt::Debug for CanonicalManager {
 
 impl CanonicalManager {
     /// Create a new CanonicalManager with the given configuration
+    ///
+    /// This method uses **SQLite storage** by default for package and resource management.
+    /// For custom storage backends, use [`CanonicalManager::new_with_components`].
     pub async fn new(mut config: FcmConfig) -> Result<Self> {
         // Add early timeout check for CI/test environments to avoid hanging
         if std::env::var("CI").is_ok() || std::env::var("FHIRPATH_QUICK_INIT").is_ok() {
@@ -327,6 +363,35 @@ impl CanonicalManager {
     /// Simple alias for end-user clarity
     pub async fn new_simple(config: FcmConfig) -> Result<Self> {
         Self::new(config).await
+    }
+
+    /// Create a new CanonicalManager with default configuration and SQLite storage
+    ///
+    /// This is a convenience method for users who want to get started quickly without
+    /// needing to configure anything. It uses:
+    /// - Default registry URL (<https://fs.get-ig.org/pkgs/>)
+    /// - Default storage paths (~/.maki/cache, ~/.maki/packages, ~/.maki/index)
+    /// - SQLite storage backend
+    ///
+    /// For custom configuration or custom storage backends, use [`CanonicalManager::new`]
+    /// or [`CanonicalManager::new_with_components`].
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use octofhir_canonical_manager::CanonicalManager;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// // Create a manager with default configuration
+    /// let manager = CanonicalManager::with_default_config().await?;
+    ///
+    /// // Now you can use it immediately
+    /// manager.install_package("hl7.fhir.r4.core", "4.0.1").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn with_default_config() -> Result<Self> {
+        Self::new(FcmConfig::default()).await
     }
 
     /// Advanced constructor using trait-based components. Caller can provide any SearchStorage

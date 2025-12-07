@@ -12,13 +12,45 @@ A library-first solution for managing FHIR Implementation Guide packages, provid
 - 🔍 **Fast Resolution**: Lightning-fast canonical URL resolution with SQLite B-tree indexes (~7ms average)
 - 🔎 **Advanced Search**: Query FHIR resources by type, package, and other criteria
 - 🔧 **Search Parameters**: Retrieve FHIR SearchParameter definitions by resource type
-- 🗄️ **SQLite Backend**: Industry-standard SQLite with WAL mode for reliability and performance
-- 🏗️ **Library First**: Clean API for embedding in your applications
+- 🗄️ **Flexible Storage**: SQLite backend (optional) or bring your own storage implementation
+- 🏗️ **Library First**: Clean trait-based API for embedding in your applications
 - 🖥️ **CLI Tool**: Optional command-line interface for interactive use
 - 🌐 **Registry Support**: Compatible with standard FHIR package registries
 - ⚡ **Async/Await**: Built with modern async Rust for performance
 - 🔄 **Multi-Version**: Support multiple FHIR versions simultaneously
 - 📁 **Local Packages**: Load packages from local directories
+
+## Cargo Features
+
+This crate supports several optional features:
+
+- **`sqlite`** (included in default): Enables SQLite storage backend
+  - Provides `SqliteStorage` implementation
+  - Required for `CanonicalManager::new()` and `UnifiedStorage::new()`
+  - If disabled, you must provide your own storage via trait implementations
+
+- **`cli`** (included in default): Enables the command-line interface
+  - Automatically enables the `sqlite` feature
+  - Provides the `octofhir-fcm` binary
+
+- **`fuzzy-search`**: Enables fuzzy matching for canonical URL resolution
+- **`metrics`**: Enables performance metrics collection
+
+### Default Features
+
+By default, both `sqlite` and `cli` features are enabled. To use the library without SQLite:
+
+```toml
+[dependencies]
+octofhir-canonical-manager = { version = "0.1", default-features = false }
+```
+
+To use with only the SQLite storage (no CLI):
+
+```toml
+[dependencies]
+octofhir-canonical-manager = { version = "0.1", default-features = false, features = ["sqlite"] }
+```
 
 ## Quick Start
 
@@ -65,6 +97,66 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let search_params = manager.get_search_parameters("Patient").await?;
     println!("Found {} search parameters for Patient", search_params.len());
     
+    Ok(())
+}
+```
+
+### Custom Storage Backend
+
+If you want to use a different storage backend (PostgreSQL, MongoDB, etc.), you can implement the `PackageStore` and `SearchStorage` traits:
+
+```rust
+use octofhir_canonical_manager::{
+    CanonicalManager, FcmConfig,
+    PackageStore, SearchStorage,
+};
+use std::sync::Arc;
+
+// Implement the PackageStore trait for your storage
+struct MyPostgresStorage {
+    // Your storage fields
+}
+
+#[async_trait::async_trait]
+impl PackageStore for MyPostgresStorage {
+    // Implement required methods
+    async fn add_package(&self, package: &ExtractedPackage) -> Result<()> {
+        // Your implementation
+    }
+
+    async fn remove_package(&self, name: &str, version: &str) -> Result<bool> {
+        // Your implementation
+    }
+
+    async fn find_resource(&self, canonical_url: &str) -> Result<Option<ResourceIndex>> {
+        // Your implementation
+    }
+
+    async fn list_packages(&self) -> Result<Vec<PackageInfo>> {
+        // Your implementation
+    }
+}
+
+#[async_trait::async_trait]
+impl SearchStorage for MyPostgresStorage {
+    // Implement required methods
+    // See trait definition for all required methods
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let config = FcmConfig::default();
+    let storage = Arc::new(MyPostgresStorage::new());
+    let registry = Arc::new(MyCustomRegistry::new());
+
+    let manager = CanonicalManager::new_with_components(
+        config,
+        storage.clone(),  // PackageStore
+        registry,          // AsyncRegistry
+        storage,           // SearchStorage
+    ).await?;
+
+    // Use manager as normal
     Ok(())
 }
 ```

@@ -1,6 +1,6 @@
 [package]
 name = "octofhir-canonical-manager"
-version = "0.1.16"
+version = "0.1.17"
 edition = "2024"
 description = "FHIR Canonical Manager - Library-first FHIR package management"
 license = "MIT OR Apache-2.0"
@@ -17,6 +17,7 @@ path = "src/lib.rs"
 [[bin]]
 name = "octofhir-fcm"
 path = "src/bin/main.rs"
+required-features = ["sqlite"]
 
 [[example]]
 name = "search_parameters"
@@ -78,9 +79,9 @@ dirs = "6"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# SQLite database - async-first for tokio runtime
-deadpool-sqlite = { version = "0.12.1", features = ["rt_tokio_1"] }
-rusqlite = { version = "0.37", features = ["bundled"] }
+# SQLite database - async-first for tokio runtime (optional)
+deadpool-sqlite = { version = "0.12.1", features = ["rt_tokio_1"], optional = true }
+rusqlite = { version = "0.37", features = ["bundled"], optional = true }
 
 # Performance optimization dependencies
 blake3 = "1.5"
@@ -114,7 +115,8 @@ predicates = "3.0"
 
 [features]
 default = ["cli"]
-cli = ["clap", "colored"]
+sqlite = ["deadpool-sqlite", "rusqlite"]
+cli = ["sqlite", "clap", "colored"]
 fuzzy-search = []
 metrics = ["dep:metrics"]
 test-utils = []

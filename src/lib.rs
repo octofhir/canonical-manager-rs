@@ -3,19 +3,39 @@
 //! A library-first solution for managing FHIR Implementation Guide packages,
 //! providing fast canonical URL resolution and resource search capabilities.
 //!
+//! ## Features
+//!
+//! This crate supports several optional features:
+//!
+//! - **`sqlite`** (enabled by default): Enables SQLite storage backend
+//!   - Provides [`SqliteStorage`] implementation
+//!   - Required for [`CanonicalManager::new`] and [`unified_storage::UnifiedStorage::new`]
+//! - **`cli`** (enabled by default): Enables the command-line interface
+//!   - Automatically enables the `sqlite` feature
+//! - **`fuzzy-search`**: Enables fuzzy matching for canonical URL resolution
+//! - **`metrics`**: Enables performance metrics collection
+//!
 //! ## Storage Backend
 //!
-//! By default, CanonicalManager uses **SQLite storage** for package and resource management.
-//! This provides:
+//! ### With SQLite (default)
+//!
+//! When the `sqlite` feature is enabled, CanonicalManager uses **SQLite storage** for package and resource management:
 //! - Fast canonical URL lookups with B-tree indexes (O(1) average query time)
 //! - WAL mode for better concurrency and crash recovery
 //! - Single-query JOINs for efficient resolution
 //! - Atomic transactions for data consistency
 //!
-//! Advanced users can provide custom storage backends via the [`CanonicalManager::new_with_components`]
-//! method to integrate with PostgreSQL, custom databases, or other storage solutions.
+//! ### With Custom Storage
 //!
-//! ## Quick Start (Simplest)
+//! You can provide custom storage backends by implementing the [`traits::PackageStore`] and
+//! [`traits::SearchStorage`] traits. This is useful when integrating with FHIR servers or
+//! applications that use different storage backends (PostgreSQL, MongoDB, etc.).
+//!
+//! Use [`CanonicalManager::new_with_components`] to provide your custom storage implementation.
+//!
+//! ## Quick Start (With SQLite - default)
+//!
+//! **Requires the `sqlite` feature (enabled by default).**
 //!
 //! ```rust,no_run
 //! use octofhir_canonical_manager::CanonicalManager;
@@ -41,22 +61,31 @@
 //! }
 //! ```
 //!
-//! ## Quick Start (With Custom Configuration)
+//! ## Quick Start (With Custom Storage)
 //!
-//! ```rust,no_run
-//! use octofhir_canonical_manager::{CanonicalManager, FcmConfig};
+//! **Available without the `sqlite` feature.**
+//!
+//! ```rust,ignore
+//! use octofhir_canonical_manager::{CanonicalManager, FcmConfig, PackageStore, SearchStorage};
+//! use std::sync::Arc;
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     // Load or create custom configuration
-//!     let config = FcmConfig::load().await?;
-//!     let manager = CanonicalManager::new(config).await?;
+//!     // Create your custom storage implementations
+//!     let package_store = Arc::new(MyPostgresPackageStore::new());
+//!     let search_storage = Arc::new(MyPostgresSearchStorage::new());
+//!     let registry = Arc::new(MyCustomRegistry::new());
 //!
-//!     // Install a package
+//!     let config = FcmConfig::default();
+//!     let manager = CanonicalManager::new_with_components(
+//!         config,
+//!         package_store,
+//!         registry,
+//!         search_storage,
+//!     ).await?;
+//!
+//!     // Use manager as normal
 //!     manager.install_package("hl7.fhir.us.core", "6.1.0").await?;
-//!
-//!     // Resolve a canonical URL
-//!     let resource = manager.resolve("http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient").await?;
 //!
 //!     Ok(())
 //! }
@@ -77,7 +106,7 @@ pub mod error;
 #[cfg(feature = "fuzzy-search")]
 #[doc(hidden)]
 pub mod fuzzy;
-#[doc(hidden)]
+#[cfg(feature = "cli")]
 #[doc(hidden)]
 pub mod output;
 #[doc(hidden)]
@@ -88,6 +117,7 @@ pub mod performance;
 pub mod registry;
 pub mod resolver;
 pub mod search;
+#[cfg(feature = "sqlite")]
 #[doc(hidden)]
 pub mod sqlite_storage;
 #[doc(hidden)]
@@ -113,7 +143,12 @@ pub use domain::{
 pub use error::{FcmError, Result};
 pub use resolver::CanonicalResolver;
 pub use search::SearchEngine;
+pub use traits::{PackageStore, SearchStorage};
 pub use unified_storage::{UnifiedIntegrityReport, UnifiedStorageStats};
+
+// Conditionally export SqliteStorage when sqlite feature is enabled
+#[cfg(feature = "sqlite")]
+pub use sqlite_storage::SqliteStorage;
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -274,8 +309,23 @@ impl std::fmt::Debug for CanonicalManager {
 impl CanonicalManager {
     /// Create a new CanonicalManager with the given configuration
     ///
+    /// **Requires the `sqlite` feature to be enabled.**
+    ///
     /// This method uses **SQLite storage** by default for package and resource management.
-    /// For custom storage backends, use [`CanonicalManager::new_with_components`].
+    /// For custom storage backends (without the sqlite feature), use [`CanonicalManager::new_with_components`].
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use octofhir_canonical_manager::{CanonicalManager, FcmConfig};
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let config = FcmConfig::default();
+    /// let manager = CanonicalManager::new(config).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(feature = "sqlite")]
     pub async fn new(mut config: FcmConfig) -> Result<Self> {
         // Add early timeout check for CI/test environments to avoid hanging
         if std::env::var("CI").is_ok() || std::env::var("FHIRPATH_QUICK_INIT").is_ok() {
@@ -361,11 +411,16 @@ impl CanonicalManager {
     }
 
     /// Simple alias for end-user clarity
+    ///
+    /// **Requires the `sqlite` feature to be enabled.**
+    #[cfg(feature = "sqlite")]
     pub async fn new_simple(config: FcmConfig) -> Result<Self> {
         Self::new(config).await
     }
 
     /// Create a new CanonicalManager with default configuration and SQLite storage
+    ///
+    /// **Requires the `sqlite` feature to be enabled.**
     ///
     /// This is a convenience method for users who want to get started quickly without
     /// needing to configure anything. It uses:
@@ -373,8 +428,8 @@ impl CanonicalManager {
     /// - Default storage paths (~/.maki/cache, ~/.maki/packages, ~/.maki/index)
     /// - SQLite storage backend
     ///
-    /// For custom configuration or custom storage backends, use [`CanonicalManager::new`]
-    /// or [`CanonicalManager::new_with_components`].
+    /// For custom configuration or custom storage backends (without sqlite feature),
+    /// use [`CanonicalManager::new_with_components`].
     ///
     /// # Example
     ///
@@ -390,12 +445,37 @@ impl CanonicalManager {
     /// # Ok(())
     /// # }
     /// ```
+    #[cfg(feature = "sqlite")]
     pub async fn with_default_config() -> Result<Self> {
         Self::new(FcmConfig::default()).await
     }
 
-    /// Advanced constructor using trait-based components. Caller can provide any SearchStorage
-    /// implementation (SqliteStorage, PostgresPackageStore, etc.) for resolver/search.
+    /// Advanced constructor using trait-based components
+    ///
+    /// **Available without any feature flags.**
+    ///
+    /// This method allows you to create a CanonicalManager with custom storage backends
+    /// that implement the [`crate::traits::PackageStore`] and [`crate::traits::SearchStorage`] traits.
+    /// This is useful when integrating with FHIR servers or applications that use different
+    /// storage backends (PostgreSQL, custom databases, etc.).
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// # use octofhir_canonical_manager::{CanonicalManager, FcmConfig};
+    /// # use std::sync::Arc;
+    /// // Assuming you have custom storage implementations
+    /// let package_store = Arc::new(MyPostgresPackageStore::new());
+    /// let registry = Arc::new(MyCustomRegistry::new());
+    /// let search_storage = Arc::new(MyPostgresSearchStorage::new());
+    ///
+    /// let manager = CanonicalManager::new_with_components(
+    ///     FcmConfig::default(),
+    ///     package_store,
+    ///     registry,
+    ///     search_storage,
+    /// ).await?;
+    /// ```
     pub async fn new_with_components(
         config: FcmConfig,
         package_store: Arc<dyn crate::traits::PackageStore + Send + Sync>,

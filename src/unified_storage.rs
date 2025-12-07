@@ -1,15 +1,38 @@
-//! Unified storage system using SQLite for package management
+//! Unified storage system supporting multiple backends
 //!
-//! This module provides a simplified interface that wraps SqliteStorage.
-//! SQLite's built-in B-tree indexes eliminate the need for a separate index storage.
+//! This module provides a trait-based storage interface that can work with
+//! different storage backends (SQLite, PostgreSQL, etc.).
+//!
+//! When the `sqlite` feature is enabled, a convenience `new()` method is available
+//! that creates a SQLite-backed storage. Otherwise, use `new_with_custom_storage()`
+//! to provide your own storage implementation.
 
-use crate::config::StorageConfig;
 use crate::domain::{PackageInfo, ResourceIndex};
 use crate::error::Result;
 use crate::package::ExtractedPackage;
-use crate::sqlite_storage::{IntegrityReport, SqliteStorage, StorageStats};
 use std::sync::Arc;
 use tracing::info;
+
+#[cfg(feature = "sqlite")]
+use crate::config::StorageConfig;
+#[cfg(feature = "sqlite")]
+use crate::sqlite_storage::SqliteStorage;
+
+/// Storage statistics
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct StorageStats {
+    pub package_count: usize,
+    pub resource_count: usize,
+    pub storage_size_bytes: u64,
+}
+
+/// Integrity report for storage validation
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct IntegrityReport {
+    pub is_valid: bool,
+    pub errors: Vec<String>,
+    pub warnings: Vec<String>,
+}
 
 /// Unified storage system supporting multiple storage backends via traits
 pub struct UnifiedStorage {
@@ -25,7 +48,25 @@ impl UnifiedStorage {
         self.search_storage.clone()
     }
 
-    /// Create a new unified storage system with SQLite backend (for CLI usage)
+    /// Create a new unified storage system with SQLite backend
+    ///
+    /// **Requires the `sqlite` feature to be enabled.**
+    ///
+    /// This is a convenience method for CLI usage and simple applications.
+    /// For custom storage backends (PostgreSQL, etc.), use [`Self::new_with_custom_storage`].
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use octofhir_canonical_manager::unified_storage::UnifiedStorage;
+    /// # use octofhir_canonical_manager::config::StorageConfig;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let config = StorageConfig::default();
+    /// let storage = UnifiedStorage::new(config).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(feature = "sqlite")]
     pub async fn new(config: StorageConfig) -> Result<Self> {
         let sqlite_storage = Arc::new(SqliteStorage::new(config.clone()).await?);
         Ok(Self {
@@ -34,7 +75,28 @@ impl UnifiedStorage {
         })
     }
 
-    /// Create a new unified storage system with custom storage backends (for FHIR server)
+    /// Create a new unified storage system with custom storage backends
+    ///
+    /// **Available without any feature flags.**
+    ///
+    /// This method allows you to provide your own storage implementations
+    /// (PostgreSQL, custom databases, etc.) that implement the [`crate::traits::PackageStore`]
+    /// and [`crate::traits::SearchStorage`] traits.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// # use octofhir_canonical_manager::unified_storage::UnifiedStorage;
+    /// # use std::sync::Arc;
+    /// // Assuming you have custom storage implementations
+    /// let package_store = Arc::new(MyCustomPackageStore::new());
+    /// let search_storage = Arc::new(MyCustomSearchStorage::new());
+    ///
+    /// let storage = UnifiedStorage::new_with_custom_storage(
+    ///     package_store,
+    ///     search_storage,
+    /// );
+    /// ```
     pub fn new_with_custom_storage(
         package_store: Arc<dyn crate::traits::PackageStore + Send + Sync>,
         search_storage: Arc<dyn crate::traits::SearchStorage + Send + Sync>,

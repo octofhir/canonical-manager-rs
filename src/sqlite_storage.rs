@@ -306,10 +306,11 @@ impl SqliteStorage {
             .unwrap_or(false);
 
         if exists {
-            return Err(FcmError::Storage(StorageError::PackageAlreadyExists {
-                name: package_name,
-                version: package_version,
-            }));
+            info!(
+                "Package {}@{} already exists, skipping",
+                package_name, package_version
+            );
+            return Ok(());
         }
 
         let fhir_version = package

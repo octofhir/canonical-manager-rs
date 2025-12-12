@@ -782,13 +782,16 @@ impl SqliteStorage {
         let resource_id = resource_index.id.clone().unwrap_or_default();
         let resource_version = resource_index.version.clone();
         let file_path = resource_index.file_path.clone();
+        let package_name = resource_index.package_name.clone();
+        let package_version = resource_index.package_version.clone();
+        let fhir_version = resource_index.fhir_version.clone();
 
         let content_path: String = tokio::time::timeout(
             std::time::Duration::from_secs(30),
             self.with_connection(move |conn| {
                 conn.query_row(
-                    "SELECT content_path FROM resources WHERE url = ?1",
-                    rusqlite::params![canonical_url],
+                    "SELECT content_path FROM resources WHERE url = ?1 AND package_name = ?2 AND package_version = ?3 AND fhir_version = ?4",
+                    rusqlite::params![canonical_url, package_name, package_version, fhir_version],
                     |row| row.get(0),
                 )
             }),

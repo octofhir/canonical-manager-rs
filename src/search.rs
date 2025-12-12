@@ -651,17 +651,18 @@ impl SearchEngine {
         debug!("Building text index from storage");
         let cache_entries = self.storage.get_cache_entries().await;
 
-        for (canonical_url, resource_index) in cache_entries {
+        for resource_index in cache_entries {
+            let canonical_url = &resource_index.canonical_url;
             // Index the canonical URL itself
-            self.text_index.add_resource(&canonical_url, &canonical_url);
+            self.text_index.add_resource(canonical_url, canonical_url);
 
             // Index the resource type
             self.text_index
-                .add_resource(&canonical_url, &resource_index.resource_type);
+                .add_resource(canonical_url, &resource_index.resource_type);
 
             // Index the resource ID
             if let Some(id) = &resource_index.id {
-                self.text_index.add_resource(&canonical_url, id);
+                self.text_index.add_resource(canonical_url, id);
             }
 
             // Index package information
@@ -669,14 +670,14 @@ impl SearchEngine {
                 "{} {}",
                 resource_index.package_name, resource_index.package_version
             );
-            self.text_index.add_resource(&canonical_url, &package_text);
+            self.text_index.add_resource(canonical_url, &package_text);
 
             // Index name and version fields
             if let Some(name) = &resource_index.name {
-                self.text_index.add_resource(&canonical_url, name);
+                self.text_index.add_resource(canonical_url, name);
             }
             if let Some(version) = &resource_index.version {
-                self.text_index.add_resource(&canonical_url, version);
+                self.text_index.add_resource(canonical_url, version);
             }
 
             // Skip loading actual FHIR resource content during initialization for performance
@@ -910,19 +911,18 @@ impl SearchEngine {
 
             Ok(cache_entries
                 .into_iter()
-                .filter(|(url, _)| matching_urls.contains(url))
-                .map(|(_, resource_index)| resource_index)
+                .filter(|ri| matching_urls.contains(&ri.canonical_url))
                 .collect())
         } else {
             // No text search - prefilter by cheap criteria to reduce work
             let cache_entries = self.storage.get_cache_entries().await;
             if !query.resource_types.is_empty() {
                 Ok(cache_entries
-                    .into_values()
+                    .into_iter()
                     .filter(|ri| query.resource_types.contains(&ri.resource_type))
                     .collect())
             } else {
-                Ok(cache_entries.into_values().collect())
+                Ok(cache_entries)
             }
         }
     }
@@ -1122,7 +1122,7 @@ impl SearchEngine {
         // Suggest resource types
         let cache_entries = self.storage.get_cache_entries().await;
         let mut resource_types: Vec<String> = cache_entries
-            .values()
+            .iter()
             .map(|index| index.resource_type.clone())
             .filter(|rt| rt.to_lowercase().starts_with(&prefix_lower))
             .collect();
@@ -1132,7 +1132,7 @@ impl SearchEngine {
 
         // Suggest package names
         let mut package_names: Vec<String> = cache_entries
-            .values()
+            .iter()
             .map(|index| index.package_name.clone())
             .filter(|pn| pn.to_lowercase().starts_with(&prefix_lower))
             .collect();
@@ -1193,11 +1193,10 @@ impl SearchEngine {
             let matching_urls = self.text_index.search(text);
             cache_entries
                 .into_iter()
-                .filter(|(url, _)| matching_urls.contains(url))
-                .map(|(_, resource_index)| resource_index)
+                .filter(|ri| matching_urls.contains(&ri.canonical_url))
                 .collect()
         } else {
-            cache_entries.into_values().collect()
+            cache_entries
         };
 
         // Apply existing filters (except the ones we're faceting on)

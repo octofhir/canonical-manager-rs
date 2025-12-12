@@ -1,7 +1,6 @@
 use crate::domain::{PackageInfo, ResourceIndex};
 use crate::error::Result;
 use crate::package::FhirResource;
-use std::collections::HashMap;
 
 // Domain traits to decouple infrastructure from callers
 
@@ -78,6 +77,14 @@ pub trait SearchStorage: Send + Sync {
         name: String,
     ) -> Result<Vec<ResourceIndex>>;
 
+    /// Find all resources by resource type and package name
+    /// This queries the database directly without any caching
+    async fn find_by_type_and_package(
+        &self,
+        resource_type: &str,
+        package_name: &str,
+    ) -> Result<Vec<ResourceIndex>>;
+
     /// Find resource by key with type filtering and priority ordering
     async fn find_resource_info(
         &self,
@@ -102,7 +109,8 @@ pub trait SearchStorage: Send + Sync {
     async fn get_resource(&self, resource_index: &ResourceIndex) -> Result<FhirResource>;
 
     /// Get all cache entries (for building text index)
-    async fn get_cache_entries(&self) -> HashMap<String, ResourceIndex>;
+    /// Returns Vec to avoid deduplication when same URL exists in multiple packages
+    async fn get_cache_entries(&self) -> Vec<ResourceIndex>;
 
     /// List all installed packages
     async fn list_packages(&self) -> Result<Vec<PackageInfo>>;

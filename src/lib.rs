@@ -1442,6 +1442,19 @@ impl CanonicalManager {
             .await
     }
 
+    /// Find all resources by resource type and package name
+    /// This queries the database directly without any caching - fast and reliable
+    pub async fn find_by_type_and_package(
+        &self,
+        resource_type: &str,
+        package_name: &str,
+    ) -> Result<Vec<ResourceIndex>> {
+        self.storage
+            .search_storage()
+            .find_by_type_and_package(resource_type, package_name)
+            .await
+    }
+
     /// Get direct access to the search engine
     pub fn search_engine(&self) -> &search::SearchEngine {
         &self.search_engine

@@ -86,8 +86,16 @@ async fn test_add_package_to_storage() {
     // Verify resources are indexed
     let cache_entries = storage.get_cache_entries().await;
     assert_eq!(cache_entries.len(), 2); // 2 canonical URLs (no composite keys in SQLite implementation)
-    assert!(cache_entries.contains_key("http://example.com/StructureDefinition/test-patient"));
-    assert!(cache_entries.contains_key("http://example.com/ValueSet/test-codes"));
+    assert!(
+        cache_entries
+            .iter()
+            .any(|r| r.canonical_url == "http://example.com/StructureDefinition/test-patient")
+    );
+    assert!(
+        cache_entries
+            .iter()
+            .any(|r| r.canonical_url == "http://example.com/ValueSet/test-codes")
+    );
 }
 
 /// Test canonical URL lookup
@@ -184,7 +192,7 @@ async fn test_search_by_type() {
     // Search for StructureDefinition resources
     let cache_entries = storage.get_cache_entries().await;
     let structure_defs: Vec<_> = cache_entries
-        .values()
+        .iter()
         .filter(|entry| entry.resource_type == "StructureDefinition")
         .collect();
     assert_eq!(structure_defs.len(), 1); // Only canonical URL (no composite keys)
@@ -196,7 +204,7 @@ async fn test_search_by_type() {
 
     // Search for ValueSet resources
     let value_sets: Vec<_> = cache_entries
-        .values()
+        .iter()
         .filter(|entry| entry.resource_type == "ValueSet")
         .collect();
     assert_eq!(value_sets.len(), 1); // Only canonical URL (no composite keys)
@@ -208,7 +216,7 @@ async fn test_search_by_type() {
 
     // Search for non-existent type
     let missing_type: Vec<_> = cache_entries
-        .values()
+        .iter()
         .filter(|entry| entry.resource_type == "CodeSystem")
         .collect();
     assert_eq!(missing_type.len(), 0);

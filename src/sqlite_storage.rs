@@ -13,7 +13,6 @@ use chrono::{DateTime, Utc};
 use deadpool_sqlite::rusqlite::{self, OptionalExtension};
 use deadpool_sqlite::{Config as DeadpoolConfig, Pool, Runtime};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -889,6 +888,29 @@ impl SqliteStorage {
         .await
     }
 
+    /// Find all resources by resource type and package name
+    /// This queries the database directly without any caching
+    pub async fn find_by_type_and_package(
+        &self,
+        resource_type: &str,
+        package_name: &str,
+    ) -> Result<Vec<ResourceIndex>> {
+        let rt = resource_type.to_string();
+        let pkg = package_name.to_string();
+        self.with_connection(move |conn| {
+            let query = format!(
+                "{} WHERE r.resource_type = ?1 AND r.package_name = ?2",
+                Self::RESOURCE_SELECT
+            );
+            let mut stmt = conn.prepare(&query)?;
+            let resources = stmt
+                .query_map(rusqlite::params![rt, pkg], extract_resource_index)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(resources)
+        })
+        .await
+    }
+
     /// List all base FHIR resource type names (e.g., "Patient", "Observation")
     /// These are StructureDefinitions with sd_flavor = 'Resource'
     pub async fn list_base_resource_type_names(&self, fhir_version: &str) -> Result<Vec<String>> {
@@ -955,25 +977,22 @@ impl SqliteStorage {
         .await
     }
 
-    pub async fn get_cache_entries(&self) -> HashMap<String, ResourceIndex> {
+    pub async fn get_cache_entries(&self) -> Vec<ResourceIndex> {
         match self
             .with_connection(move |conn| {
                 let query = Self::RESOURCE_SELECT;
                 let mut stmt = conn.prepare(query)?;
                 let rows = stmt
-                    .query_map([], |row| {
-                        let value = extract_resource_index(row)?;
-                        Ok((value.canonical_url.clone(), value))
-                    })?
+                    .query_map([], extract_resource_index)?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
                 Ok(rows)
             })
             .await
         {
-            Ok(rows) => rows.into_iter().collect(),
+            Ok(rows) => rows,
             Err(e) => {
                 warn!("Failed to acquire snapshot of cache entries: {}", e);
-                HashMap::new()
+                Vec::new()
             }
         }
     }
@@ -1481,8 +1500,16 @@ impl crate::traits::SearchStorage for SqliteStorage {
         SqliteStorage::get_resource(self, resource_index).await
     }
 
-    async fn get_cache_entries(&self) -> HashMap<String, ResourceIndex> {
+    async fn get_cache_entries(&self) -> Vec<ResourceIndex> {
         SqliteStorage::get_cache_entries(self).await
+    }
+
+    async fn find_by_type_and_package(
+        &self,
+        resource_type: &str,
+        package_name: &str,
+    ) -> Result<Vec<ResourceIndex>> {
+        SqliteStorage::find_by_type_and_package(self, resource_type, package_name).await
     }
 
     async fn list_packages(&self) -> Result<Vec<PackageInfo>> {

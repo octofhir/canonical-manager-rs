@@ -180,7 +180,12 @@ impl CanonicalResolver {
     pub async fn new(storage: Arc<dyn SearchStorage + Send + Sync>) -> Self {
         #[cfg(feature = "fuzzy-search")]
         let fuzzy_index = {
-            let urls: Vec<String> = storage.get_cache_entries().await.keys().cloned().collect();
+            let urls: Vec<String> = storage
+                .get_cache_entries()
+                .await
+                .iter()
+                .map(|ri| ri.canonical_url.clone())
+                .collect();
             crate::fuzzy::NGramIndex::build_from_urls(urls)
         };
         Self {
@@ -232,7 +237,12 @@ impl CanonicalResolver {
     ) -> Self {
         #[cfg(feature = "fuzzy-search")]
         let fuzzy_index = {
-            let urls: Vec<String> = storage.get_cache_entries().await.keys().cloned().collect();
+            let urls: Vec<String> = storage
+                .get_cache_entries()
+                .await
+                .iter()
+                .map(|ri| ri.canonical_url.clone())
+                .collect();
             crate::fuzzy::NGramIndex::build_from_urls(urls)
         };
         Self {
@@ -689,9 +699,9 @@ impl CanonicalResolver {
         self.storage
             .get_cache_entries()
             .await
-            .keys()
-            .filter(|key| !key.contains("#")) // Filter out composite keys
-            .cloned()
+            .into_iter()
+            .map(|ri| ri.canonical_url)
+            .filter(|url| !url.contains("#")) // Filter out composite keys
             .collect()
     }
     /// Extract base URL by removing version components
@@ -757,16 +767,17 @@ impl CanonicalResolver {
                 .collect::<Vec<_>>();
             let cache = self.storage.get_cache_entries().await;
             let mut best: Option<(crate::domain::ResourceIndex, f64)> = None;
-            for u in candidates {
-                if let Some(idx) = cache.get(&u) {
-                    let sim = self.calculate_similarity(canonical_url, &u);
+            for u in &candidates {
+                // Find matching resource(s) - may have multiple with same URL across packages
+                for ri in cache.iter().filter(|ri| &ri.canonical_url == u) {
+                    let sim = self.calculate_similarity(canonical_url, u);
                     if sim > self.resolution_config.fuzzy_matching_threshold {
                         if let Some((_, best_sim)) = &best {
                             if sim > *best_sim {
-                                best = Some((idx.clone(), sim));
+                                best = Some((ri.clone(), sim));
                             }
                         } else {
-                            best = Some((idx.clone(), sim));
+                            best = Some((ri.clone(), sim));
                         }
                     }
                 }
@@ -778,8 +789,9 @@ impl CanonicalResolver {
             let cache_entries = self.storage.get_cache_entries().await;
             let mut best_match = None;
             let mut best_similarity = 0.0;
-            for (url, resource_index) in cache_entries {
-                let similarity = self.calculate_similarity(canonical_url, &url);
+            for resource_index in cache_entries {
+                let similarity =
+                    self.calculate_similarity(canonical_url, &resource_index.canonical_url);
                 if similarity > self.resolution_config.fuzzy_matching_threshold
                     && similarity > best_similarity
                 {

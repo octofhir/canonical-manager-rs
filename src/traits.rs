@@ -114,4 +114,12 @@ pub trait SearchStorage: Send + Sync {
 
     /// List all installed packages
     async fn list_packages(&self) -> Result<Vec<PackageInfo>>;
+
+    /// Set package priority (higher = more preferred for resolution)
+    async fn set_package_priority(
+        &self,
+        package_name: &str,
+        package_version: &str,
+        priority: i32,
+    ) -> Result<()>;
 }

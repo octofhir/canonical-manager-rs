@@ -1518,6 +1518,15 @@ impl crate::traits::SearchStorage for SqliteStorage {
     async fn list_packages(&self) -> Result<Vec<PackageInfo>> {
         SqliteStorage::list_packages(self).await
     }
+
+    async fn set_package_priority(
+        &self,
+        package_name: &str,
+        package_version: &str,
+        priority: i32,
+    ) -> Result<()> {
+        SqliteStorage::set_package_priority(self, package_name, package_version, priority).await
+    }
 }
 
 // Implement PackageStore trait for SqliteStorage

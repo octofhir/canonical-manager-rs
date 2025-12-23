@@ -1,6 +1,6 @@
 [package]
 name = "octofhir-canonical-manager"
-version = "0.1.21"
+version = "0.1.22"
 edition = "2024"
 description = "FHIR Canonical Manager - Library-first FHIR package management"
 license = "MIT OR Apache-2.0"
@@ -62,7 +62,7 @@ human-panic = "2.0.4"
 colored = { version = "3", optional = true }
 
 # File handling
-zip = "6"
+zip = "7"
 flate2 = "1"
 tar = "0.4"
 
@@ -71,6 +71,7 @@ uuid = { version = "1.18", features = ["v4", "serde"] }
 
 # URL handling
 url = { version = "2.5", features = ["serde"] }
+urlencoding = "2.1"
 
 # Path utilities
 dirs = "6"

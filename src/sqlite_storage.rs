@@ -937,7 +937,7 @@ impl SqliteStorage {
     pub async fn list_packages(&self) -> Result<Vec<PackageInfo>> {
         self.with_connection(move |conn| {
             let mut stmt = conn.prepare(
-                "SELECT name, version, installed_at, resource_count FROM packages ORDER BY name, version",
+                "SELECT name, version, fhir_version, installed_at, resource_count FROM packages ORDER BY name, version",
             )?;
 
             let packages = stmt
@@ -945,10 +945,13 @@ impl SqliteStorage {
                     Ok(PackageInfo {
                         name: row.get(0)?,
                         version: row.get(1)?,
-                        installed_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(2)?)
+                        fhir_version: row
+                            .get::<_, Option<String>>(2)?
+                            .unwrap_or_else(|| "4.0.1".to_string()),
+                        installed_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(3)?)
                             .map(|dt| dt.with_timezone(&Utc))
                             .unwrap_or_else(|_| Utc::now()),
-                        resource_count: row.get(3)?,
+                        resource_count: row.get(4)?,
                     })
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;

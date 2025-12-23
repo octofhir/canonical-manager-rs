@@ -156,6 +156,31 @@ struct CatalogPackage {
     description: Option<String>,
 }
 
+/// NPM-style search response from /-/v1/search endpoint
+#[derive(Debug, Deserialize, Clone)]
+struct NpmSearchResponse {
+    objects: Vec<NpmSearchObject>,
+    #[allow(dead_code)]
+    total: Option<usize>,
+}
+
+/// Individual search result object
+#[derive(Debug, Deserialize, Clone)]
+struct NpmSearchObject {
+    package: NpmSearchPackage,
+}
+
+/// Package info in search results
+#[derive(Debug, Deserialize, Clone)]
+struct NpmSearchPackage {
+    name: String,
+    #[serde(default)]
+    versions: Vec<String>,
+    #[serde(rename = "_versions")]
+    _versions: Option<Vec<String>>,
+    description: Option<String>,
+}
+
 /// NPM-style package metadata response
 #[derive(Debug, Deserialize, Clone)]
 #[allow(dead_code)]
@@ -1286,16 +1311,17 @@ impl RegistryClient {
 
     /// Searches for packages matching a query string.
     ///
-    /// **Note**: This functionality is not fully implemented for most registry types.
-    /// Currently returns empty results but may be enhanced in future releases.
+    /// Uses the NPM-style `/-/v1/search` endpoint to search for packages.
+    /// The query supports partial matching (ILIKE) - spaces in the query
+    /// are treated as wildcards for fuzzy matching.
     ///
     /// # Arguments
     ///
-    /// * `query` - Search query string
+    /// * `query` - Search query string (e.g., "us core", "hl7.fhir")
     ///
     /// # Returns
     ///
-    /// * `Ok(Vec<PackageInfo>)` - List of matching packages (currently empty)
+    /// * `Ok(Vec<PackageInfo>)` - List of matching packages
     /// * `Err` - If search operation fails
     ///
     /// # Example
@@ -1305,6 +1331,9 @@ impl RegistryClient {
     /// # async fn example(client: RegistryClient) -> Result<(), Box<dyn std::error::Error>> {
     /// let results = client.search_packages("us core").await?;
     /// println!("Found {} packages", results.len());
+    /// for pkg in results {
+    ///     println!("  {} - {}", pkg.name, pkg.description.unwrap_or_default());
+    /// }
     /// # Ok(())
     /// # }
     /// ```
@@ -1312,11 +1341,51 @@ impl RegistryClient {
     pub async fn search_packages(&self, query: &str) -> Result<Vec<PackageInfo>> {
         debug!("Searching for packages with query: {}", query);
 
-        // This is a simplified implementation - real registries may have different search APIs
-        warn!("Package search not fully implemented for this registry type");
+        // Build search URL from origin (scheme + host), NOT from base_url which includes /pkgs/
+        // The search endpoint is at the root: /-/v1/search
+        let origin = self.base_url.origin().ascii_serialization();
+        let search_url = format!("{}/-/v1/search?text={}", origin, urlencoding::encode(query));
 
-        // Return empty results for now
-        Ok(vec![])
+        debug!("Search URL: {}", search_url);
+
+        let response = self.client.get(&search_url).send().await?;
+
+        if !response.status().is_success() {
+            warn!("Search request failed with status: {}", response.status());
+            return Ok(vec![]);
+        }
+
+        let search_response: NpmSearchResponse = match response.json().await {
+            Ok(resp) => resp,
+            Err(e) => {
+                warn!("Failed to parse search response: {}", e);
+                return Ok(vec![]);
+            }
+        };
+
+        // Convert search results to PackageInfo
+        let packages: Vec<PackageInfo> = search_response
+            .objects
+            .into_iter()
+            .map(|obj| {
+                let pkg = obj.package;
+                // Get versions from _versions or versions field
+                let versions = pkg._versions.unwrap_or(pkg.versions);
+                let latest = versions
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "unknown".to_string());
+                PackageInfo {
+                    name: pkg.name,
+                    versions,
+                    description: pkg.description,
+                    latest_version: latest,
+                }
+            })
+            .collect();
+
+        info!("Search returned {} packages", packages.len());
+        Ok(packages)
     }
 
     /// Build metadata URL for a package (npm-style)
@@ -1439,9 +1508,13 @@ mod tests {
             .await
             .unwrap();
 
-        // Search should return empty results for now
+        // Search for packages - this makes a real network call
         let results = client.search_packages("core").await.unwrap();
-        assert!(results.is_empty());
+        // "core" should match several FHIR packages in the registry
+        assert!(
+            !results.is_empty(),
+            "Search for 'core' should return results"
+        );
     }
 
     // Note: Wiremock test removed due to lifetime issues

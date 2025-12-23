@@ -180,6 +180,7 @@ pub struct ResourceMetadata {
 pub struct PackageInfo {
     pub name: String,
     pub version: String,
+    pub fhir_version: String,
     pub installed_at: DateTime<Utc>,
     pub resource_count: usize,
 }

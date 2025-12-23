@@ -113,6 +113,7 @@ pub mod output;
 pub mod package;
 #[doc(hidden)]
 pub mod performance;
+pub mod progress;
 #[doc(hidden)]
 pub mod registry;
 pub mod resolver;
@@ -141,6 +142,11 @@ pub use domain::{
     ResourceMetadata,
 };
 pub use error::{FcmError, Result};
+pub use progress::{
+    BroadcastCallback, ChannelCallback, CollectingCallback, FnCallback, InstallEvent,
+    InstallProgressCallback, InstallProgressContext,
+};
+pub use registry::PackageInfo as RegistryPackageInfo;
 pub use resolver::CanonicalResolver;
 pub use search::SearchEngine;
 pub use traits::{PackageStore, SearchStorage};
@@ -171,6 +177,52 @@ use crate::output::Progress;
 
 #[cfg(feature = "cli")]
 use crate::cli::ProgressContext;
+
+/// Bridge between DownloadProgress and InstallProgressCallback.
+/// Converts download progress events to install events.
+struct DownloadProgressBridge {
+    name: String,
+    version: String,
+    ctx_callback: Arc<dyn crate::progress::InstallProgressCallback>,
+}
+
+impl registry::DownloadProgress for DownloadProgressBridge {
+    fn on_start(&self, total: Option<u64>) {
+        self.ctx_callback
+            .on_event(crate::progress::InstallEvent::DownloadStarted {
+                package: self.name.clone(),
+                version: self.version.clone(),
+                current: 0, // Will be set by caller
+                total: 0,
+                total_bytes: total,
+            });
+    }
+
+    fn on_progress(&self, downloaded: u64, total: Option<u64>) {
+        let percent = if let Some(total) = total {
+            if total > 0 {
+                ((downloaded as f64 / total as f64) * 100.0).min(100.0) as u8
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+
+        self.ctx_callback
+            .on_event(crate::progress::InstallEvent::DownloadProgress {
+                package: self.name.clone(),
+                version: self.version.clone(),
+                downloaded_bytes: downloaded,
+                total_bytes: total,
+                percent,
+            });
+    }
+
+    fn on_complete(&self) {
+        // Completion is handled by the caller
+    }
+}
 
 /// Performance metrics for optimization components
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -592,6 +644,250 @@ impl CanonicalManager {
         };
 
         self.install_packages_batch(vec![spec]).await
+    }
+
+    /// Install a FHIR package with progress callback for real-time updates.
+    ///
+    /// This method provides detailed progress events during package installation,
+    /// including dependency resolution, download progress, extraction, and indexing.
+    /// It's designed for use with SSE or WebSocket streaming to provide real-time
+    /// feedback to web clients.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Package name (e.g., "hl7.fhir.us.core")
+    /// * `version` - Package version (e.g., "6.1.0")
+    /// * `callback` - Progress callback to receive installation events
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use octofhir_canonical_manager::{CanonicalManager, FcmConfig, ChannelCallback};
+    /// # async fn example(manager: &CanonicalManager) -> Result<(), Box<dyn std::error::Error>> {
+    /// use std::sync::Arc;
+    ///
+    /// let (callback, mut receiver) = ChannelCallback::new();
+    ///
+    /// // Spawn task to handle events
+    /// tokio::spawn(async move {
+    ///     while let Some(event) = receiver.recv().await {
+    ///         println!("Progress: {:?}", event);
+    ///     }
+    /// });
+    ///
+    /// // Install with progress
+    /// manager.install_package_with_callback(
+    ///     "hl7.fhir.us.core",
+    ///     "6.1.0",
+    ///     Arc::new(callback),
+    /// ).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[tracing::instrument(name = "manager.install_package_with_callback", skip(self, callback), fields(pkg = %name, ver = %version))]
+    pub async fn install_package_with_callback(
+        &self,
+        name: &str,
+        version: &str,
+        callback: std::sync::Arc<dyn crate::progress::InstallProgressCallback>,
+    ) -> Result<()> {
+        use crate::progress::{InstallEvent, InstallProgressContext};
+
+        let mut ctx = InstallProgressContext::new(callback);
+        let mut installed = HashSet::new();
+        let mut to_install = Vec::new();
+
+        // Phase 1: Resolve dependencies
+        ctx.resolving_dependencies(name, version);
+
+        // Collect all packages to install (recursively)
+        self.collect_packages_to_install(name, version, &mut to_install, &mut installed)
+            .await?;
+
+        if to_install.is_empty() {
+            // Already installed
+            ctx.skipped(name, version, "already installed");
+            ctx.emit(InstallEvent::Completed {
+                total_installed: 0,
+                total_resources: 0,
+                duration_ms: 0,
+            });
+            return Ok(());
+        }
+
+        let package_names: Vec<String> = to_install
+            .iter()
+            .map(|(n, v)| format!("{}@{}", n, v))
+            .collect();
+        ctx.dependencies_resolved(package_names);
+        ctx.started(to_install.len());
+
+        // Reset installed set for actual installation tracking
+        installed.clear();
+
+        // Phase 2: Install each package with progress
+        for (pkg_name, pkg_version) in to_install {
+            self.install_single_package_with_progress(
+                &pkg_name,
+                &pkg_version,
+                &mut ctx,
+                &mut installed,
+            )
+            .await?;
+        }
+
+        ctx.completed();
+        Ok(())
+    }
+
+    /// Collect all packages that need to be installed (including dependencies).
+    fn collect_packages_to_install<'a>(
+        &'a self,
+        name: &'a str,
+        version: &'a str,
+        to_install: &'a mut Vec<(String, String)>,
+        visited: &'a mut HashSet<String>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+        Box::pin(async move {
+            let package_key = format!("{name}@{version}");
+
+            if visited.contains(&package_key) {
+                return Ok(());
+            }
+            visited.insert(package_key.clone());
+
+            // Check if already installed
+            let packages = self.list_packages_via_store().await?;
+            if packages
+                .iter()
+                .any(|p| p.name == name && p.version == version)
+            {
+                return Ok(());
+            }
+
+            // Get dependencies from registry
+            let metadata = self
+                .registry_client
+                .get_package_metadata(name, version)
+                .await?;
+
+            // Recursively collect dependencies first
+            for (dep_name, dep_version) in &metadata.dependencies {
+                self.collect_packages_to_install(dep_name, dep_version, to_install, visited)
+                    .await?;
+            }
+
+            // Add this package after dependencies
+            to_install.push((name.to_string(), version.to_string()));
+
+            Ok(())
+        })
+    }
+
+    /// Install a single package with progress tracking.
+    async fn install_single_package_with_progress(
+        &self,
+        name: &str,
+        version: &str,
+        ctx: &mut crate::progress::InstallProgressContext,
+        installed: &mut HashSet<String>,
+    ) -> Result<()> {
+        let package_key = format!("{name}@{version}");
+
+        if installed.contains(&package_key) {
+            return Ok(());
+        }
+
+        // Check if already in storage
+        let packages = self.list_packages_via_store().await?;
+        if packages
+            .iter()
+            .any(|p| p.name == name && p.version == version)
+        {
+            ctx.skipped(name, version, "already installed");
+            installed.insert(package_key);
+            return Ok(());
+        }
+
+        let spec = PackageSpec {
+            name: name.to_string(),
+            version: version.to_string(),
+            priority: 1,
+        };
+
+        // Download with progress
+        ctx.download_started(name, version, None);
+
+        // Create a progress bridge for download
+        let progress_bridge = DownloadProgressBridge {
+            name: name.to_string(),
+            version: version.to_string(),
+            ctx_callback: ctx.callback.clone(),
+        };
+
+        let download = self
+            .registry_client
+            .download_package_with_progress(&spec, Some(&progress_bridge))
+            .await
+            .inspect_err(|e| {
+                ctx.error(Some(name), Some(version), &e.to_string());
+            })?;
+
+        ctx.download_completed(name, version);
+
+        // Extract
+        ctx.extracting(name, version);
+        let extractor = package::PackageExtractor::new(self.config.storage.cache_dir.clone());
+        let extracted = extractor.extract_package(download).await.inspect_err(|e| {
+            ctx.error(Some(name), Some(version), &e.to_string());
+        })?;
+
+        let resource_count = extracted.resources.len();
+        ctx.extracted(name, version, resource_count);
+
+        // Move to packages directory
+        let package_dir = self
+            .config
+            .storage
+            .packages_dir
+            .join(format!("{name}-{version}"));
+        if package_dir.exists() {
+            fs::remove_dir_all(&package_dir).await?;
+        }
+        fs::rename(&extracted.extraction_path, &package_dir).await?;
+
+        // Update file paths
+        let mut updated_extracted = extracted;
+        for resource in &mut updated_extracted.resources {
+            if let Ok(relative_path) = resource
+                .file_path
+                .strip_prefix(&updated_extracted.extraction_path)
+            {
+                resource.file_path = package_dir.join(relative_path);
+            }
+        }
+        updated_extracted.extraction_path = package_dir;
+
+        // Index
+        ctx.indexing(name, version);
+        if let Err(e) = self.add_package_via_store(&updated_extracted).await {
+            match &e {
+                crate::error::FcmError::Storage(
+                    crate::error::StorageError::PackageAlreadyExists { .. },
+                ) => {
+                    // Already exists, that's fine
+                }
+                _ => {
+                    ctx.error(Some(name), Some(version), &e.to_string());
+                    return Err(e);
+                }
+            }
+        }
+
+        ctx.package_installed(name, version, resource_count);
+        installed.insert(package_key);
+
+        Ok(())
     }
 
     /// Install multiple FHIR packages in batch, rebuilding index only once
@@ -1469,6 +1765,54 @@ impl CanonicalManager {
             .collect())
     }
 
+    /// List available versions for a package from the registry.
+    ///
+    /// This method queries the FHIR package registry to find all available
+    /// versions of a specific package.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Package name (e.g., "hl7.fhir.us.core")
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Vec<String>)` - List of available versions sorted by semver (newest first)
+    /// * `Err` - If the package is not found or network error occurs
+    pub async fn list_registry_versions(&self, name: &str) -> Result<Vec<String>> {
+        self.registry_client.list_versions(name).await
+    }
+
+    /// Search for packages in the registry.
+    ///
+    /// This method searches the FHIR package registry (fs.get-ig.org) for packages
+    /// matching the query string. The search supports partial matching (ILIKE) -
+    /// spaces in the query are treated as wildcards for fuzzy matching.
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - Search query string (e.g., "us core", "hl7.fhir")
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Vec<registry::PackageInfo>)` - List of matching packages with their available versions
+    /// * `Err` - If search fails
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use octofhir_canonical_manager::CanonicalManager;
+    /// # async fn example(manager: &CanonicalManager) -> Result<(), Box<dyn std::error::Error>> {
+    /// let results = manager.search_registry("us core").await?;
+    /// for pkg in results {
+    ///     println!("{} - {} versions available", pkg.name, pkg.versions.len());
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn search_registry(&self, query: &str) -> Result<Vec<RegistryPackageInfo>> {
+        self.registry_client.search_packages(query).await
+    }
+
     /// Rebuild the search index from existing packages (no-op, SQLite auto-indexes)
     ///
     /// This method is kept for backward compatibility but does nothing since
@@ -1832,9 +2176,17 @@ impl CanonicalManager {
         self.add_package_via_store(&extracted).await?;
 
         // Return package info
+        let fhir_version = extracted
+            .manifest
+            .fhir_versions
+            .as_ref()
+            .and_then(|versions| versions.first())
+            .cloned()
+            .unwrap_or_else(|| "4.0.1".to_string());
         Ok(PackageInfo {
             name: extracted.name,
             version: extracted.version,
+            fhir_version,
             installed_at: chrono::Utc::now(),
             resource_count: extracted.resources.len(),
         })

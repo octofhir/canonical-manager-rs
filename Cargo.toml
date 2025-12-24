@@ -1,6 +1,6 @@
 [package]
 name = "octofhir-canonical-manager"
-version = "0.1.22"
+version = "0.1.23"
 edition = "2024"
 description = "FHIR Canonical Manager - Library-first FHIR package management"
 license = "MIT OR Apache-2.0"

@@ -149,12 +149,6 @@ impl UnifiedStorage {
         })
     }
 
-    /// Rebuild index (no-op - indexes are automatically maintained by backends)
-    pub async fn rebuild_index(&self) -> Result<()> {
-        info!("Index rebuild requested");
-        Ok(())
-    }
-
     /// Perform integrity check (returns healthy for non-SQLite backends)
     pub async fn integrity_check(&self) -> Result<UnifiedIntegrityReport> {
         Ok(UnifiedIntegrityReport {

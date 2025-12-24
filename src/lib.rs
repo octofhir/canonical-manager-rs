@@ -868,8 +868,8 @@ impl CanonicalManager {
         }
         updated_extracted.extraction_path = package_dir;
 
-        // Index
-        ctx.indexing(name, version);
+        // Store in database
+        ctx.storing(name, version);
         if let Err(e) = self.add_package_via_store(&updated_extracted).await {
             match &e {
                 crate::error::FcmError::Storage(
@@ -975,7 +975,7 @@ impl CanonicalManager {
     #[tracing::instrument(name = "manager.install_packages_parallel", skip(self), fields(count = %packages.len()))]
     pub async fn install_packages_parallel(&self, packages: Vec<PackageSpec>) -> Result<()> {
         info!(
-            "Starting parallel installation of {} packages",
+            "Starting parallel installation of {} packages (will resolve dependencies)",
             packages.len()
         );
         let overall_start = std::time::Instant::now();
@@ -984,16 +984,68 @@ impl CanonicalManager {
             .performance_monitor
             .start_operation("install_packages_parallel");
 
+        // Stage 0: Resolve all dependencies for each input package
+        info!(
+            "Stage 0/3: Resolving dependencies for {} packages",
+            packages.len()
+        );
+        let resolve_start = std::time::Instant::now();
+
+        let mut all_packages: Vec<(String, String)> = Vec::new();
+        let mut visited = HashSet::new();
+
+        for spec in &packages {
+            self.collect_packages_to_install(
+                &spec.name,
+                &spec.version,
+                &mut all_packages,
+                &mut visited,
+            )
+            .await?;
+        }
+
+        // Convert to PackageSpec, preserving priority from original specs where applicable
+        let priority_map: std::collections::HashMap<String, u32> = packages
+            .iter()
+            .map(|p| (format!("{}@{}", p.name, p.version), p.priority))
+            .collect();
+
+        let all_specs: Vec<PackageSpec> = all_packages
+            .into_iter()
+            .map(|(name, version)| {
+                let key = format!("{}@{}", name, version);
+                let priority = priority_map.get(&key).copied().unwrap_or(1);
+                PackageSpec {
+                    name,
+                    version,
+                    priority,
+                }
+            })
+            .collect();
+
+        let resolve_duration = resolve_start.elapsed();
+        info!(
+            "Stage 0/3 completed: Resolved {} total packages (including dependencies) in {:?}",
+            all_specs.len(),
+            resolve_duration
+        );
+
+        if all_specs.is_empty() {
+            info!("All packages already installed, nothing to do");
+            tracker.finish();
+            return Ok(());
+        }
+
         // Stage 1: Parallel Downloads
         info!(
             "Stage 1/3: Downloading {} packages in parallel",
-            packages.len()
+            all_specs.len()
         );
         let download_start = std::time::Instant::now();
 
         let downloads = self
             .registry_client
-            .download_packages_parallel(packages)
+            .download_packages_parallel(all_specs)
             .await?;
 
         let download_duration = download_start.elapsed();
@@ -1021,16 +1073,19 @@ impl CanonicalManager {
             extracted_count, extract_duration
         );
 
-        // Stage 3: Batch Indexing
-        info!("Stage 3/3: Indexing {} packages in batch", extracted_count);
-        let index_start = std::time::Instant::now();
+        // Stage 3: Batch store in database
+        info!(
+            "Stage 3/3: Storing {} packages in database",
+            extracted_count
+        );
+        let store_start = std::time::Instant::now();
 
         self.storage.add_packages_batch(extracted).await?;
 
-        let index_duration = index_start.elapsed();
+        let store_duration = store_start.elapsed();
         info!(
-            "Stage 3/3 completed: Indexed {} packages in {:?}",
-            extracted_count, index_duration
+            "Stage 3/3 completed: Stored {} packages in {:?}",
+            extracted_count, store_duration
         );
 
         // Complete
@@ -1042,8 +1097,8 @@ impl CanonicalManager {
             .await;
 
         info!(
-            "Parallel installation completed successfully: {} packages in {:?} (download: {:?}, extract: {:?}, index: {:?})",
-            extracted_count, overall_duration, download_duration, extract_duration, index_duration
+            "Parallel installation completed successfully: {} packages in {:?} (download: {:?}, extract: {:?}, store: {:?})",
+            extracted_count, overall_duration, download_duration, extract_duration, store_duration
         );
 
         Ok(())
@@ -1813,15 +1868,6 @@ impl CanonicalManager {
         self.registry_client.search_packages(query).await
     }
 
-    /// Rebuild the search index from existing packages (no-op, SQLite auto-indexes)
-    ///
-    /// This method is kept for backward compatibility but does nothing since
-    /// SQLite automatically maintains all indexes.
-    pub async fn rebuild_index(&self) -> Result<()> {
-        debug!("Index rebuild requested - SQLite maintains indexes automatically");
-        Ok(())
-    }
-
     /// Remove a FHIR package by name and version
     pub async fn remove_package(&self, name: &str, version: &str) -> Result<()> {
         info!("Removing package: {}@{}", name, version);
@@ -1919,15 +1965,6 @@ impl CanonicalManager {
         }
 
         Ok(search_params)
-    }
-
-    /// Force a full index rebuild (no-op, SQLite auto-indexes)
-    ///
-    /// This method is kept for backward compatibility but does nothing since
-    /// SQLite automatically maintains all indexes.
-    pub async fn force_full_rebuild(&self) -> Result<()> {
-        debug!("Force rebuild requested - SQLite maintains indexes automatically");
-        Ok(())
     }
 
     /// Get change detection status for packages

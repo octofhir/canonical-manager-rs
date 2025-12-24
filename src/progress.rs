@@ -61,8 +61,8 @@ pub enum InstallEvent {
         /// Number of resources in the package
         resource_count: usize,
     },
-    /// Indexing resources
-    Indexing {
+    /// Storing resources in database
+    Storing {
         package: String,
         version: String,
         current: usize,
@@ -295,8 +295,8 @@ impl InstallProgressContext {
         });
     }
 
-    pub fn indexing(&self, package: &str, version: &str) {
-        self.emit(InstallEvent::Indexing {
+    pub fn storing(&self, package: &str, version: &str) {
+        self.emit(InstallEvent::Storing {
             package: package.to_string(),
             version: version.to_string(),
             current: self.current_package,

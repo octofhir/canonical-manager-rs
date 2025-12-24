@@ -111,13 +111,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         println!("  • {resource_type}: {count}");
     }
 
-    // Demonstrate rebuilding index
-    println!("\n🔄 Rebuilding search index...");
-    match manager.rebuild_index().await {
-        Ok(_) => println!("✅ Index rebuilt successfully"),
-        Err(e) => println!("❌ Failed to rebuild index: {e}"),
-    }
-
     // Test resolution after rebuild
     println!("\n🎯 Testing canonical URL resolution...");
     let test_urls = vec![

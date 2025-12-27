@@ -77,6 +77,7 @@ pub struct RegistryConfig {
 ///     name: "hl7.fhir.us.core".to_string(),
 ///     version: "6.1.0".to_string(),
 ///     priority: 1,
+///     url: None,
 /// };
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,6 +86,12 @@ pub struct PackageSpec {
     pub version: String,
     #[serde(default = "default_priority")]
     pub priority: u32,
+    /// Optional direct URL to download the package tarball from.
+    /// If provided, this URL will be used instead of querying the registry.
+    /// Useful for packages not in the registry or CI builds.
+    /// Example: "<https://build.fhir.org/ig/FHIR/sql-on-fhir-v2/package.tgz>"
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 /// Specification for a local FHIR package directory.
@@ -548,6 +555,7 @@ impl FcmConfig {
             name: name.to_string(),
             version: version.to_string(),
             priority: priority.unwrap_or(1),
+            url: None,
         };
 
         // Remove existing package with same name if it exists
@@ -1020,6 +1028,7 @@ mod tests {
             name: "".to_string(),
             version: "1.0.0".to_string(),
             priority: 1,
+            url: None,
         });
         assert!(config.validate().is_err());
     }

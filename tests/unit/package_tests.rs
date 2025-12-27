@@ -112,6 +112,7 @@ async fn test_package_extraction_valid() {
         name: "test.package".to_string(),
         version: "1.0.0".to_string(),
         priority: 1,
+        url: None,
     };
 
     let metadata = PackageMetadata {

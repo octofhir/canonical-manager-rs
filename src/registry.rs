@@ -78,6 +78,7 @@ pub trait DownloadProgress: Send + Sync {
 ///     name: "hl7.fhir.us.core".to_string(),
 ///     version: "6.1.0".to_string(),
 ///     priority: 1,
+///     url: None,
 /// };
 ///
 /// let download = client.download_package(&spec).await?;
@@ -421,6 +422,7 @@ impl RegistryClient {
     ///     name: "hl7.fhir.us.core".to_string(),
     ///     version: "6.1.0".to_string(),
     ///     priority: 1,
+    ///     url: None,
     /// };
     ///
     /// let download = client.download_package(&spec).await?;
@@ -486,6 +488,7 @@ impl RegistryClient {
     ///     name: "hl7.fhir.us.core".to_string(),
     ///     version: "6.1.0".to_string(),
     ///     priority: 1,
+    ///     url: None,
     /// };
     ///
     /// let progress = MyProgress;
@@ -500,6 +503,12 @@ impl RegistryClient {
         progress: Option<&dyn DownloadProgress>,
     ) -> Result<PackageDownload> {
         info!("Downloading package: {}@{}", spec.name, spec.version);
+
+        // If URL is provided, download directly from URL
+        if let Some(ref url) = spec.url {
+            info!("Downloading package from direct URL: {}", url);
+            return self.download_from_url(spec, url, progress).await;
+        }
 
         // Try primary registry first, then fallbacks
         let mut last_error;
@@ -589,11 +598,13 @@ impl RegistryClient {
     ///         name: "hl7.fhir.r4.core".to_string(),
     ///         version: "4.0.1".to_string(),
     ///         priority: 1,
+    ///         url: None,
     ///     },
     ///     PackageSpec {
     ///         name: "hl7.fhir.us.core".to_string(),
     ///         version: "6.1.0".to_string(),
     ///         priority: 2,
+    ///         url: None,
     ///     },
     /// ];
     ///
@@ -644,6 +655,159 @@ impl RegistryClient {
         );
 
         Ok(downloads)
+    }
+
+    /// Download a package from a direct URL
+    ///
+    /// Downloads a FHIR package directly from a provided URL without querying
+    /// the registry. Useful for packages not in the registry, CI builds, or
+    /// custom package sources.
+    ///
+    /// # Arguments
+    ///
+    /// * `spec` - Package specification (name and version for metadata)
+    /// * `url` - Direct URL to the package tarball (e.g., .tgz file)
+    /// * `progress` - Optional progress callback implementation
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(PackageDownload)` - Successfully downloaded package
+    /// * `Err(FcmError)` - Download failed
+    ///
+    /// # Example
+    ///
+    /// To download from a direct URL, use `download_package` with a PackageSpec that has the `url` field set:
+    ///
+    /// ```rust,no_run
+    /// # use octofhir_canonical_manager::registry::RegistryClient;
+    /// # use octofhir_canonical_manager::config::{PackageSpec, RegistryConfig};
+    /// # use std::path::PathBuf;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let config = RegistryConfig::default();
+    /// # let cache_dir = PathBuf::from("/tmp/cache");
+    /// # let client = RegistryClient::new(&config, cache_dir).await?;
+    /// let spec = PackageSpec {
+    ///     name: "hl7.fhir.uv.sql-on-fhir".to_string(),
+    ///     version: "2.0.0-ballot".to_string(),
+    ///     priority: 1,
+    ///     url: Some("https://build.fhir.org/ig/FHIR/sql-on-fhir-v2/package.tgz".to_string()),
+    /// };
+    ///
+    /// let download = client.download_package(&spec).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    async fn download_from_url(
+        &self,
+        spec: &PackageSpec,
+        url: &str,
+        progress: Option<&dyn DownloadProgress>,
+    ) -> Result<PackageDownload> {
+        info!("Downloading package from URL: {}", url);
+
+        let filename = format!("{}-{}.tgz", spec.name, spec.version);
+        let file_path = self.cache_dir.join(&filename);
+        let part_path = self.cache_dir.join(format!("{filename}.part"));
+
+        // Remove any existing partial download
+        if fs::metadata(&part_path).await.is_ok() {
+            let _ = fs::remove_file(&part_path).await;
+        }
+
+        // Check if we have a cached copy
+        if fs::metadata(&file_path).await.is_ok() {
+            debug!(
+                "Using cached package {}@{} from URL download",
+                spec.name, spec.version
+            );
+            if let Some(progress) = progress {
+                let size = fs::metadata(&file_path).await.ok().map(|m| m.len());
+                progress.on_start(size);
+                progress.on_complete();
+            }
+
+            // Create minimal metadata since we don't have registry metadata
+            let metadata = PackageMetadata {
+                name: spec.name.clone(),
+                version: spec.version.clone(),
+                description: Some(format!("Package downloaded from {}", url)),
+                fhir_version: "unknown".to_string(),
+                dependencies: HashMap::new(),
+                canonical_base: None,
+            };
+
+            return Ok(PackageDownload {
+                spec: spec.clone(),
+                file_path,
+                metadata,
+            });
+        }
+
+        // Perform download with retries
+        let response = self.download_with_retries(url).await?;
+
+        // Get content length for progress tracking
+        let content_length = response.content_length();
+
+        // Notify progress start
+        if let Some(progress) = progress {
+            progress.on_start(content_length);
+        }
+
+        // Create file for streaming download
+        let mut file = fs::File::create(&part_path).await?;
+
+        // Stream the download with progress updates
+        let mut stream = response.bytes_stream();
+        let mut downloaded: u64 = 0;
+        let mut last_progress_update = std::time::Instant::now();
+
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            file.write_all(&chunk).await?;
+            downloaded += chunk.len() as u64;
+
+            // Update progress (throttle to avoid overwhelming the progress callback)
+            if let Some(progress) = progress {
+                let now = std::time::Instant::now();
+                if now.duration_since(last_progress_update) >= std::time::Duration::from_millis(100)
+                {
+                    progress.on_progress(downloaded, content_length);
+                    // Small delay to ensure progress bar can render
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    last_progress_update = now;
+                }
+            }
+        }
+
+        // Notify completion
+        if let Some(progress) = progress {
+            progress.on_complete();
+        }
+
+        // Atomically move the .part file to final name
+        fs::rename(&part_path, &file_path).await?;
+        info!("Package downloaded to: {}", file_path.display());
+
+        // Store in CAS for future reuse and deduplication
+        let cas_path = self.store_in_cas(&file_path).await?;
+        debug!("Package stored in CAS: {}", cas_path.display());
+
+        // Create minimal metadata since we don't have registry metadata
+        let metadata = PackageMetadata {
+            name: spec.name.clone(),
+            version: spec.version.clone(),
+            description: Some(format!("Package downloaded from {}", url)),
+            fhir_version: "unknown".to_string(),
+            dependencies: HashMap::new(),
+            canonical_base: None,
+        };
+
+        Ok(PackageDownload {
+            spec: spec.clone(),
+            file_path,
+            metadata,
+        })
     }
 
     /// Try downloading from a specific registry

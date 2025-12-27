@@ -701,11 +701,13 @@ async fn test_installation_with_priorities() {
                 name: "test.package".to_string(),
                 version: "1.0.0".to_string(),
                 priority: 1,
+                url: None,
             },
             octofhir_canonical_manager::PackageSpec {
                 name: "hl7.fhir.r4.core".to_string(),
                 version: "4.0.1".to_string(),
                 priority: 2,
+                url: None,
             },
         ],
         local_packages: vec![],

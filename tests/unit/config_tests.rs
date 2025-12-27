@@ -64,6 +64,7 @@ fn test_invalid_package_spec_validation() {
         name: "".to_string(),
         version: "1.0.0".to_string(),
         priority: 1,
+        url: None,
     });
 
     let result = config.validate();
@@ -137,6 +138,7 @@ fn test_package_spec_validation() {
         name: "test.package".to_string(),
         version: "1.0.0".to_string(),
         priority: 1,
+        url: None,
     };
 
     // Valid spec should pass

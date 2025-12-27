@@ -641,6 +641,7 @@ impl CanonicalManager {
             name: name.to_string(),
             version: version.to_string(),
             priority: 1,
+            url: None,
         };
 
         self.install_packages_batch(vec![spec]).await
@@ -813,6 +814,7 @@ impl CanonicalManager {
             name: name.to_string(),
             version: version.to_string(),
             priority: 1,
+            url: None,
         };
 
         // Download with progress
@@ -960,11 +962,13 @@ impl CanonicalManager {
     ///         name: "hl7.fhir.r4.core".to_string(),
     ///         version: "4.0.1".to_string(),
     ///         priority: 1,
+    ///         url: None,
     ///     },
     ///     PackageSpec {
     ///         name: "hl7.fhir.us.core".to_string(),
     ///         version: "6.1.0".to_string(),
     ///         priority: 2,
+    ///         url: None,
     ///     },
     /// ];
     ///
@@ -1019,6 +1023,7 @@ impl CanonicalManager {
                     name,
                     version,
                     priority,
+                    url: None,
                 }
             })
             .collect();
@@ -1212,6 +1217,7 @@ impl CanonicalManager {
                 name: name.to_string(),
                 version: version.to_string(),
                 priority: 1,
+                url: None,
             };
 
             // Download package and get metadata (includes dependencies)
@@ -1310,6 +1316,7 @@ impl CanonicalManager {
             name: name.to_string(),
             version: version.to_string(),
             priority: 1,
+            url: None,
         };
 
         self.install_packages_batch_with_progress(vec![spec], progress)
@@ -1431,6 +1438,7 @@ impl CanonicalManager {
                 name: name.to_string(),
                 version: version.to_string(),
                 priority: 1,
+                url: None,
             };
 
             // Download package and get metadata
@@ -1593,6 +1601,7 @@ impl CanonicalManager {
                 name: name.to_string(),
                 version: version.to_string(),
                 priority: 1,
+                url: None,
             };
 
             // Download package with streaming progress

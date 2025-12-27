@@ -111,6 +111,7 @@ async fn test_download_package_success() {
         name: "test.package".to_string(),
         version: "1.0.0".to_string(),
         priority: 1,
+        url: None,
     };
 
     let result = client.download_package(&package_spec).await;
@@ -149,6 +150,7 @@ async fn test_download_package_with_dependencies() {
         name: "hl7.fhir.us.core".to_string(),
         version: "6.1.0".to_string(),
         priority: 1,
+        url: None,
     };
 
     let result = client.download_package(&package_spec).await;
@@ -194,6 +196,7 @@ async fn test_registry_fallback() {
         name: "test.package".to_string(),
         version: "1.0.0".to_string(),
         priority: 1,
+        url: None,
     };
 
     // This should eventually succeed using fallback registry
@@ -236,6 +239,7 @@ async fn test_retry_mechanism() {
         name: "test.package".to_string(),
         version: "1.0.0".to_string(),
         priority: 1,
+        url: None,
     };
 
     // This should eventually succeed after retries

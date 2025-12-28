@@ -905,7 +905,7 @@ impl CanonicalManager {
 
         for spec in &packages {
             debug!("Installing package: {}@{}", spec.name, spec.version);
-            self.install_package_no_rebuild(&spec.name, &spec.version, &mut installed)
+            self.install_package_no_rebuild(spec, &mut installed)
                 .await?;
         }
 
@@ -1008,22 +1008,27 @@ impl CanonicalManager {
             .await?;
         }
 
-        // Convert to PackageSpec, preserving priority from original specs where applicable
-        let priority_map: std::collections::HashMap<String, u32> = packages
+        // Convert to PackageSpec, preserving priority and URL from original specs where applicable
+        let original_specs_map: std::collections::HashMap<String, &PackageSpec> = packages
             .iter()
-            .map(|p| (format!("{}@{}", p.name, p.version), p.priority))
+            .map(|p| (format!("{}@{}", p.name, p.version), p))
             .collect();
 
         let all_specs: Vec<PackageSpec> = all_packages
             .into_iter()
             .map(|(name, version)| {
                 let key = format!("{}@{}", name, version);
-                let priority = priority_map.get(&key).copied().unwrap_or(1);
-                PackageSpec {
-                    name,
-                    version,
-                    priority,
-                    url: None,
+                if let Some(original) = original_specs_map.get(&key) {
+                    // Preserve original spec with URL
+                    (*original).clone()
+                } else {
+                    // Dependency - no URL
+                    PackageSpec {
+                        name,
+                        version,
+                        priority: 1,
+                        url: None,
+                    }
                 }
             })
             .collect();
@@ -1113,12 +1118,16 @@ impl CanonicalManager {
     /// Used internally by batch installation to defer rebuild until all packages are installed
     async fn install_package_no_rebuild(
         &self,
-        name: &str,
-        version: &str,
+        spec: &PackageSpec,
         installed: &mut HashSet<String>,
     ) -> Result<()> {
-        self.install_package_with_dependencies(name, version, installed)
-            .await
+        self.install_package_with_dependencies(
+            &spec.name,
+            &spec.version,
+            spec.url.as_deref(),
+            installed,
+        )
+        .await
     }
 
     /// Simplified package installation for testing (bypasses complex optimizations)
@@ -1359,10 +1368,17 @@ impl CanonicalManager {
     }
 
     /// Install a package with recursive dependency resolution
+    ///
+    /// # Arguments
+    /// * `name` - Package name
+    /// * `version` - Package version
+    /// * `url` - Optional direct download URL (bypasses registry lookup)
+    /// * `installed` - Set of already installed packages to avoid cycles
     fn install_package_with_dependencies<'a>(
         &'a self,
         name: &'a str,
         version: &'a str,
+        url: Option<&'a str>,
         installed: &'a mut HashSet<String>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
         Box::pin(async move {
@@ -1417,8 +1433,14 @@ impl CanonicalManager {
                         "Installing local dependency for {}: {}@{}",
                         package_key, dep_name, dep_version
                     );
-                    self.install_package_with_dependencies(&dep_name, &dep_version, installed)
-                        .await?;
+                    // Dependencies don't have URLs - they come from the registry
+                    self.install_package_with_dependencies(
+                        &dep_name,
+                        &dep_version,
+                        None,
+                        installed,
+                    )
+                    .await?;
                 }
 
                 self.load_from_directory(&local_spec.path, Some(&package_key))
@@ -1432,13 +1454,13 @@ impl CanonicalManager {
                 return Ok(());
             }
 
-            debug!("Installing package: {}@{}", name, version);
+            debug!("Installing package: {}@{} (url: {:?})", name, version, url);
 
             let spec = PackageSpec {
                 name: name.to_string(),
                 version: version.to_string(),
                 priority: 1,
-                url: None,
+                url: url.map(String::from),
             };
 
             // Download package and get metadata
@@ -1493,9 +1515,10 @@ impl CanonicalManager {
             installed.insert(package_key.clone());
 
             // Install dependencies recursively
+            // Dependencies don't have URLs - they come from the registry
             for (dep_name, dep_version) in dependencies {
                 info!("Installing dependency: {}@{}", dep_name, dep_version);
-                self.install_package_with_dependencies(&dep_name, &dep_version, installed)
+                self.install_package_with_dependencies(&dep_name, &dep_version, None, installed)
                     .await?;
             }
 

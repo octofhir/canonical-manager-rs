@@ -165,7 +165,7 @@ use tracing::{debug, info, warn};
 // Internal imports for types no longer re-exported at crate root
 use crate::change_detection::PackageChangeDetector;
 use crate::config_validator::ValidationResult;
-use crate::package::PackageManifest;
+use crate::package::{PackageIndex, PackageManifest};
 use crate::performance::{
     PackageOperationType, PerformanceAnalysis, PerformanceConfig, PerformanceMetrics,
     PerformanceMonitor,
@@ -2158,79 +2158,189 @@ impl CanonicalManager {
             }
         }
 
-        // Scan directory for .json resource files
+        // Check for .index.json file
+        let index_path = path.join(".index.json");
         let mut resources = Vec::new();
-        let mut entries = fs::read_dir(path).await.map_err(|e| {
-            FcmError::Package(crate::error::PackageError::ExtractionFailed {
-                message: format!("Failed to read directory: {}", e),
-            })
-        })?;
 
-        while let Some(entry) = entries.next_entry().await.map_err(|e| {
-            FcmError::Package(crate::error::PackageError::ExtractionFailed {
-                message: format!("Failed to read directory entry: {}", e),
-            })
-        })? {
-            let entry_path = entry.path();
+        if index_path.exists() {
+            // Use .index.json to load resources
+            debug!("Found .index.json, using it to load resources");
 
-            // Skip non-JSON files
-            if entry_path.extension().and_then(|e| e.to_str()) != Some("json") {
-                continue;
+            let index_content = fs::read_to_string(&index_path).await.map_err(|e| {
+                FcmError::Package(crate::error::PackageError::ExtractionFailed {
+                    message: format!("Failed to read .index.json: {}", e),
+                })
+            })?;
+
+            let index: PackageIndex = serde_json::from_str(&index_content).map_err(|e| {
+                FcmError::Package(crate::error::PackageError::ExtractionFailed {
+                    message: format!("Invalid .index.json: {}", e),
+                })
+            })?;
+
+            // Load each file from the index
+            for (filename, index_entry) in index.files.iter() {
+                // Try multiple possible paths
+                let possible_paths = vec![
+                    path.join(filename),                 // root
+                    path.join("package").join(filename), // package/
+                    path.join(index_entry.resource_type.as_deref().unwrap_or(""))
+                        .join(filename), // ResourceType/
+                ];
+
+                let mut found = false;
+                for resource_path in possible_paths {
+                    if resource_path.exists() {
+                        match fs::read_to_string(&resource_path).await {
+                            Ok(content) => {
+                                match serde_json::from_str::<serde_json::Value>(&content) {
+                                    Ok(json) => {
+                                        resources.push(FhirResource {
+                                            resource_type: index_entry
+                                                .resource_type
+                                                .clone()
+                                                .or_else(|| {
+                                                    json.get("resourceType")
+                                                        .and_then(|v| v.as_str())
+                                                        .map(String::from)
+                                                })
+                                                .unwrap_or_else(|| "Unknown".to_string()),
+                                            id: index_entry
+                                                .id
+                                                .clone()
+                                                .or_else(|| {
+                                                    json.get("id")
+                                                        .and_then(|v| v.as_str())
+                                                        .map(String::from)
+                                                })
+                                                .unwrap_or_else(|| "unknown".to_string()),
+                                            url: index_entry.url.clone().or_else(|| {
+                                                json.get("url")
+                                                    .and_then(|v| v.as_str())
+                                                    .map(String::from)
+                                            }),
+                                            version: index_entry.version.clone().or_else(|| {
+                                                json.get("version")
+                                                    .and_then(|v| v.as_str())
+                                                    .map(String::from)
+                                            }),
+                                            content: json,
+                                            file_path: resource_path,
+                                        });
+                                        found = true;
+                                        break;
+                                    }
+                                    Err(e) => {
+                                        warn!("Invalid JSON in {}: {}", resource_path.display(), e);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                warn!("Failed to read {}: {}", resource_path.display(), e);
+                            }
+                        }
+                    }
+                }
+
+                if !found {
+                    warn!("File listed in .index.json not found: {}", filename);
+                }
             }
 
-            // Skip package.json itself
-            if entry_path.file_name().and_then(|n| n.to_str()) == Some("package.json") {
-                continue;
+            info!(
+                "Loaded {} resources from .index.json in {}",
+                resources.len(),
+                path.display()
+            );
+        } else {
+            // Fallback: recursively scan directory for .json resource files
+            debug!("No .index.json found, scanning directory recursively");
+
+            fn scan_directory_recursive<'a>(
+                dir_path: &'a Path,
+                resources: &'a mut Vec<FhirResource>,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>>
+            {
+                Box::pin(async move {
+                    let mut entries = fs::read_dir(dir_path).await.map_err(|e| {
+                        FcmError::Package(crate::error::PackageError::ExtractionFailed {
+                            message: format!("Failed to read directory: {}", e),
+                        })
+                    })?;
+
+                    while let Some(entry) = entries.next_entry().await.map_err(|e| {
+                        FcmError::Package(crate::error::PackageError::ExtractionFailed {
+                            message: format!("Failed to read directory entry: {}", e),
+                        })
+                    })? {
+                        let entry_path = entry.path();
+
+                        if entry_path.is_dir() {
+                            // Recursively scan subdirectories
+                            scan_directory_recursive(&entry_path, resources).await?;
+                        } else if entry_path.extension().and_then(|e| e.to_str()) == Some("json") {
+                            // Skip package.json and .index.json
+                            if let Some(filename) = entry_path.file_name().and_then(|n| n.to_str())
+                                && (filename == "package.json" || filename.starts_with('.'))
+                            {
+                                continue;
+                            }
+
+                            // Read and parse resource
+                            let content = match fs::read_to_string(&entry_path).await {
+                                Ok(c) => c,
+                                Err(e) => {
+                                    warn!("Failed to read {}: {}", entry_path.display(), e);
+                                    continue;
+                                }
+                            };
+
+                            let json: serde_json::Value = match serde_json::from_str(&content) {
+                                Ok(j) => j,
+                                Err(e) => {
+                                    warn!("Invalid JSON in {}: {}", entry_path.display(), e);
+                                    continue;
+                                }
+                            };
+
+                            // Extract resource metadata
+                            let resource_type = json
+                                .get("resourceType")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("Unknown")
+                                .to_string();
+
+                            let id = json
+                                .get("id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("unknown")
+                                .to_string();
+
+                            let url = json.get("url").and_then(|v| v.as_str()).map(String::from);
+
+                            let version = json
+                                .get("version")
+                                .and_then(|v| v.as_str())
+                                .map(String::from);
+
+                            resources.push(FhirResource {
+                                resource_type,
+                                id,
+                                url,
+                                version,
+                                content: json,
+                                file_path: entry_path,
+                            });
+                        }
+                    }
+
+                    Ok(())
+                })
             }
 
-            // Read and parse resource
-            let content = match fs::read_to_string(&entry_path).await {
-                Ok(c) => c,
-                Err(e) => {
-                    warn!("Failed to read {}: {}", entry_path.display(), e);
-                    continue;
-                }
-            };
-
-            let json: serde_json::Value = match serde_json::from_str(&content) {
-                Ok(j) => j,
-                Err(e) => {
-                    warn!("Invalid JSON in {}: {}", entry_path.display(), e);
-                    continue;
-                }
-            };
-
-            // Extract resource metadata
-            let resource_type = json
-                .get("resourceType")
-                .and_then(|v| v.as_str())
-                .unwrap_or("Unknown")
-                .to_string();
-
-            let id = json
-                .get("id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown")
-                .to_string();
-
-            let url = json.get("url").and_then(|v| v.as_str()).map(String::from);
-
-            let version = json
-                .get("version")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-
-            resources.push(FhirResource {
-                resource_type,
-                id,
-                url,
-                version,
-                content: json,
-                file_path: entry_path,
-            });
+            scan_directory_recursive(path, &mut resources).await?;
+            info!("Found {} resources in {}", resources.len(), path.display());
         }
-
-        info!("Found {} resources in {}", resources.len(), path.display());
 
         // Create ExtractedPackage structure
         let extracted = ExtractedPackage {

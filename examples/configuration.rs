@@ -30,6 +30,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         url: "https://build.fhir.org/ig/qas.json".to_string(),
         timeout: 60,       // Longer timeout for slower connections
         retry_attempts: 5, // More retries for reliability
+        ..RegistryConfig::default()
     };
 
     println!("✅ Registry settings updated");

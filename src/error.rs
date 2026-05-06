@@ -172,6 +172,16 @@ pub enum RegistryError {
 
     #[error("Invalid package metadata: {message}")]
     InvalidMetadata { message: String },
+
+    /// A registry backend does not implement the requested operation.
+    /// Used by archive-style backends (e.g. `packages2.fhir.org` doesn't
+    /// expose a JSON `/{name}` listing) and as the signal for federated
+    /// orchestrators to fall through to the next configured client.
+    #[error("Operation '{operation}' not supported by registry '{client_id}'")]
+    NotSupported {
+        client_id: String,
+        operation: &'static str,
+    },
 }
 
 /// Errors related to FHIR package processing and extraction.
@@ -385,14 +395,18 @@ impl<T, E> ErrorContext<T> for std::result::Result<T, E>
 where
     E: Into<FcmError>,
 {
-    fn with_context<C>(self, _context: C) -> std::result::Result<T, FcmError>
+    fn with_context<C>(self, context: C) -> std::result::Result<T, FcmError>
     where
         C: std::fmt::Display + Send + Sync + 'static,
     {
         self.map_err(|e| {
-            // For now, just return the original error
-            // In the future, we could implement error chaining
-            e.into()
+            // Wrap as `Generic("{context}: {original}")` so the diagnostic
+            // string visible to callers actually contains the context.
+            // Typed-variant downcasting is sacrificed at this layer; if
+            // callers need it, they should use `?` directly. The previous
+            // implementation silently dropped the context argument.
+            let original: FcmError = e.into();
+            FcmError::Generic(format!("{context}: {original}"))
         })
     }
 
@@ -402,11 +416,9 @@ where
         F: FnOnce() -> C,
     {
         self.map_err(|e| {
-            let _context = f();
-
-            // For now, just return the original error
-            // In the future, we could implement error chaining
-            e.into()
+            let context = f();
+            let original: FcmError = e.into();
+            FcmError::Generic(format!("{context}: {original}"))
         })
     }
 }

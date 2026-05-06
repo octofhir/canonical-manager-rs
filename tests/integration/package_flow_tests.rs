@@ -22,6 +22,7 @@ async fn test_canonical_manager_creation_simple() {
             url: "https://packages.fhir.org/".to_string(),
             timeout: 5,
             retry_attempts: 1,
+            ..RegistryConfig::default()
         },
         packages: vec![],
         local_packages: vec![],
@@ -89,6 +90,7 @@ async fn test_package_installation_with_timeout() {
             url: registry.url(),
             timeout: 5,
             retry_attempts: 1,
+            ..RegistryConfig::default()
         },
         packages: vec![],
         local_packages: vec![],
@@ -172,6 +174,7 @@ async fn test_full_package_installation_original() {
             url: registry.url(),
             timeout: 30,
             retry_attempts: 3,
+            ..RegistryConfig::default()
         },
         packages: vec![],
         local_packages: vec![],
@@ -248,6 +251,7 @@ async fn test_package_installation_with_dependencies() {
             url: registry.url(),
             timeout: 30,
             retry_attempts: 3,
+            ..RegistryConfig::default()
         },
         packages: vec![],
         local_packages: vec![],
@@ -304,6 +308,7 @@ async fn test_duplicate_package_installation() {
             url: registry.url(),
             timeout: 30,
             retry_attempts: 3,
+            ..RegistryConfig::default()
         },
         packages: vec![],
         local_packages: vec![],
@@ -357,6 +362,7 @@ async fn test_package_removal() {
             url: registry.url(),
             timeout: 30,
             retry_attempts: 3,
+            ..RegistryConfig::default()
         },
         packages: vec![],
         local_packages: vec![],
@@ -413,6 +419,7 @@ async fn test_canonical_resolution_after_installation() {
             url: registry.url(),
             timeout: 30,
             retry_attempts: 3,
+            ..RegistryConfig::default()
         },
         packages: vec![],
         local_packages: vec![],
@@ -471,6 +478,7 @@ async fn test_batch_canonical_resolution() {
             url: registry.url(),
             timeout: 30,
             retry_attempts: 3,
+            ..RegistryConfig::default()
         },
         packages: vec![],
         local_packages: vec![],
@@ -531,6 +539,7 @@ async fn test_package_installation_error_handling() {
             url: registry.url(),
             timeout: 30,
             retry_attempts: 3,
+            ..RegistryConfig::default()
         },
         packages: vec![],
         local_packages: vec![],
@@ -585,6 +594,7 @@ async fn test_concurrent_package_installations() {
             url: registry.url(),
             timeout: 30,
             retry_attempts: 3,
+            ..RegistryConfig::default()
         },
         packages: vec![],
         local_packages: vec![],
@@ -645,6 +655,7 @@ async fn test_package_counting() {
             url: registry.url(),
             timeout: 30,
             retry_attempts: 3,
+            ..RegistryConfig::default()
         },
         packages: vec![],
         local_packages: vec![],
@@ -694,6 +705,7 @@ async fn test_installation_with_priorities() {
             url: registry.url(),
             timeout: 30,
             retry_attempts: 3,
+            ..RegistryConfig::default()
         },
         packages: vec![
             // Pre-configure some packages with priorities
@@ -749,6 +761,7 @@ async fn test_search_parameter_retrieval_simple() {
             url: "https://packages.fhir.org/".to_string(), // Use real URL but don't call it
             timeout: 5,
             retry_attempts: 1,
+            ..RegistryConfig::default()
         },
         packages: vec![],
         local_packages: vec![],
@@ -806,6 +819,7 @@ async fn test_search_parameter_retrieval_with_installation() {
             url: registry.url(),
             timeout: 30,
             retry_attempts: 3,
+            ..RegistryConfig::default()
         },
         packages: vec![],
         local_packages: vec![],

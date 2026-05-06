@@ -414,7 +414,10 @@ impl PackageExtractor {
                 extracted.len() + errors.len()
             );
             // For now, return the first error. Could be enhanced to collect all errors.
-            return Err(errors.into_iter().next().unwrap());
+            return Err(errors
+                .into_iter()
+                .next()
+                .expect("guarded by !errors.is_empty() above"));
         }
 
         let duration = start.elapsed();
@@ -588,6 +591,28 @@ impl PackageExtractor {
                         message: format!("Invalid entry path: {e}"),
                     })?;
 
+                    // Skip non-regular entries: a tar with `Symlink`/`Link`
+                    // entries pointing outside `base` would otherwise create
+                    // links that escape the sandbox even though
+                    // `sanitize_extract_path` cleared the entry path of `..`.
+                    // FHIR packages contain only regular files + directories;
+                    // symlinks/devices/fifos are never legitimate.
+                    let entry_type = entry.header().entry_type();
+                    if !(entry_type.is_file()
+                        || entry_type.is_dir()
+                        || entry_type.is_gnu_longname()
+                        || entry_type.is_gnu_longlink()
+                        || entry_type.is_pax_global_extensions()
+                        || entry_type.is_pax_local_extensions())
+                    {
+                        warn!(
+                            "Skipping unsafe tar entry type {:?} for path {}",
+                            entry_type,
+                            path.display()
+                        );
+                        continue;
+                    }
+
                     let out_path = Self::sanitize_extract_path(&output_dir, &path)?;
 
                     if let Some(parent) = out_path.parent() {
@@ -640,6 +665,25 @@ impl PackageExtractor {
                 message: format!("Invalid entry path: {e}"),
             })?;
             let std_path = std::path::Path::new(path.as_os_str());
+
+            // Same entry-type filter as the blocking fallback path above.
+            // FHIR packages should only ship regular files and directories.
+            let entry_type = entry.header().entry_type();
+            if !(entry_type.is_file()
+                || entry_type.is_dir()
+                || entry_type.is_gnu_longname()
+                || entry_type.is_gnu_longlink()
+                || entry_type.is_pax_global_extensions()
+                || entry_type.is_pax_local_extensions())
+            {
+                warn!(
+                    "Skipping unsafe tar entry type {:?} for path {}",
+                    entry_type,
+                    std_path.display()
+                );
+                continue;
+            }
+
             let out_path = Self::sanitize_extract_path(output_dir, std_path)?;
 
             if let Some(parent) = out_path.parent() {
@@ -699,14 +743,24 @@ impl PackageExtractor {
 
         let mut resources = Vec::new();
 
-        // Read all .json files in package directory
+        // Read all .json files in package directory.
+        // file_name()/to_str() can fail for files with non-UTF-8 names
+        // (legal on Linux). Skip those rather than panicking — FHIR
+        // packages should never contain such files, but a hostile tarball
+        // shouldn't take down the worker thread.
         let mut dir_entries = fs::read_dir(&package_dir).await?;
         while let Some(entry) = dir_entries.next_entry().await? {
             let path = entry.path();
-
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                debug!(
+                    "Skipping non-UTF-8 filename under {}",
+                    package_dir.display()
+                );
+                continue;
+            };
             if path.extension().and_then(|s| s.to_str()) == Some("json")
-                && !path.file_name().unwrap().to_str().unwrap().starts_with('.')
-                && path.file_name().unwrap().to_str().unwrap() != "package.json"
+                && !name.starts_with('.')
+                && name != "package.json"
             {
                 let resource = self.parse_fhir_resource(&path, &index).await?;
                 if let Some(resource) = resource {
@@ -741,8 +795,14 @@ impl PackageExtractor {
             return Ok(None);
         }
 
-        // Try to get additional info from index
-        let filename = file_path.file_name().unwrap().to_str().unwrap();
+        // Try to get additional info from index. Same UTF-8 caveat as
+        // `extract_resources` above: skip the index lookup if the filename
+        // can't be re-rendered as UTF-8 (the JSON parse already succeeded
+        // so contents are fine; only the path stem is in question).
+        let filename = match file_path.file_name().and_then(|n| n.to_str()) {
+            Some(s) => s,
+            None => return Ok(None),
+        };
         if let Some(index) = index
             && let Some(index_entry) = index.files.get(filename)
         {

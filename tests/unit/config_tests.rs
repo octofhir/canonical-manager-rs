@@ -10,9 +10,15 @@ use tempfile::TempDir;
 fn test_config_defaults() {
     let config = FcmConfig::default();
 
-    assert_eq!(config.registry.url, "https://fs.get-ig.org/pkgs/");
+    assert_eq!(config.registry.url, "https://packages.fhir.org");
     assert_eq!(config.registry.timeout, 30);
     assert_eq!(config.registry.retry_attempts, 3);
+    assert_eq!(
+        config.registry.fallbacks,
+        vec!["https://packages2.fhir.org/packages".to_string()]
+    );
+    assert!(config.registry.extra.is_empty());
+    assert!(config.registry.token_env.is_none());
     assert!(config.packages.is_empty());
     assert_eq!(config.storage.max_cache_size, "1GB");
 }

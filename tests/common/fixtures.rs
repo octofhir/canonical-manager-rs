@@ -125,7 +125,7 @@ pub fn create_sample_config() -> String {
     r#"# FHIR Canonical Manager Test Configuration
 
 [registry]
-url = "https://fs.get-ig.org/pkgs/"
+url = "https://packages.fhir.org"
 timeout = 30
 retry_attempts = 3
 

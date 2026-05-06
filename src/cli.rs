@@ -291,10 +291,11 @@ pub async fn run() -> crate::Result<()> {
 async fn handle_init(cli: &Cli) -> crate::Result<()> {
     Progress::start("Initializing FCM configuration");
 
-    let config_path = cli
-        .config
-        .clone()
-        .unwrap_or_else(|| std::env::current_dir().unwrap().join("fcm.toml"));
+    let config_path = cli.config.clone().unwrap_or_else(|| {
+        std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .join("fcm.toml")
+    });
 
     if config_path.exists() {
         Output::warning(&format!(
@@ -596,10 +597,11 @@ async fn handle_config(cli: &Cli, cmd: &ConfigCommand) -> crate::Result<()> {
 
 /// Handle config set command
 async fn handle_config_set(cli: &Cli, key: &str, value: &str) -> crate::Result<()> {
-    let config_path = cli
-        .config
-        .clone()
-        .unwrap_or_else(|| std::env::current_dir().unwrap().join("fcm.toml"));
+    let config_path = cli.config.clone().unwrap_or_else(|| {
+        std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .join("fcm.toml")
+    });
 
     if !config_path.exists() {
         Output::error(&format!(
@@ -660,10 +662,11 @@ async fn handle_config_set(cli: &Cli, key: &str, value: &str) -> crate::Result<(
 
 /// Handle config reset command
 async fn handle_config_reset(cli: &Cli) -> crate::Result<()> {
-    let config_path = cli
-        .config
-        .clone()
-        .unwrap_or_else(|| std::env::current_dir().unwrap().join("fcm.toml"));
+    let config_path = cli.config.clone().unwrap_or_else(|| {
+        std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .join("fcm.toml")
+    });
 
     if config_path.exists() {
         fs::remove_file(&config_path)?;

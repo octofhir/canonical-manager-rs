@@ -124,7 +124,7 @@ impl CliError for RegistryError {
                 name: _,
                 version: _,
             } => Some(format!(
-                "{} Check the package name and version are correct\n{} Search available packages at https://fs.get-ig.org/pkgs/",
+                "{} Check the package name and version are correct\n{} Search available packages at https://packages.fhir.org",
                 "💡".yellow(),
                 "💡".yellow()
             )),
@@ -349,13 +349,13 @@ fn print_contextual_help(error: &FcmError) {
         }
         FcmError::Registry(RegistryError::PackageNotFound { .. }) => {
             eprintln!("\n{} Package discovery help:", "📖".blue());
-            eprintln!("  • Search for packages at https://fs.get-ig.org/pkgs/");
+            eprintln!("  • Search for packages at https://packages.fhir.org");
             eprintln!("  • Check if the package name and version are correct");
             eprintln!("  • Some packages may only be available in specific registries");
         }
         FcmError::Network(_) => {
             eprintln!("\n{} Network troubleshooting:", "📖".blue());
-            eprintln!("  • Test connectivity: curl -I https://fs.get-ig.org/pkgs");
+            eprintln!("  • Test connectivity: curl -I https://packages.fhir.org");
             eprintln!("  • Check proxy settings if behind corporate firewall");
             eprintln!("  • Try with --verbose flag for detailed logging");
         }

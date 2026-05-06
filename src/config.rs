@@ -1,4 +1,32 @@
-//! Configuration management for FHIR Canonical Manager
+//! Configuration management for FHIR Canonical Manager.
+//!
+//! # Where to look
+//!
+//! | Topic | Symbol | Roughly at |
+//! |---|---|---|
+//! | Top-level config | [`FcmConfig`] | top |
+//! | Registry settings (URL, fallbacks, extras, auth) | [`RegistryConfig`] | top |
+//! | Non-NPM registry entry (FHIRsmith, S3-flat) | [`ExtraRegistry`] | top |
+//! | Backend protocol selector | [`RegistryClientType`] | top |
+//! | Storage paths and cache settings | [`StorageConfig`] | top |
+//! | Per-package install spec | [`PackageSpec`] | top |
+//! | Local filesystem package | [`LocalPackageSpec`] | top |
+//! | Optimisation knobs | [`OptimizationConfig`] | top |
+//! | Default values (registry URL, fallbacks, timeouts) | `default_*` free fns | bottom |
+//! | Env var overrides (`FCM_REGISTRY_URL`, `FCM_REGISTRY_TOKEN`, `FCM_CACHE_DIR`, `FCM_PACKAGES_DIR`) | [`FcmConfig::apply_env_overrides`] | mid |
+//! | Validation rules | `Validate` impls + [`FcmConfig::validate`] | bottom half |
+//! | Test config builder | [`FcmConfig::test_config`] (cfg test/test-utils) | bottom |
+//!
+//! # Defaults (2026-05-06 onward)
+//!
+//! - Registry URL: `https://packages.fhir.org` (NPM-spec).
+//! - Fallbacks: `["https://packages2.fhir.org/packages"]`.
+//! - `extra` registries empty by default. Configure FHIRsmith / `fs.get-ig.org`
+//!   via `[[registry.extra]]` blocks with `client_type = "tarball-direct"` or
+//!   `"s3-flat"`.
+//! - Storage root: `~/.fcm/{cache,packages}`. Future P2 milestone moves to
+//!   `~/.fcm/store/` with content-addressable layout (see
+//!   `docs/refactor/VIRTUAL_STORE_DESIGN.md`).
 
 use crate::error::{ConfigError, Result, Validate};
 use serde::{Deserialize, Serialize};
@@ -40,27 +68,85 @@ pub struct FcmConfig {
 /// Configuration for FHIR package registry connection.
 ///
 /// Contains settings for connecting to and downloading from FHIR package registries,
-/// including timeout and retry parameters.
+/// including timeout, retry parameters, fallback chain, and optional auth token.
+///
+/// The default chain matches the official `fhir-package-loader` defaults:
+/// `packages.fhir.org` (NPM-compatible) primary, `packages2.fhir.org/packages`
+/// (tarball-direct) as fallback. Additional registries with custom protocols
+/// (e.g. `fs.get-ig.org` S3-flat layout) can be configured via `extra`.
 ///
 /// # Example
 ///
 /// ```rust
-/// use octofhir_canonical_manager::config::RegistryConfig;
+/// use octofhir_canonical_manager::config::{RegistryConfig, ExtraRegistry, RegistryClientType};
 ///
 /// let config = RegistryConfig {
-///     url: "https://packages.fhir.org/packages/".to_string(),
+///     url: "https://packages.fhir.org".to_string(),
 ///     timeout: 30,
 ///     retry_attempts: 3,
+///     fallbacks: vec!["https://packages2.fhir.org/packages".to_string()],
+///     extra: vec![ExtraRegistry {
+///         url: "https://fs.get-ig.org".to_string(),
+///         client_type: RegistryClientType::S3Flat,
+///         token_env: None,
+///     }],
+///     token_env: None,
 /// };
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegistryConfig {
+    /// Primary registry URL. Must speak the NPM Package Specification
+    /// (`GET /{name}` returns multi-version manifest with `dist-tags`).
     #[serde(default = "default_registry_url")]
     pub url: String,
+    /// Per-request total timeout in seconds. Used as the body-read budget;
+    /// connection timeout is fixed at 5s.
     #[serde(default = "default_timeout")]
     pub timeout: u64,
+    /// Maximum retry attempts on transient failures (5xx, 429).
     #[serde(default = "default_retry_attempts")]
     pub retry_attempts: u32,
+    /// Ordered list of fallback registries tried after the primary fails.
+    /// All entries are assumed NPM-compatible; for non-NPM protocols use `extra`.
+    #[serde(default = "default_fallbacks")]
+    pub fallbacks: Vec<String>,
+    /// Additional registries with non-NPM protocols (e.g. `fs.get-ig.org`).
+    /// Each entry declares its own `client_type` so the orchestrator can
+    /// dispatch to the correct registry client implementation.
+    #[serde(default)]
+    pub extra: Vec<ExtraRegistry>,
+    /// Name of an environment variable holding a bearer token for the primary
+    /// registry. Defaults to `FCM_REGISTRY_TOKEN` when unset (read at runtime).
+    /// Useful for private NPM-compatible mirrors (Verdaccio, Artifactory).
+    #[serde(default)]
+    pub token_env: Option<String>,
+}
+
+/// Additional non-NPM registry entry. Used for archive-style backends
+/// like `fs.get-ig.org` that don't implement the NPM Package Specification.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtraRegistry {
+    pub url: String,
+    pub client_type: RegistryClientType,
+    /// Optional env var name for a bearer token.
+    #[serde(default)]
+    pub token_env: Option<String>,
+}
+
+/// Registry client implementation selector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+#[serde(rename_all = "kebab-case")]
+pub enum RegistryClientType {
+    /// NPM Package Specification (the default).
+    /// `GET /{name}` returns JSON manifest with `dist-tags` and `versions`.
+    Npm,
+    /// Tarball-direct: `GET /{name}/{version}` returns the .tgz body.
+    /// Used by `packages2.fhir.org/packages`.
+    TarballDirect,
+    /// S3-flat archive: tarballs at `/-/{name}-{version}.tgz`,
+    /// stub manifests at `/pkgs/{name}/{version}`. Used by `fs.get-ig.org`.
+    S3Flat,
 }
 
 /// Specification for a FHIR package to be managed.
@@ -231,6 +317,9 @@ impl Default for RegistryConfig {
             url: default_registry_url(),
             timeout: default_timeout(),
             retry_attempts: default_retry_attempts(),
+            fallbacks: default_fallbacks(),
+            extra: Vec::new(),
+            token_env: None,
         }
     }
 }
@@ -405,6 +494,15 @@ impl FcmConfig {
         // Override registry URL if set
         if let Ok(url) = std::env::var("FCM_REGISTRY_URL") {
             self.registry.url = url;
+        }
+
+        // Auth token for the primary registry. If `registry.token_env` is
+        // configured, that env var is read by the registry client at request
+        // time. As a convenience default, accept `FCM_REGISTRY_TOKEN` directly:
+        // when the user has not configured a custom env var name, point
+        // `token_env` at the conventional one so the client can find it.
+        if self.registry.token_env.is_none() && std::env::var("FCM_REGISTRY_TOKEN").is_ok() {
+            self.registry.token_env = Some("FCM_REGISTRY_TOKEN".to_string());
         }
 
         // Override cache directory if set
@@ -652,9 +750,27 @@ impl FcmConfig {
 }
 
 // Default value functions
+
+/// Primary FHIR package registry. Speaks the NPM Package Specification
+/// (https://confluence.hl7.org/display/FHIR/NPM+Package+Specification).
+/// Operated by Firely/Simplifier under the HL7 brand. 302-redirects
+/// browsers to `simplifier.net/packages`; API consumers are served by
+/// `packages.simplifier.net`.
 fn default_registry_url() -> String {
-    "https://fs.get-ig.org/pkgs/".to_string()
+    "https://packages.fhir.org".to_string()
 }
+
+/// Default fallback chain. `packages2.fhir.org/packages` is HL7's own
+/// "FHIRsmith" server; it does not return JSON manifests but does serve
+/// tarballs directly for known `(name, version)` pairs. Treated by the
+/// `Npm` client as a fallback that will fail fast on metadata lookup —
+/// the orchestrator then routes to a `TarballDirect` client when configured
+/// via `extra`. For now the fallback list contains only NPM-style URLs;
+/// configure `[[registry.extra]]` to opt into non-NPM backends.
+fn default_fallbacks() -> Vec<String> {
+    vec!["https://packages2.fhir.org/packages".to_string()]
+}
+
 fn default_timeout() -> u64 {
     30
 }
@@ -968,6 +1084,7 @@ impl FcmConfig {
                 url: "http://localhost:8080/".to_string(),
                 timeout: 30,
                 retry_attempts: 3,
+                ..RegistryConfig::default()
             },
             packages: vec![],
             storage: StorageConfig {
@@ -998,7 +1115,11 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = FcmConfig::default();
-        assert_eq!(config.registry.url, "https://fs.get-ig.org/pkgs/");
+        assert_eq!(config.registry.url, "https://packages.fhir.org");
+        assert_eq!(
+            config.registry.fallbacks,
+            vec!["https://packages2.fhir.org/packages".to_string()]
+        );
         assert!(config.validate().is_ok());
     }
 

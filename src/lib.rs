@@ -3,6 +3,29 @@
 //! A library-first solution for managing FHIR Implementation Guide packages,
 //! providing fast canonical URL resolution and resource search capabilities.
 //!
+//! ## Module map (cheat sheet)
+//!
+//! | What you want to find | Module |
+//! |---|---|
+//! | Top-level facade ([`CanonicalManager`]) | this crate root |
+//! | Configuration types ([`FcmConfig`], [`config::RegistryConfig`], …) | [`config`] |
+//! | Error enums (typed at lib boundary) | [`error`] |
+//! | Legacy concrete NPM registry client | [`registry`] |
+//! | New trait + per-protocol registry clients (Npm/Packages2/GetIg/Redundant) | [`registry_clients`] |
+//! | Canonical URL resolver | [`resolver`] |
+//! | Full-text search engine | [`search`] |
+//! | Package extraction (.tgz → resources) | [`package`] |
+//! | SQLite storage + indexes | [`sqlite_storage`] (feature `sqlite`) |
+//! | Storage facade over `PackageStore` + `SearchStorage` traits | [`unified_storage`] |
+//! | Storage trait abstractions for custom backends | [`traits`] |
+//! | Install progress event types | [`progress`] |
+//! | Domain types (canonical URL, FHIR version, package info) | [`domain`] |
+//! | CLI subcommands (feature `cli`) | [`cli`] |
+//!
+//! Refactor docs: `docs/refactor/` — `CURRENT_STATE.md`, `AUDIT.md`,
+//! `REGISTRY_ANALYSIS.md`, `JS_PRIOR_ART.md`, `VIRTUAL_STORE_DESIGN.md`,
+//! `PLAN.md`. Read these before making structural changes.
+//!
 //! ## Features
 //!
 //! This crate supports several optional features:
@@ -116,6 +139,7 @@ pub mod performance;
 pub mod progress;
 #[doc(hidden)]
 pub mod registry;
+pub mod registry_clients;
 pub mod resolver;
 pub mod search;
 #[cfg(feature = "sqlite")]
@@ -338,6 +362,12 @@ pub struct CanonicalManager {
     config: FcmConfig,
     storage: Arc<UnifiedStorage>, // Optimized unified storage system
     registry_client: registry::RegistryClient,
+    /// Federated registry chain. Populated when `config.registry.extra` is
+    /// non-empty so heterogeneous backends (FHIRsmith, get-ig.org S3) can
+    /// be dispatched by protocol. When `None`, falls back to the legacy
+    /// single-client `registry_client` whose own `fallbacks` field handles
+    /// pure NPM-spec mirrors. See `src/registry_clients.rs`.
+    registry_chain: Option<Arc<crate::registry_clients::RedundantRegistryClient>>,
     // Optional trait-based components for advanced construction
     registry_dyn: Option<Arc<dyn crate::traits::AsyncRegistry + Send + Sync>>,
     pkg_store_dyn: Option<Arc<dyn crate::traits::PackageStore + Send + Sync>>,
@@ -429,6 +459,29 @@ impl CanonicalManager {
             registry::RegistryClient::new(&config.registry, expanded_storage.cache_dir.clone())
                 .await?;
 
+        // When `extra` registries are configured (non-NPM protocols), build
+        // a federated chain alongside the concrete client. The chain is
+        // consulted first; the legacy client is the fall-through.
+        let registry_chain = if !config.registry.extra.is_empty() {
+            let chain_dir = expanded_storage.cache_dir.join("registry_chain");
+            match crate::registry_clients::RedundantRegistryClient::from_config(
+                &config.registry,
+                chain_dir,
+            )
+            .await
+            {
+                Ok(c) => Some(Arc::new(c)),
+                Err(e) => {
+                    warn!(
+                        "Failed to build federated registry chain, falling back to single-client: {e}"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         // Initialize resolver with unified storage (using trait object)
         let resolver = CanonicalResolver::new(storage.search_storage()).await;
 
@@ -453,6 +506,7 @@ impl CanonicalManager {
             config,
             storage,
             registry_client,
+            registry_chain,
             registry_dyn: None,
             pkg_store_dyn: None,
             resolver,
@@ -476,7 +530,7 @@ impl CanonicalManager {
     ///
     /// This is a convenience method for users who want to get started quickly without
     /// needing to configure anything. It uses:
-    /// - Default registry URL (<https://fs.get-ig.org/pkgs/>)
+    /// - Default registry URL (<https://packages.fhir.org>) with `packages2.fhir.org` fallback
     /// - Default storage paths (~/.maki/cache, ~/.maki/packages, ~/.maki/index)
     /// - SQLite storage backend
     ///
@@ -582,6 +636,7 @@ impl CanonicalManager {
             config,
             storage,
             registry_client,
+            registry_chain: None,
             registry_dyn: Some(registry),
             pkg_store_dyn: Some(package_store),
             resolver,
@@ -591,13 +646,17 @@ impl CanonicalManager {
         })
     }
 
-    // Helper: registry download via trait or concrete client
+    // Helper: registry download via federated chain, AsyncRegistry trait,
+    // or the legacy concrete client — in that order.
     async fn registry_download(&self, spec: &PackageSpec) -> Result<registry::PackageDownload> {
-        if let Some(r) = &self.registry_dyn {
-            r.download_package(spec).await
-        } else {
-            self.registry_client.download_package(spec).await
+        if let Some(chain) = &self.registry_chain {
+            use crate::registry_clients::FhirRegistryClient;
+            return chain.download(spec, None).await;
         }
+        if let Some(r) = &self.registry_dyn {
+            return r.download_package(spec).await;
+        }
+        self.registry_client.download_package(spec).await
     }
 
     // Helper: list packages via trait or unified storage
@@ -1229,9 +1288,13 @@ impl CanonicalManager {
                 url: None,
             };
 
-            // Download package and get metadata (includes dependencies)
+            // Download package and get metadata (includes dependencies).
+            // Routes through `registry_download` so federated chains
+            // (`registry_chain`) and trait-based custom registries
+            // (`registry_dyn`) take precedence over the legacy concrete
+            // client.
             debug!("Downloading package {}...", package_key);
-            let download = self.registry_client.download_package(&spec).await?;
+            let download = self.registry_download(&spec).await?;
             let dependencies = download.metadata.dependencies.clone();
             debug!(
                 "Package {} downloaded successfully, found {} dependencies",
@@ -1866,12 +1929,16 @@ impl CanonicalManager {
     /// * `Ok(Vec<String>)` - List of available versions sorted by semver (newest first)
     /// * `Err` - If the package is not found or network error occurs
     pub async fn list_registry_versions(&self, name: &str) -> Result<Vec<String>> {
+        if let Some(chain) = &self.registry_chain {
+            use crate::registry_clients::FhirRegistryClient;
+            return chain.list_versions(name).await;
+        }
         self.registry_client.list_versions(name).await
     }
 
     /// Search for packages in the registry.
     ///
-    /// This method searches the FHIR package registry (fs.get-ig.org) for packages
+    /// This method searches the FHIR package registry (packages.fhir.org by default) for packages
     /// matching the query string. The search supports partial matching (ILIKE) -
     /// spaces in the query are treated as wildcards for fuzzy matching.
     ///
@@ -1897,6 +1964,53 @@ impl CanonicalManager {
     /// # }
     /// ```
     pub async fn search_registry(&self, query: &str) -> Result<Vec<RegistryPackageInfo>> {
+        if let Some(chain) = &self.registry_chain {
+            use crate::registry_clients::{FhirRegistryClient, SearchQuery};
+            let hits = chain.search(&SearchQuery::by_name(query)).await?;
+            // Adapt PackageHit (per-version row) → RegistryPackageInfo
+            // (per-name aggregate). Group by name and collect versions.
+            let mut by_name: std::collections::HashMap<String, RegistryPackageInfo> =
+                std::collections::HashMap::new();
+            for h in hits {
+                let entry = by_name
+                    .entry(h.name.clone())
+                    .or_insert_with(|| RegistryPackageInfo {
+                        name: h.name.clone(),
+                        versions: Vec::new(),
+                        description: h.description.clone(),
+                        latest_version: String::new(),
+                    });
+                if let Some(v) = h.version
+                    && !entry.versions.contains(&v)
+                {
+                    entry.versions.push(v);
+                }
+                if entry.description.is_none() {
+                    entry.description = h.description;
+                }
+            }
+            let mut out: Vec<RegistryPackageInfo> = by_name
+                .into_values()
+                .map(|mut p| {
+                    p.versions.sort_by(|a, b| {
+                        let na = a.trim_start_matches('v');
+                        let nb = b.trim_start_matches('v');
+                        match (semver::Version::parse(na), semver::Version::parse(nb)) {
+                            (Ok(va), Ok(vb)) => vb.cmp(&va),
+                            _ => b.cmp(a),
+                        }
+                    });
+                    p.latest_version = p
+                        .versions
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| "unknown".to_string());
+                    p
+                })
+                .collect();
+            out.sort_by(|a, b| a.name.cmp(&b.name));
+            return Ok(out);
+        }
         self.registry_client.search_packages(query).await
     }
 

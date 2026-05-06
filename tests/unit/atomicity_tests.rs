@@ -84,7 +84,12 @@ async fn download_writes_part_then_renames() {
     use crate::common::create_test_registry_with_packages;
 
     let registry = create_test_registry_with_packages().await;
-    let config = RegistryConfig { url: registry.url(), timeout: 10, retry_attempts: 1 };
+    let config = RegistryConfig {
+        url: registry.url(),
+        timeout: 10,
+        retry_attempts: 1,
+        ..RegistryConfig::default()
+    };
     let temp = TempDir::new().unwrap();
     let client = RegistryClient::new(&config, temp.path().to_path_buf()).await.unwrap();
 

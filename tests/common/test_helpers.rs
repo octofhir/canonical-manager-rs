@@ -12,6 +12,7 @@ pub fn create_test_config(temp_dir: &Path) -> FcmConfig {
             url: "http://localhost:8080/".to_string(),
             timeout: 30,
             retry_attempts: 3,
+            ..RegistryConfig::default()
         },
         packages: vec![],
         storage: StorageConfig {

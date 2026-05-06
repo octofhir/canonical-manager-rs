@@ -120,13 +120,21 @@ impl CollectingCallback {
     }
 
     pub fn events(&self) -> Vec<InstallEvent> {
-        self.events.lock().unwrap().clone()
+        // Poison-safe: if a previous holder panicked, the data is still
+        // valid; we only need a snapshot.
+        self.events
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 }
 
 impl InstallProgressCallback for CollectingCallback {
     fn on_event(&self, event: InstallEvent) {
-        self.events.lock().unwrap().push(event);
+        self.events
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(event);
     }
 }
 

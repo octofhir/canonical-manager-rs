@@ -1,4 +1,32 @@
-//! Registry client for downloading FHIR packages
+//! Registry client for downloading FHIR packages from NPM-style registries.
+//!
+//! # Where to look
+//!
+//! | Topic | Symbol | Roughly at |
+//! |---|---|---|
+//! | Public client (concrete struct) | `RegistryClient` | top of file |
+//! | Construction + HTTP setup | `RegistryClient::new` | mid file |
+//! | Single-package download with fallback chain | `RegistryClient::download_package_with_progress` | mid file |
+//! | Parallel download (`buffer_unordered(8)`) | `RegistryClient::download_packages_parallel` | mid file |
+//! | NPM metadata fetch with ETag/Last-Modified caching | `fetch_npm_metadata` | bottom half |
+//! | Streaming download + SHA-1 + SRI integrity verification | `try_download_from_registry` (and the big body loop) | mid file |
+//! | Cached-package re-verification | `verify_cached_package` | mid file |
+//! | Retry/backoff (exponential + jitter) | `download_with_retries` | bottom |
+//! | URL builders (npm-style `{base}/{name}` + `{base}/{name}/-/{name}-{ver}.tgz`) | `build_metadata_url`, `build_download_url` | bottom |
+//! | Direct-URL bypass (`PackageSpec.url`) | `download_from_url` | mid file |
+//! | NPM JSON schema | `NpmPackageResponse` and friends (`NpmDistInfo`, `NpmVersionInfo`) | top |
+//! | Public package info type | `PackageInfo` | top |
+//! | Download result type | `PackageDownload` | top |
+//! | Progress trait for UI hooks | `DownloadProgress` | top |
+//!
+//! # Protocol assumed
+//!
+//! The HL7 NPM Package Specification: `GET /{name}` returns a multi-version
+//! manifest with `dist-tags.latest` and a `versions` map. Tarballs are fetched
+//! from the `dist.tarball` URL inside the per-version object. Integrity is
+//! verified against `dist.shasum` (SHA-1) and/or `dist.integrity` (SRI). For
+//! non-NPM backends (e.g. `fs.get-ig.org` S3-flat layout) use a different
+//! client implementation — see `docs/refactor/REGISTRY_ANALYSIS.md`.
 
 use crate::cas_storage::{CasStorage, ContentType};
 use crate::config::{PackageSpec, RegistryConfig};
@@ -18,6 +46,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tracing::{debug, info, warn};
+
+/// Hard cap on tarball size for streaming downloads (2 GiB).
+///
+/// Prevents a malicious or misbehaving registry from filling local disk
+/// with an unbounded body. Real FHIR packages are typically <100 MB; the
+/// largest IG-Publisher tarballs cap out around 500 MB. 2 GiB is a
+/// conservative ceiling that won't trip on legitimate content.
+const MAX_TARBALL_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 /// Trait for receiving progress updates during package downloads.
 ///
@@ -141,45 +177,38 @@ pub struct PackageInfo {
     pub latest_version: String,
 }
 
-/// Registry catalog response
+/// Single entry returned by the FHIR `/catalog` search endpoint.
+///
+/// Both `packages.fhir.org/catalog` (PascalCase keys, no `version` field)
+/// and `packages2.fhir.org/packages/catalog` (camelCase, richer with
+/// `version`, `canonical`, `url`, `date`, `kind`) deserialise into this type.
+/// Casing tolerance is achieved via `#[serde(alias = ...)]` per the IG
+/// Publisher cross-registry pattern (see `PackageClient.java`'s
+/// `obj.asString("Name", "name")`).
 #[derive(Debug, Deserialize, Clone)]
-#[allow(dead_code)]
-struct CatalogResponse {
-    packages: Vec<CatalogPackage>,
-}
-
-/// Package in catalog
-#[derive(Debug, Deserialize, Clone)]
-#[allow(dead_code)]
-struct CatalogPackage {
+struct CatalogEntry {
+    #[serde(alias = "Name")]
     name: String,
-    versions: Vec<String>,
-    description: Option<String>,
-}
-
-/// NPM-style search response from /-/v1/search endpoint
-#[derive(Debug, Deserialize, Clone)]
-struct NpmSearchResponse {
-    objects: Vec<NpmSearchObject>,
+    #[serde(default, alias = "Version")]
+    version: Option<String>,
+    // PascalCase from packages.fhir.org, camelCase from packages2.fhir.org.
+    #[serde(default, alias = "FhirVersion", alias = "fhirVersion")]
     #[allow(dead_code)]
-    total: Option<usize>,
-}
-
-/// Individual search result object
-#[derive(Debug, Deserialize, Clone)]
-struct NpmSearchObject {
-    package: NpmSearchPackage,
-}
-
-/// Package info in search results
-#[derive(Debug, Deserialize, Clone)]
-struct NpmSearchPackage {
-    name: String,
-    #[serde(default)]
-    versions: Vec<String>,
-    #[serde(rename = "_versions")]
-    _versions: Option<Vec<String>>,
+    fhir_version: Option<String>,
+    #[serde(default, alias = "Description")]
     description: Option<String>,
+    #[serde(default, alias = "Canonical")]
+    #[allow(dead_code)]
+    canonical: Option<String>,
+    #[serde(default, alias = "Url")]
+    #[allow(dead_code)]
+    url: Option<String>,
+    #[serde(default, alias = "Date")]
+    #[allow(dead_code)]
+    date: Option<String>,
+    #[serde(default, alias = "Kind")]
+    #[allow(dead_code)]
+    kind: Option<String>,
 }
 
 /// NPM-style package metadata response
@@ -327,12 +356,18 @@ impl RegistryClient {
     /// # }
     /// ```
     pub async fn new(config: &RegistryConfig, cache_dir: PathBuf) -> Result<Self> {
-        // Use a shorter timeout (10 seconds max) to avoid hanging
-        let timeout_secs = std::cmp::min(config.timeout, 10);
+        // Use the configured timeout as the per-request total budget.
+        // Connection timeout is fixed (5s) since registries should always be
+        // reachable quickly; the configured value scales the body-read budget
+        // for large tarball downloads.
         let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(timeout_secs))
+            .timeout(std::time::Duration::from_secs(config.timeout))
             .connect_timeout(std::time::Duration::from_secs(5))
-            .user_agent("octofhir-canonical-manager/0.1.0")
+            .user_agent(concat!(
+                env!("CARGO_PKG_NAME"),
+                "/",
+                env!("CARGO_PKG_VERSION")
+            ))
             .build()?;
 
         let base_url =
@@ -343,11 +378,12 @@ impl RegistryClient {
         // Ensure cache directory exists
         fs::create_dir_all(&cache_dir).await?;
 
-        // Common fallback registries for FHIR packages - prioritize fs.get-ig.org
-        let fallback_registries = vec![
-            "https://fs.get-ig.org/pkgs/".to_string(),
-            "https://packages.fhir.org/packages/".to_string(),
-        ];
+        // Fallback registries are taken from `RegistryConfig.fallbacks`.
+        // Defaults to `packages2.fhir.org/packages` (HL7's official secondary).
+        // Non-NPM backends like `fs.get-ig.org` should be configured via
+        // `RegistryConfig.extra` and dispatched through specialised clients —
+        // this NPM-style fallback list is for NPM-compatible mirrors only.
+        let fallback_registries = config.fallbacks.clone();
 
         let validators_path = cache_dir.join("registry-cache.json");
         let persisted_validators = {
@@ -528,9 +564,17 @@ impl RegistryClient {
             }
         }
 
-        // Try fallback registries
+        // Try fallback registries.
+        //
+        // Dedup against the primary by parsing both URLs and comparing the
+        // normalised form — string equality misses cosmetic differences like
+        // a trailing slash (`packages.fhir.org` vs `packages.fhir.org/`).
+        let primary_norm = self.base_url.as_str().trim_end_matches('/').to_string();
         for fallback_url in &self.fallback_registries {
-            if fallback_url == &self.base_url.to_string() {
+            let fallback_norm = url::Url::parse(fallback_url)
+                .map(|u| u.as_str().trim_end_matches('/').to_string())
+                .unwrap_or_else(|_| fallback_url.trim_end_matches('/').to_string());
+            if fallback_norm == primary_norm {
                 continue; // Skip if it's the same as primary
             }
 
@@ -645,7 +689,10 @@ impl RegistryClient {
 
         if downloads.is_empty() && !errors.is_empty() {
             // All downloads failed
-            return Err(errors.into_iter().next().unwrap());
+            return Err(errors
+                .into_iter()
+                .next()
+                .expect("guarded by !errors.is_empty() above"));
         }
 
         info!(
@@ -714,33 +761,69 @@ impl RegistryClient {
             let _ = fs::remove_file(&part_path).await;
         }
 
-        // Check if we have a cached copy
+        // Check if we have a cached copy. TOFU integrity model: on first
+        // download we persist a `{file_path}.blake3` sidecar with the
+        // Blake3 hex digest of the bytes. On cache hit we recompute and
+        // compare; mismatch deletes the cached file and forces re-download.
+        // The registry doesn't publish hashes for direct-URL specs, so we
+        // record what we got the first time and refuse to use anything
+        // that doesn't match later.
+        let sidecar_path = file_path.with_extension("tgz.blake3");
         if fs::metadata(&file_path).await.is_ok() {
-            debug!(
-                "Using cached package {}@{} from URL download",
-                spec.name, spec.version
-            );
-            if let Some(progress) = progress {
-                let size = fs::metadata(&file_path).await.ok().map(|m| m.len());
-                progress.on_start(size);
-                progress.on_complete();
-            }
-
-            // Create minimal metadata since we don't have registry metadata
-            let metadata = PackageMetadata {
-                name: spec.name.clone(),
-                version: spec.version.clone(),
-                description: Some(format!("Package downloaded from {}", url)),
-                fhir_version: "unknown".to_string(),
-                dependencies: HashMap::new(),
-                canonical_base: None,
+            let sidecar_match = match fs::read_to_string(&sidecar_path).await {
+                Ok(stored_hex) => match fs::read(&file_path).await {
+                    Ok(bytes) => {
+                        let actual = blake3::hash(&bytes).to_hex().to_string();
+                        actual.eq_ignore_ascii_case(stored_hex.trim())
+                    }
+                    Err(_) => false,
+                },
+                Err(_) => {
+                    // No sidecar — first run after upgrade. Compute and
+                    // persist now (TOFU acquire).
+                    if let Ok(bytes) = fs::read(&file_path).await {
+                        let h = blake3::hash(&bytes).to_hex().to_string();
+                        let _ = fs::write(&sidecar_path, &h).await;
+                        true
+                    } else {
+                        false
+                    }
+                }
             };
 
-            return Ok(PackageDownload {
-                spec: spec.clone(),
-                file_path,
-                metadata,
-            });
+            if sidecar_match {
+                debug!(
+                    "Using cached package {}@{} from URL download (Blake3 verified)",
+                    spec.name, spec.version
+                );
+                if let Some(progress) = progress {
+                    let size = fs::metadata(&file_path).await.ok().map(|m| m.len());
+                    progress.on_start(size);
+                    progress.on_complete();
+                }
+
+                let metadata = PackageMetadata {
+                    name: spec.name.clone(),
+                    version: spec.version.clone(),
+                    description: Some(format!("Package downloaded from {url}")),
+                    fhir_version: "unknown".to_string(),
+                    dependencies: HashMap::new(),
+                    canonical_base: None,
+                };
+
+                return Ok(PackageDownload {
+                    spec: spec.clone(),
+                    file_path,
+                    metadata,
+                });
+            }
+
+            warn!(
+                "Cached direct-URL package {}@{} failed integrity check, re-downloading",
+                spec.name, spec.version
+            );
+            let _ = fs::remove_file(&file_path).await;
+            let _ = fs::remove_file(&sidecar_path).await;
         }
 
         // Perform download with retries
@@ -757,15 +840,30 @@ impl RegistryClient {
         // Create file for streaming download
         let mut file = fs::File::create(&part_path).await?;
 
-        // Stream the download with progress updates
+        // Stream the download with progress updates. Hash bytes with Blake3
+        // as they pass through so we can persist a TOFU sidecar after
+        // success — the registry side publishes no integrity for direct
+        // URLs, so future runs verify against the hash we recorded today.
         let mut stream = response.bytes_stream();
         let mut downloaded: u64 = 0;
+        let mut hasher = blake3::Hasher::new();
         let mut last_progress_update = std::time::Instant::now();
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
             file.write_all(&chunk).await?;
+            hasher.update(&chunk);
             downloaded += chunk.len() as u64;
+            if downloaded > MAX_TARBALL_BYTES {
+                let _ = fs::remove_file(&part_path).await;
+                return Err(RegistryError::InvalidMetadata {
+                    message: format!(
+                        "Download from {url} exceeded {} bytes limit",
+                        MAX_TARBALL_BYTES
+                    ),
+                }
+                .into());
+            }
 
             // Update progress (throttle to avoid overwhelming the progress callback)
             if let Some(progress) = progress {
@@ -773,8 +871,6 @@ impl RegistryClient {
                 if now.duration_since(last_progress_update) >= std::time::Duration::from_millis(100)
                 {
                     progress.on_progress(downloaded, content_length);
-                    // Small delay to ensure progress bar can render
-                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
                     last_progress_update = now;
                 }
             }
@@ -787,6 +883,10 @@ impl RegistryClient {
 
         // Atomically move the .part file to final name
         fs::rename(&part_path, &file_path).await?;
+        // Persist the TOFU integrity sidecar. Best-effort — if the write
+        // fails (full disk, perms), the next cache hit recomputes and
+        // re-acquires.
+        let _ = fs::write(&sidecar_path, hasher.finalize().to_hex().as_str()).await;
         info!("Package downloaded to: {}", file_path.display());
 
         // Store in CAS for future reuse and deduplication
@@ -947,6 +1047,16 @@ impl RegistryClient {
                 }
             }
             downloaded += chunk.len() as u64;
+            if downloaded > MAX_TARBALL_BYTES {
+                let _ = fs::remove_file(&part_path).await;
+                return Err(RegistryError::InvalidMetadata {
+                    message: format!(
+                        "Download of {}@{} exceeded {} bytes limit",
+                        spec.name, spec.version, MAX_TARBALL_BYTES
+                    ),
+                }
+                .into());
+            }
 
             // Update progress more frequently and ensure visible updates
             let now = std::time::Instant::now();
@@ -955,8 +1065,6 @@ impl RegistryClient {
                 progress.on_progress(downloaded, content_length);
                 if now.duration_since(last_progress_update) >= std::time::Duration::from_millis(100)
                 {
-                    // Small delay to ensure progress bar can render
-                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
                     last_progress_update = now;
                 }
             }
@@ -980,37 +1088,48 @@ impl RegistryClient {
             }
         }
 
-        // Verify SRI integrity if provided and recognized
+        // Verify SRI integrity if provided and recognized.
+        // Malformed integrity values are rejected as a hard error — silently
+        // bypassing the check on bad base64 would be a supply-chain footgun.
         if let (Some(algo), Some(intg)) = (sri_algo, expected_integrity)
             && let Some((_, b64)) = intg.split_once('-')
         {
-            let expected_bytes: Vec<u8> = base64::engine::general_purpose::STANDARD
+            let expected_bytes = base64::engine::general_purpose::STANDARD
                 .decode(b64.as_bytes())
-                .unwrap_or_default();
-            use sha2::Digest;
-            if expected_bytes.is_empty() { /* skip invalid integrity */
-            } else {
-                let ok = match algo {
-                    IntegrityAlgo::Sha256 => {
-                        sri_sha256.map(|h| h.finalize().to_vec()) == Some(expected_bytes.clone())
-                    }
-                    IntegrityAlgo::Sha384 => {
-                        sri_sha384.map(|h| h.finalize().to_vec()) == Some(expected_bytes.clone())
-                    }
-                    IntegrityAlgo::Sha512 => {
-                        sri_sha512.map(|h| h.finalize().to_vec()) == Some(expected_bytes.clone())
-                    }
-                };
-                if !ok {
-                    let _ = fs::remove_file(&part_path).await;
-                    return Err(RegistryError::InvalidMetadata {
-                        message: format!(
-                            "Integrity (SRI) mismatch for {}@{}",
-                            spec.name, spec.version
-                        ),
-                    }
-                    .into());
+                .map_err(|e| RegistryError::InvalidMetadata {
+                    message: format!(
+                        "Invalid SRI integrity '{}' for {}@{}: {}",
+                        intg, spec.name, spec.version, e
+                    ),
+                })?;
+            if expected_bytes.is_empty() {
+                let _ = fs::remove_file(&part_path).await;
+                return Err(RegistryError::InvalidMetadata {
+                    message: format!("Empty SRI digest for {}@{}", spec.name, spec.version),
                 }
+                .into());
+            }
+            use sha2::Digest;
+            let ok = match algo {
+                IntegrityAlgo::Sha256 => {
+                    sri_sha256.map(|h| h.finalize().to_vec()) == Some(expected_bytes.clone())
+                }
+                IntegrityAlgo::Sha384 => {
+                    sri_sha384.map(|h| h.finalize().to_vec()) == Some(expected_bytes.clone())
+                }
+                IntegrityAlgo::Sha512 => {
+                    sri_sha512.map(|h| h.finalize().to_vec()) == Some(expected_bytes.clone())
+                }
+            };
+            if !ok {
+                let _ = fs::remove_file(&part_path).await;
+                return Err(RegistryError::InvalidMetadata {
+                    message: format!(
+                        "Integrity (SRI) mismatch for {}@{}",
+                        spec.name, spec.version
+                    ),
+                }
+                .into());
             }
         }
 
@@ -1473,20 +1592,38 @@ impl RegistryClient {
         Ok(versions)
     }
 
-    /// Searches for packages matching a query string.
+    /// Searches for packages matching a query string via the FHIR `/catalog`
+    /// endpoint.
     ///
-    /// Uses the NPM-style `/-/v1/search` endpoint to search for packages.
-    /// The query supports partial matching (ILIKE) - spaces in the query
-    /// are treated as wildcards for fuzzy matching.
+    /// **Important:** the NPM `/-/v1/search?text=...` endpoint that earlier
+    /// versions of this client used returns 404 on every official FHIR
+    /// registry (`packages.fhir.org`, `packages.simplifier.net`,
+    /// `packages2.fhir.org`). Verified 2026-05-06. The de-facto FHIR search
+    /// contract is `GET {base}/catalog?name=&canonical=&fhirversion=&prerelease=`
+    /// returning a JSON array, implemented by IG Publisher and the Firely
+    /// .NET client. See `docs/refactor/REGISTRY_ANALYSIS.md` §7.
+    ///
+    /// Casing of response keys differs across registries
+    /// (`packages.fhir.org` returns PascalCase; `packages2.fhir.org/packages`
+    /// returns camelCase). The deserialiser is tolerant of both via
+    /// `#[serde(alias)]`.
+    ///
+    /// Multiple variants of the same logical package may appear as separate
+    /// rows (e.g. `hl7.fhir.us.core`, `hl7.fhir.us.core.v311`). Results are
+    /// grouped by `name`; if the registry returned a `version` field, all
+    /// versions are aggregated into the resulting `PackageInfo.versions`.
     ///
     /// # Arguments
     ///
-    /// * `query` - Search query string (e.g., "us core", "hl7.fhir")
+    /// * `query` - Substring to match against the `name` field (catalog uses
+    ///   `?name=<substring>`).
     ///
-    /// # Returns
+    /// # Errors
     ///
-    /// * `Ok(Vec<PackageInfo>)` - List of matching packages
-    /// * `Err` - If search operation fails
+    /// Returns `Err(RegistryError::RegistryUnavailable)` when the catalog
+    /// endpoint is not implemented (e.g. for generic NPM mirrors). Callers
+    /// should treat this as "search not supported by this backend" and fall
+    /// through to the next configured registry.
     ///
     /// # Example
     ///
@@ -1505,62 +1642,101 @@ impl RegistryClient {
     pub async fn search_packages(&self, query: &str) -> Result<Vec<PackageInfo>> {
         debug!("Searching for packages with query: {}", query);
 
-        // Build search URL from origin (scheme + host), NOT from base_url which includes /pkgs/
-        // The search endpoint is at the root: /-/v1/search
-        let origin = self.base_url.origin().ascii_serialization();
-        let search_url = format!("{}/-/v1/search?text={}", origin, urlencoding::encode(query));
-
+        // `{base}/catalog` works for both `packages.fhir.org` (where base has
+        // no path) and `packages2.fhir.org/packages` (where base is the
+        // `/packages` prefix). Each accepts `?name=` as a substring filter.
+        let base = self.base_url.as_str().trim_end_matches('/');
+        let search_url = format!("{base}/catalog?name={}", urlencoding::encode(query));
         debug!("Search URL: {}", search_url);
 
         let response = self.client.get(&search_url).send().await?;
+        let status = response.status();
 
-        if !response.status().is_success() {
-            warn!("Search request failed with status: {}", response.status());
-            return Ok(vec![]);
+        if status == reqwest::StatusCode::NOT_FOUND
+            || status == reqwest::StatusCode::METHOD_NOT_ALLOWED
+        {
+            // Backend doesn't implement /catalog. Caller (or an orchestrator)
+            // should try the next registry in the chain.
+            return Err(RegistryError::RegistryUnavailable { url: search_url }.into());
+        }
+        if !status.is_success() {
+            warn!("Search request failed with status: {status}");
+            return Err(RegistryError::RegistryUnavailable { url: search_url }.into());
         }
 
-        let search_response: NpmSearchResponse = match response.json().await {
-            Ok(resp) => resp,
+        let entries: Vec<CatalogEntry> = match response.json().await {
+            Ok(v) => v,
             Err(e) => {
-                warn!("Failed to parse search response: {}", e);
-                return Ok(vec![]);
+                warn!("Failed to parse catalog response: {e}");
+                return Err(RegistryError::InvalidMetadata {
+                    message: format!("Invalid /catalog JSON: {e}"),
+                }
+                .into());
             }
         };
 
-        // Convert search results to PackageInfo
-        let packages: Vec<PackageInfo> = search_response
-            .objects
-            .into_iter()
-            .map(|obj| {
-                let pkg = obj.package;
-                // Get versions from _versions or versions field
-                let versions = pkg._versions.unwrap_or(pkg.versions);
-                let latest = versions
+        // Group by name; aggregate versions when present.
+        let mut by_name: HashMap<String, PackageInfo> = HashMap::new();
+        for entry in entries {
+            let pkg = by_name
+                .entry(entry.name.clone())
+                .or_insert_with(|| PackageInfo {
+                    name: entry.name.clone(),
+                    versions: Vec::new(),
+                    description: entry.description.clone(),
+                    latest_version: String::new(),
+                });
+            if let Some(v) = entry.version
+                && !pkg.versions.contains(&v)
+            {
+                pkg.versions.push(v);
+            }
+            if pkg.description.is_none() {
+                pkg.description = entry.description;
+            }
+        }
+
+        // Compute latest_version per package (semver descending, lexical fallback).
+        let mut packages: Vec<PackageInfo> = by_name
+            .into_values()
+            .map(|mut p| {
+                p.versions.sort_by(|a, b| {
+                    let na = a.trim_start_matches('v');
+                    let nb = b.trim_start_matches('v');
+                    match (semver::Version::parse(na), semver::Version::parse(nb)) {
+                        (Ok(va), Ok(vb)) => vb.cmp(&va),
+                        _ => b.cmp(a),
+                    }
+                });
+                p.latest_version = p
+                    .versions
                     .first()
                     .cloned()
                     .unwrap_or_else(|| "unknown".to_string());
-                PackageInfo {
-                    name: pkg.name,
-                    versions,
-                    description: pkg.description,
-                    latest_version: latest,
-                }
+                p
             })
             .collect();
+        packages.sort_by(|a, b| a.name.cmp(&b.name));
 
         info!("Search returned {} packages", packages.len());
         Ok(packages)
     }
 
-    /// Build metadata URL for a package (npm-style)
+    /// Build metadata URL for a package (npm-style).
+    ///
+    /// Tolerates registry base URLs both with and without trailing slash
+    /// (e.g. `https://packages.fhir.org` and `https://packages.fhir.org/`)
+    /// by always inserting exactly one `/` before the package name.
     fn build_metadata_url(&self, name: &str) -> String {
-        format!("{}{}", self.base_url, name)
+        let base = self.base_url.as_str().trim_end_matches('/');
+        format!("{base}/{name}")
     }
 
-    /// Build download URL for a package (npm-style)
+    /// Build download URL for a package (npm-style).
     #[cfg(test)]
     fn build_download_url(&self, name: &str, version: &str) -> String {
-        format!("{}{}/-/{}-{}.tgz", self.base_url, name, name, version)
+        let base = self.base_url.as_str().trim_end_matches('/');
+        format!("{base}/{name}/-/{name}-{version}.tgz")
     }
 
     /// Download with retries
@@ -1610,7 +1786,14 @@ impl RegistryClient {
             }
         }
 
-        Err(last_error.unwrap().into())
+        // Loop above either returns Ok or sets last_error on every iteration.
+        // The `unwrap_or_else` keeps the function panic-free if the invariant
+        // ever changes — pop a typed error rather than crashing the worker.
+        Err(last_error
+            .unwrap_or(RegistryError::RegistryUnavailable {
+                url: url.to_string(),
+            })
+            .into())
     }
 }
 
@@ -1655,16 +1838,23 @@ mod tests {
             .unwrap();
 
         let metadata_url = client.build_metadata_url("hl7.fhir.us.core");
-        assert_eq!(metadata_url, "https://fs.get-ig.org/pkgs/hl7.fhir.us.core");
+        assert_eq!(metadata_url, "https://packages.fhir.org/hl7.fhir.us.core");
 
         let download_url = client.build_download_url("hl7.fhir.us.core", "6.1.0");
         assert_eq!(
             download_url,
-            "https://fs.get-ig.org/pkgs/hl7.fhir.us.core/-/hl7.fhir.us.core-6.1.0.tgz"
+            "https://packages.fhir.org/hl7.fhir.us.core/-/hl7.fhir.us.core-6.1.0.tgz"
         );
     }
 
+    // Live-network search test. Disabled because:
+    //  - It hits the real default registry every time CI runs.
+    //  - `packages.fhir.org` does not implement the NPM `/-/v1/search` endpoint
+    //    (verified via WebFetch on /-/all returning 404 — see
+    //    docs/refactor/REGISTRY_ANALYSIS.md §2.1).
+    // Re-enable as a wiremock-based test in P0.12.
     #[tokio::test]
+    #[ignore]
     async fn test_package_search() {
         let config = RegistryConfig::default();
         let temp_dir = TempDir::new().unwrap();
@@ -1672,9 +1862,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Search for packages - this makes a real network call
         let results = client.search_packages("core").await.unwrap();
-        // "core" should match several FHIR packages in the registry
         assert!(
             !results.is_empty(),
             "Search for 'core' should return results"

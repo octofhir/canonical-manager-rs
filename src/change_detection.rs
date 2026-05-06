@@ -29,6 +29,9 @@ pub struct ChangeSet {
 }
 
 impl ChangeSet {
+    /// Synchronous core. Performs blocking `WalkDir` traversal — must be
+    /// called from a non-async context or wrapped in `spawn_blocking`.
+    /// Prefer [`Self::new_package_async`] when called from Tokio.
     pub fn new_package(package_path: &Path) -> Result<Self> {
         let mut added_files = Vec::new();
 
@@ -47,6 +50,16 @@ impl ChangeSet {
             structure_changed: true,
             timestamp: SystemTime::now(),
         })
+    }
+
+    /// Async wrapper that runs the blocking `WalkDir` on the tokio
+    /// blocking pool. Use this from any async function — calling
+    /// [`Self::new_package`] directly from `async fn` blocks the worker.
+    pub async fn new_package_async(package_path: &Path) -> Result<Self> {
+        let owned = package_path.to_path_buf();
+        tokio::task::spawn_blocking(move || Self::new_package(&owned))
+            .await
+            .map_err(|e| crate::error::FcmError::Generic(format!("Join error: {e}")))?
     }
 
     pub fn is_empty(&self) -> bool {
@@ -103,29 +116,35 @@ impl PackageChangeDetector {
             return Ok(changes);
         }
 
-        // New package - all files are additions
-        ChangeSet::new_package(package_path)
+        // New package - all files are additions. Walks the filesystem on
+        // the blocking pool so we don't stall the tokio worker.
+        ChangeSet::new_package_async(package_path).await
     }
 
     pub async fn compute_package_checksum(&self, package_path: &Path) -> Result<PackageChecksum> {
         let mut file_checksums = HashMap::new();
         let mut hasher = blake3::Hasher::new();
 
-        // Process all JSON files in parallel
-        let entries: Vec<_> = WalkDir::new(package_path)
-            .into_iter()
-            .filter_map(|entry| entry.ok())
-            .filter(|e| e.path().extension() == Some(std::ffi::OsStr::new("json")))
-            .collect();
+        // WalkDir is blocking; punt to spawn_blocking so we don't tie up
+        // the tokio worker when traversing large package trees.
+        let owned = package_path.to_path_buf();
+        let entries: Vec<PathBuf> = tokio::task::spawn_blocking(move || {
+            WalkDir::new(&owned)
+                .into_iter()
+                .filter_map(|entry| entry.ok())
+                .filter(|e| e.path().extension() == Some(std::ffi::OsStr::new("json")))
+                .map(|e| e.into_path())
+                .collect()
+        })
+        .await
+        .map_err(|e| crate::error::FcmError::Generic(format!("Join error: {e}")))?;
 
         // Process files sequentially to avoid blocking the async runtime with parallel blocking ops
         let mut checksums = Vec::new();
-        for entry in entries {
-            let path = entry.path().to_owned();
+        for path in entries {
             let content = tokio::fs::read(&path).await?;
             let file_hash = blake3::hash(&content);
-            let path_clone = path.clone();
-            checksums.push((path_clone, file_hash));
+            checksums.push((path, file_hash));
         }
 
         for (path, hash) in checksums {

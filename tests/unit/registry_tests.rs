@@ -43,6 +43,7 @@ async fn test_get_package_metadata_success() {
         url: registry.url(),
         timeout: 30,
         retry_attempts: 3,
+        ..RegistryConfig::default()
     };
     let temp_dir = TempDir::new().unwrap();
     let client = RegistryClient::new(&config, temp_dir.path().to_path_buf())
@@ -76,6 +77,7 @@ async fn test_get_package_metadata_not_found() {
         url: registry.url(),
         timeout: 30,
         retry_attempts: 3,
+        ..RegistryConfig::default()
     };
     let temp_dir = TempDir::new().unwrap();
     let client = RegistryClient::new(&config, temp_dir.path().to_path_buf())
@@ -101,6 +103,7 @@ async fn test_download_package_success() {
         url: registry.url(),
         timeout: 30,
         retry_attempts: 3,
+        ..RegistryConfig::default()
     };
     let temp_dir = TempDir::new().unwrap();
     let client = RegistryClient::new(&config, temp_dir.path().to_path_buf())
@@ -140,6 +143,7 @@ async fn test_download_package_with_dependencies() {
         url: registry.url(),
         timeout: 30,
         retry_attempts: 3,
+        ..RegistryConfig::default()
     };
     let temp_dir = TempDir::new().unwrap();
     let client = RegistryClient::new(&config, temp_dir.path().to_path_buf())
@@ -186,6 +190,7 @@ async fn test_registry_fallback() {
         url: failing_registry.url(),
         timeout: 5, // Short timeout for faster test
         retry_attempts: 1,
+        ..RegistryConfig::default()
     };
     let temp_dir = TempDir::new().unwrap();
     let client = RegistryClient::new(&config, temp_dir.path().to_path_buf())
@@ -229,6 +234,7 @@ async fn test_retry_mechanism() {
         url: registry.url(),
         timeout: 30,
         retry_attempts: 3,
+        ..RegistryConfig::default()
     };
     let temp_dir = TempDir::new().unwrap();
     let client = RegistryClient::new(&config, temp_dir.path().to_path_buf())
@@ -262,6 +268,7 @@ async fn test_list_versions() {
         url: registry.url(),
         timeout: 30,
         retry_attempts: 3,
+        ..RegistryConfig::default()
     };
     let temp_dir = TempDir::new().unwrap();
     let client = RegistryClient::new(&config, temp_dir.path().to_path_buf())
@@ -289,6 +296,7 @@ async fn test_search_packages() {
         url: registry.url(),
         timeout: 30,
         retry_attempts: 3,
+        ..RegistryConfig::default()
     };
     let temp_dir = TempDir::new().unwrap();
     let client = RegistryClient::new(&config, temp_dir.path().to_path_buf())
@@ -296,11 +304,22 @@ async fn test_search_packages() {
         .unwrap();
 
     let result = client.search_packages("fhir").await;
-    assert!(result.is_ok());
+    assert!(result.is_ok(), "search via /catalog failed: {result:?}");
 
-    // The current implementation returns empty results
     let packages = result.unwrap();
-    assert!(packages.is_empty());
+    // Mock registry registers `hl7.fhir.r4.core` and `hl7.fhir.us.core` —
+    // both contain "fhir" in their names so /catalog?name=fhir matches.
+    // The mock returns all entries regardless of `name=` filter, but we
+    // still expect at least one match.
+    assert!(
+        !packages.is_empty(),
+        "expected at least one package from /catalog mock"
+    );
+    assert!(
+        packages.iter().any(|p| p.name.contains("fhir")),
+        "expected a fhir-named package in results, got {:?}",
+        packages.iter().map(|p| &p.name).collect::<Vec<_>>()
+    );
 }
 
 /// Test persistent metadata cache writes validators and uses them on a new client
@@ -316,6 +335,7 @@ async fn test_persistent_metadata_cache_etag_and_304() {
         url: registry.url(),
         timeout: 30,
         retry_attempts: 3,
+        ..RegistryConfig::default()
     };
     let temp_dir = TempDir::new().unwrap();
 
@@ -384,6 +404,7 @@ async fn test_package_metadata_parsing() {
         url: registry.url(),
         timeout: 30,
         retry_attempts: 3,
+        ..RegistryConfig::default()
     };
     let temp_dir = TempDir::new().unwrap();
     let client = RegistryClient::new(&config, temp_dir.path().to_path_buf())
@@ -433,6 +454,7 @@ async fn test_network_timeout() {
         url: registry.url(),
         timeout: 1, // 1 second timeout
         retry_attempts: 1,
+        ..RegistryConfig::default()
     };
     let temp_dir = TempDir::new().unwrap();
     let client = RegistryClient::new(&config, temp_dir.path().to_path_buf())

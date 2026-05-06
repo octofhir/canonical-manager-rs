@@ -10,7 +10,12 @@ async fn install_and_resolve_timing_baseline() {
     let registry = create_test_registry_with_packages().await;
 
     let cfg = FcmConfig {
-        registry: RegistryConfig { url: registry.url(), timeout: 5, retry_attempts: 1 },
+        registry: RegistryConfig {
+        url: registry.url(),
+        timeout: 5,
+        retry_attempts: 1,
+        ..RegistryConfig::default()
+    },
         packages: vec![],
         storage: StorageConfig {
             cache_dir: tmp.path().join("cache"),

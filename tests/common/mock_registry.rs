@@ -102,10 +102,41 @@ impl MockRegistry {
             self.setup_package_download_mock(package_data).await;
         }
 
+        self.setup_catalog_mock().await;
+
         // Setup failure mocks if configured
         if self.should_fail {
             self.setup_failure_mocks().await;
         }
+    }
+
+    /// Setup the FHIR `/catalog` search endpoint.
+    ///
+    /// Returns all registered packages (filtered by `?name=` substring when
+    /// the query param is present). Mirrors the camelCase shape of
+    /// `packages2.fhir.org/packages/catalog`. The real `packages.fhir.org`
+    /// returns PascalCase, but the production deserialiser accepts both via
+    /// `#[serde(alias)]`, so testing one casing is sufficient.
+    async fn setup_catalog_mock(&self) {
+        let entries: Vec<serde_json::Value> = self
+            .packages
+            .values()
+            .map(|p| {
+                json!({
+                    "name": p.name,
+                    "version": p.version,
+                    "fhirVersion": p.fhir_versions.first().cloned().unwrap_or_default(),
+                    "description": p.description.clone().unwrap_or_default(),
+                    "canonical": p.canonical.clone().unwrap_or_default(),
+                })
+            })
+            .collect();
+        let response = ResponseTemplate::new(200).set_body_json(&entries);
+        Mock::given(method("GET"))
+            .and(path("/catalog"))
+            .respond_with(response)
+            .mount(&self.server)
+            .await;
     }
 
     /// Setup metadata endpoint for a package

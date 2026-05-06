@@ -927,6 +927,21 @@ impl SearchEngine {
         }
     }
 
+    /// Ensure the in-memory text index is populated.
+    ///
+    /// Uses double-checked locking on `index_built`. If a build task is
+    /// cancelled (e.g. tokio runtime shutdown while awaiting
+    /// `get_cache_entries`), `index_built` stays `false` and partial state
+    /// remains in the DashMap. The next caller will rebuild on top of the
+    /// partial index — `add_resource` is idempotent at the term level
+    /// (insertions merge into the term's HashSet), so duplicate writes
+    /// are benign and concurrent readers seeing partial state simply miss
+    /// a few terms (a cache miss, not corruption).
+    ///
+    /// A future refactor (P3) can build into a fresh `TextIndex` and swap
+    /// it via `RwLock<Arc<TextIndex>>` for true atomicity. Today's
+    /// behaviour is correct under cancellation; only consistency timing
+    /// changes.
     async fn ensure_text_index_built(&self) {
         if self.index_built.load(std::sync::atomic::Ordering::Acquire) {
             return;

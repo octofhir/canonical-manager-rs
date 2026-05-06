@@ -49,17 +49,17 @@ struct ResourceRow {
 }
 
 impl SqliteStorage {
-    fn configure_connection(conn: &mut rusqlite::Connection) -> rusqlite::Result<()> {
-        conn.execute_batch(
-            r#"
-            PRAGMA foreign_keys = ON;
-            PRAGMA journal_mode = WAL;
-            PRAGMA synchronous = NORMAL;
-            PRAGMA temp_store = MEMORY;
-            "#,
-        )?;
-        Ok(())
-    }
+    /// SQL executed once per connection lifetime (via the deadpool
+    /// `post_create` hook). Applies WAL journal mode, NORMAL synchronous,
+    /// memory temp store, and foreign keys. Earlier code re-ran this on
+    /// every `with_connection` call which forced 4 disk round-trips per
+    /// query — visible as tail-latency under load.
+    const CONNECTION_INIT_PRAGMAS: &'static str = r#"
+        PRAGMA foreign_keys = ON;
+        PRAGMA journal_mode = WAL;
+        PRAGMA synchronous = NORMAL;
+        PRAGMA temp_store = MEMORY;
+    "#;
 
     async fn with_connection<F, R>(&self, f: F) -> Result<R>
     where
@@ -72,17 +72,11 @@ impl SqliteStorage {
             })
         })?;
 
-        let result = conn
-            .interact(move |conn| {
-                Self::configure_connection(conn)?;
-                f(conn)
+        let result = conn.interact(move |conn| f(conn)).await.map_err(|e| {
+            FcmError::Storage(StorageError::DatabaseError {
+                message: format!("SQLite connection worker failed: {e}"),
             })
-            .await
-            .map_err(|e| {
-                FcmError::Storage(StorageError::DatabaseError {
-                    message: format!("SQLite connection worker failed: {e}"),
-                })
-            })?;
+        })?;
 
         result.map_err(|e| {
             FcmError::Storage(StorageError::DatabaseError {
@@ -95,6 +89,20 @@ impl SqliteStorage {
         tokio::fs::create_dir_all(&config.packages_dir).await?;
         let db_path = config.packages_dir.join("storage.db");
 
+        // Run init PRAGMAs once per connection lifetime via deadpool's
+        // post_create hook. Pre-P1 the same PRAGMAs were re-applied on
+        // every `with_connection` checkout — 4 extra disk round-trips per
+        // query under contention.
+        use deadpool_sqlite::{Hook, HookError};
+        let post_create_hook = Hook::async_fn(|conn, _| {
+            Box::pin(async move {
+                conn.interact(|c| c.execute_batch(Self::CONNECTION_INIT_PRAGMAS))
+                    .await
+                    .map_err(|e| HookError::message(format!("post_create interact failed: {e}")))?
+                    .map_err(HookError::Backend)?;
+                Ok(())
+            })
+        });
         let pool = DeadpoolConfig::new(db_path.clone())
             .builder(Runtime::Tokio1)
             .map_err(|e| {
@@ -106,6 +114,7 @@ impl SqliteStorage {
             .wait_timeout(Some(std::time::Duration::from_secs(30)))
             .create_timeout(Some(std::time::Duration::from_secs(30)))
             .recycle_timeout(Some(std::time::Duration::from_secs(30)))
+            .post_create(post_create_hook)
             .build()
             .map_err(|e| {
                 FcmError::Storage(StorageError::InitializationFailed {
@@ -113,11 +122,27 @@ impl SqliteStorage {
                 })
             })?;
 
-        let cas_path = config
-            .packages_dir
-            .parent()
-            .unwrap_or(&config.packages_dir)
-            .join("cache");
+        // CAS lives next to the packages directory. Prefer
+        // `config.cache_dir` when explicitly set, falling back to
+        // `<packages_dir>/../cache` for backwards compatibility. The
+        // previous `unwrap_or(&config.packages_dir)` silently nested CAS
+        // *inside* `packages_dir` when the latter sat at a filesystem
+        // root, producing a subtly broken layout. Use `cache_dir` directly
+        // — that field is always populated by config defaults.
+        let cas_path = if !config.cache_dir.as_os_str().is_empty() {
+            config.cache_dir.clone()
+        } else if let Some(parent) = config.packages_dir.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            parent.join("cache")
+        } else {
+            return Err(FcmError::Storage(StorageError::InitializationFailed {
+                message: format!(
+                    "Cannot derive CAS path: packages_dir={} has no parent and cache_dir is empty",
+                    config.packages_dir.display()
+                ),
+            }));
+        };
         let cas = Arc::new(CasStorage::new(cas_path).await.map_err(|e| {
             FcmError::Storage(StorageError::IoError {
                 message: format!("Failed to initialize CAS storage: {e}"),
@@ -396,7 +421,7 @@ impl SqliteStorage {
         let manifest_hash_hex = manifest_hash.to_hex();
 
         self.with_connection(move |conn| {
-            let tx = conn.unchecked_transaction()?;
+            let tx = conn.transaction()?;
 
             tx.execute(
                 "INSERT INTO packages (name, version, fhir_version, manifest_hash, installed_at, resource_count, priority)
@@ -575,7 +600,7 @@ impl SqliteStorage {
 
         let package_count = batch_data.len();
         self.with_connection(move |conn| {
-            let tx = conn.unchecked_transaction()?;
+            let tx = conn.transaction()?;
 
             let mut package_stmt = tx.prepare(
                 "INSERT OR REPLACE INTO packages (name, version, fhir_version, manifest_hash, installed_at, resource_count, priority)
@@ -726,9 +751,18 @@ impl SqliteStorage {
     }
 
     pub async fn find_by_base_url(&self, base_url: &str) -> Result<Vec<ResourceIndex>> {
-        let pattern = format!("{}%", base_url);
+        // Escape LIKE metacharacters in the user-supplied prefix: `%` and
+        // `_` would otherwise act as wildcards inside `LIKE`, matching
+        // unintended rows when a canonical URL happens to contain those
+        // characters. Backslash is the escape character (declared via
+        // `ESCAPE '\'`). `\` itself must also be escaped.
+        let escaped = base_url
+            .replace('\\', r"\\")
+            .replace('%', r"\%")
+            .replace('_', r"\_");
+        let pattern = format!("{escaped}%");
         self.with_connection(move |conn| {
-            let query = format!("{} WHERE r.url LIKE ?1", Self::RESOURCE_SELECT);
+            let query = format!("{} WHERE r.url LIKE ?1 ESCAPE '\\'", Self::RESOURCE_SELECT);
             let mut stmt = conn.prepare(&query)?;
             let results = stmt
                 .query_map(rusqlite::params![pattern], extract_resource_index)?
@@ -948,9 +982,25 @@ impl SqliteStorage {
                         fhir_version: row
                             .get::<_, Option<String>>(2)?
                             .unwrap_or_else(|| "4.0.1".to_string()),
-                        installed_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(3)?)
-                            .map(|dt| dt.with_timezone(&Utc))
-                            .unwrap_or_else(|_| Utc::now()),
+                        installed_at: {
+                            // A corrupted timestamp in the DB is a real
+                            // data-integrity signal, not something to
+                            // silently paper over with `Utc::now()`. Bubble
+                            // it as a SQLite invalid-data error so the
+                            // caller sees a typed StorageError.
+                            let raw: String = row.get(3)?;
+                            DateTime::parse_from_rfc3339(&raw)
+                                .map(|dt| dt.with_timezone(&Utc))
+                                .map_err(|e| {
+                                    rusqlite::Error::FromSqlConversionFailure(
+                                        3,
+                                        rusqlite::types::Type::Text,
+                                        Box::new(std::io::Error::other(format!(
+                                            "Invalid RFC3339 timestamp '{raw}' in packages.installed_at: {e}"
+                                        ))),
+                                    )
+                                })?
+                        },
                         resource_count: row.get(4)?,
                     })
                 })?
@@ -965,7 +1015,7 @@ impl SqliteStorage {
         let pkg_name = name.to_string();
         let pkg_version = version.to_string();
         self.with_connection(move |conn| {
-            let tx = conn.unchecked_transaction()?;
+            let tx = conn.transaction()?;
 
             tx.execute(
                 "DELETE FROM resources WHERE package_name = ?1 AND package_version = ?2",

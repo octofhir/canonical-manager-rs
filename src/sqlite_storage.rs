@@ -17,8 +17,20 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
-// Reset to version 1 - following fhir-package-loader schema pattern
-const SCHEMA_VERSION: i32 = 1;
+// Schema version 2 (P2 milestone, 2026-05-06):
+// - Adds `blobs`, `package_files`, `tarballs`, `package_provenance` tables
+//   for the content-addressable virtual store (see `src/store/`).
+// - On version mismatch detection the existing DB tables are dropped and
+//   recreated fresh — packages re-download from the registry on next install.
+//   No migration path is supported per project policy: lockfile is the only
+//   reproducibility contract across versions.
+//
+// These new tables are **SQLite-backend-specific**. They are not surfaced
+// on the `PackageStore` / `SearchStorage` traits in `crate::traits`,
+// which is a frozen interface used by external Postgres backends. Other
+// backends are free to ignore CAS entirely and store packages in
+// whatever native form they prefer.
+const SCHEMA_VERSION: i32 = 2;
 
 pub struct SqliteStorage {
     pool: Pool,
@@ -191,12 +203,19 @@ impl SqliteStorage {
 
         if current_version == 0 {
             self.create_schema().await?;
-        } else if current_version < SCHEMA_VERSION {
-            return Err(FcmError::Storage(StorageError::UnsupportedSchemaVersion {
-                current: current_version,
-                required: SCHEMA_VERSION,
-                message: "Database schema changed. Please delete ~/.maki/index/fhir.db and run 'maki config init'".to_string(),
-            }));
+        } else if current_version != SCHEMA_VERSION {
+            // Project policy: no migrations. On any version mismatch
+            // (older schema, newer schema downgraded, corrupted) drop
+            // every table and start fresh. Packages get re-downloaded
+            // from the configured registries on next install. The
+            // lockfile (`fcm.lock`) is the cross-version reproducibility
+            // contract — bytes on disk are disposable.
+            warn!(
+                "SQLite schema version mismatch (found {current_version}, want {SCHEMA_VERSION}); \
+                 nuking existing tables and recreating. Re-run install to repopulate."
+            );
+            self.drop_all_tables().await?;
+            self.create_schema().await?;
         }
 
         self.with_connection(move |conn| {
@@ -271,6 +290,79 @@ impl SqliteStorage {
                 CREATE INDEX IF NOT EXISTS idx_resource_package ON resources(package_name, package_version);
                 CREATE INDEX IF NOT EXISTS idx_resource_fhir_version ON resources(fhir_version);
                 CREATE INDEX IF NOT EXISTS idx_content_hash ON resources(content_hash);
+
+                -- ============================================================
+                -- P2 virtual-store tables (schema v2, 2026-05-06).
+                -- See `src/store/` and `docs/refactor/VIRTUAL_STORE_DESIGN.md`.
+                -- ============================================================
+
+                -- File-level CAS index. Each row pins a SHA-256 blob that
+                -- lives at `<store>/blobs/<aa>/<bb...>`. Inserted lazily
+                -- as packages are extracted; orphaned by `fcm store gc`.
+                CREATE TABLE IF NOT EXISTS blobs (
+                    hash TEXT PRIMARY KEY,           -- sha-256 hex
+                    size INTEGER NOT NULL,
+                    algo TEXT NOT NULL DEFAULT 'sha256',
+                    inserted_at TEXT NOT NULL
+                );
+
+                -- Per-package file map: which blob each file inside a
+                -- package resolves to. Replaces the old approach of
+                -- writing one resource JSON per file path; now everything
+                -- routes through CAS so identical files dedupe across
+                -- versions and IGs.
+                CREATE TABLE IF NOT EXISTS package_files (
+                    package_id INTEGER NOT NULL,
+                    file_path TEXT NOT NULL,
+                    blob_hash TEXT NOT NULL,
+                    file_kind TEXT,
+                    PRIMARY KEY (package_id, file_path),
+                    FOREIGN KEY (package_id) REFERENCES packages(rowid) ON DELETE CASCADE,
+                    FOREIGN KEY (blob_hash) REFERENCES blobs(hash)
+                );
+                CREATE INDEX IF NOT EXISTS idx_package_files_blob ON package_files(blob_hash);
+
+                -- Tarball CAS metadata. Tarball bytes themselves live at
+                -- `<store>/tarballs/<aa>/<bb...>.tgz`. Both blake3 (for
+                -- legacy registries that publish only sha-1 / nothing)
+                -- and sha-512 SRI (lockfile-grade) are recorded so the
+                -- tarball can be verified against either form.
+                CREATE TABLE IF NOT EXISTS tarballs (
+                    hash TEXT PRIMARY KEY,          -- blake3 hex
+                    size INTEGER NOT NULL,
+                    package_name TEXT NOT NULL,
+                    package_version TEXT NOT NULL,
+                    sri_sha512 TEXT,                -- 'sha512-<base64>' lockfile-grade
+                    sri_sha1 TEXT,                  -- 'sha1-<hex>' for legacy registries
+                    downloaded_from TEXT,           -- registry URL
+                    downloaded_at TEXT NOT NULL,
+                    UNIQUE(package_name, package_version)
+                );
+
+                -- Provenance: which registry served each installed
+                -- package, what integrity claim was made, FHIR version,
+                -- and the resolved dependency set. Drives lockfile
+                -- emission (`build_lockfile`) and audit/`store verify`.
+                CREATE TABLE IF NOT EXISTS package_provenance (
+                    package_id INTEGER PRIMARY KEY,
+                    registry_url TEXT NOT NULL,
+                    resolved_url TEXT NOT NULL,
+                    -- SHA-512 SRI string `sha512-<base64>`. Computed locally
+                    -- from tarball bytes during install (TOFU). Empty when
+                    -- the install path didn't surface bytes (legacy paths).
+                    integrity TEXT NOT NULL,
+                    -- Registry-published SHA-1 (`sha1-<hex>`) when available.
+                    -- Lets `fcm store verify` cross-check against what the
+                    -- registry advertised vs what we observed.
+                    sri_sha1 TEXT,
+                    fhir_version TEXT,
+                    -- JSON array of dependency strings `name@version`.
+                    -- Sorted for determinism. Populated from the tarball's
+                    -- `package.json#dependencies` at install time.
+                    dependencies TEXT NOT NULL DEFAULT '[]',
+                    recorded_at TEXT NOT NULL,
+                    FOREIGN KEY (package_id) REFERENCES packages(rowid) ON DELETE CASCADE
+                );
                 "#,
             )?;
             Ok(())
@@ -278,6 +370,30 @@ impl SqliteStorage {
         .await?;
 
         debug!("Created database schema version {}", SCHEMA_VERSION);
+        Ok(())
+    }
+
+    /// Drop every table (data + schema) so [`Self::create_schema`] can
+    /// rebuild from scratch. Used when a version mismatch is detected at
+    /// startup. Indexes and views attached to the dropped tables are
+    /// removed automatically by SQLite.
+    async fn drop_all_tables(&self) -> Result<()> {
+        self.with_connection(move |conn| {
+            conn.execute_batch(
+                r#"
+                DROP TABLE IF EXISTS package_provenance;
+                DROP TABLE IF EXISTS package_files;
+                DROP TABLE IF EXISTS tarballs;
+                DROP TABLE IF EXISTS blobs;
+                DROP TABLE IF EXISTS resources;
+                DROP TABLE IF EXISTS packages;
+                "#,
+            )?;
+            // Reset version marker so init_schema treats the DB as fresh.
+            conn.execute("DELETE FROM metadata WHERE key = 'schema_version'", [])?;
+            Ok(())
+        })
+        .await?;
         Ok(())
     }
 
@@ -1308,6 +1424,175 @@ impl SqliteStorage {
             warnings: vec![],
         })
     }
+
+    /// Record the install provenance for a package.
+    ///
+    /// Called once per package after [`Self::add_package`] succeeds, with
+    /// the integrity hash freshly computed from the downloaded tarball
+    /// bytes (TOFU). Replaces any prior row for the same `(name, version)`
+    /// — the latest install wins.
+    ///
+    /// **Backend boundary:** this method is on [`SqliteStorage`] directly,
+    /// NOT on the [`crate::traits::PackageStore`] trait. The trait
+    /// surface stays frozen for the downstream Postgres backend; only
+    /// the bundled SQLite backend persists provenance metadata.
+    /// Backends that don't track provenance simply produce lockfiles
+    /// with empty integrity sentinels.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_install_provenance(
+        &self,
+        name: &str,
+        version: &str,
+        registry_url: &str,
+        resolved_url: &str,
+        integrity: &str,
+        sri_sha1: Option<&str>,
+        fhir_version: Option<&str>,
+        dependencies: &[String],
+    ) -> Result<()> {
+        // Sort + dedup deps for byte-deterministic output.
+        let mut deps_sorted: Vec<String> = dependencies.to_vec();
+        deps_sorted.sort();
+        deps_sorted.dedup();
+        let deps_json = serde_json::to_string(&deps_sorted).map_err(|e| {
+            FcmError::Storage(StorageError::DatabaseError {
+                message: format!("Failed to encode deps JSON: {e}"),
+            })
+        })?;
+        let registry_url = registry_url.to_string();
+        let resolved_url = resolved_url.to_string();
+        let integrity = integrity.to_string();
+        let sri_sha1 = sri_sha1.map(String::from);
+        let fhir_version = fhir_version.map(String::from);
+        let name = name.to_string();
+        let version = version.to_string();
+        let recorded_at = Utc::now().to_rfc3339();
+
+        self.with_connection(move |conn| {
+            // Look up package_id from packages table.
+            let package_id: Option<i64> = conn
+                .query_row(
+                    "SELECT rowid FROM packages WHERE name = ?1 AND version = ?2",
+                    rusqlite::params![&name, &version],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?;
+            let Some(package_id) = package_id else {
+                // Caller bug: provenance recorded for a package that
+                // wasn't installed. Surface as DB-shape error so it
+                // shows up in tests.
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            };
+
+            conn.execute(
+                r#"
+                INSERT INTO package_provenance
+                    (package_id, registry_url, resolved_url, integrity,
+                     sri_sha1, fhir_version, dependencies, recorded_at)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                ON CONFLICT(package_id) DO UPDATE SET
+                    registry_url = excluded.registry_url,
+                    resolved_url = excluded.resolved_url,
+                    integrity    = excluded.integrity,
+                    sri_sha1     = excluded.sri_sha1,
+                    fhir_version = excluded.fhir_version,
+                    dependencies = excluded.dependencies,
+                    recorded_at  = excluded.recorded_at
+                "#,
+                rusqlite::params![
+                    package_id,
+                    registry_url,
+                    resolved_url,
+                    integrity,
+                    sri_sha1,
+                    fhir_version,
+                    deps_json,
+                    recorded_at,
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Fetch the install provenance for a single package, if recorded.
+    ///
+    /// Returns `Ok(None)` when the package exists but provenance was
+    /// never recorded (legacy installs predating P2). Used by the
+    /// lockfile generator to populate `resolved`/`integrity`/`dependencies`
+    /// fields with real data instead of placeholders.
+    pub async fn get_install_provenance(
+        &self,
+        name: &str,
+        version: &str,
+    ) -> Result<Option<InstallProvenance>> {
+        let name = name.to_string();
+        let version = version.to_string();
+        self.with_connection(move |conn| {
+            let row: Option<(
+                String,
+                String,
+                String,
+                Option<String>,
+                Option<String>,
+                String,
+            )> = conn
+                .query_row(
+                    r#"
+                    SELECT pp.registry_url, pp.resolved_url, pp.integrity,
+                           pp.sri_sha1, pp.fhir_version, pp.dependencies
+                    FROM package_provenance pp
+                    JOIN packages p ON p.rowid = pp.package_id
+                    WHERE p.name = ?1 AND p.version = ?2
+                    "#,
+                    rusqlite::params![&name, &version],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                            row.get::<_, Option<String>>(4)?,
+                            row.get::<_, String>(5)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            Ok(row)
+        })
+        .await
+        .map(|opt| {
+            opt.map(|(reg, resolved, integ, sha1, fv, deps_json)| {
+                let dependencies: Vec<String> =
+                    serde_json::from_str(&deps_json).unwrap_or_default();
+                InstallProvenance {
+                    registry_url: reg,
+                    resolved_url: resolved,
+                    integrity: integ,
+                    sri_sha1: sha1,
+                    fhir_version: fv,
+                    dependencies,
+                }
+            })
+        })
+    }
+}
+
+/// Per-package provenance record. Returned by
+/// [`SqliteStorage::get_install_provenance`].
+#[derive(Debug, Clone)]
+pub struct InstallProvenance {
+    pub registry_url: String,
+    pub resolved_url: String,
+    /// SHA-512 SRI string `sha512-<base64>`, locally computed at install
+    /// time. Empty when bytes weren't surfaced through the install path.
+    pub integrity: String,
+    /// Registry-published SHA-1 (`sha1-<hex>`) when the registry
+    /// advertised one alongside the tarball.
+    pub sri_sha1: Option<String>,
+    pub fhir_version: Option<String>,
+    /// Sorted, deduped list of `name@version` dependency strings.
+    pub dependencies: Vec<String>,
 }
 
 /// Extracted StructureDefinition-specific fields (following fhir-package-loader)

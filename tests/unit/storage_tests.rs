@@ -222,6 +222,104 @@ async fn test_search_by_type() {
     assert_eq!(missing_type.len(), 0);
 }
 
+/// `record_install_provenance` round-trips through `get_install_provenance`.
+/// Covers: deps sorted+deduped, SRI string preserved, sha1 optional,
+/// fhir_version optional, conflict update overwrites, unknown package errors.
+#[tokio::test]
+async fn install_provenance_round_trip() {
+    let temp_dir = setup_test_env();
+    let config = StorageConfig {
+        cache_dir: temp_dir.path().join("cache"),
+        packages_dir: temp_dir.path().join("packages"),
+        max_cache_size: "100MB".to_string(),
+        connection_pool_size: 8,
+    };
+    let storage = SqliteStorage::new(config).await.unwrap();
+
+    // Install a package first so provenance has an FK target.
+    let pkg = create_test_extracted_package(&temp_dir);
+    storage.add_package(pkg.clone()).await.unwrap();
+    let pkg_name = pkg.name.clone();
+    let pkg_version = pkg.version.clone();
+
+    // Record provenance with duplicate + unsorted dep input.
+    storage
+        .record_install_provenance(
+            &pkg_name,
+            &pkg_version,
+            "https://packages.fhir.org",
+            "https://packages.fhir.org/x/1.0.0",
+            "sha512-AAAA",
+            Some("sha1-deadbeef"),
+            Some("4.0.1"),
+            &[
+                "z@1".to_string(),
+                "a@1".to_string(),
+                "a@1".to_string(), // dup
+                "b@1".to_string(),
+            ],
+        )
+        .await
+        .unwrap();
+
+    let prov = storage
+        .get_install_provenance(&pkg_name, &pkg_version)
+        .await
+        .unwrap()
+        .expect("provenance should exist after record");
+    assert_eq!(prov.registry_url, "https://packages.fhir.org");
+    assert_eq!(prov.resolved_url, "https://packages.fhir.org/x/1.0.0");
+    assert_eq!(prov.integrity, "sha512-AAAA");
+    assert_eq!(prov.sri_sha1.as_deref(), Some("sha1-deadbeef"));
+    assert_eq!(prov.fhir_version.as_deref(), Some("4.0.1"));
+    assert_eq!(prov.dependencies, vec!["a@1", "b@1", "z@1"]);
+
+    // Re-record overwrites (ON CONFLICT update).
+    storage
+        .record_install_provenance(
+            &pkg_name,
+            &pkg_version,
+            "https://other.fhir.org",
+            "https://other.fhir.org/x/1.0.0",
+            "sha512-BBBB",
+            None,
+            None,
+            &["c@1".to_string()],
+        )
+        .await
+        .unwrap();
+    let prov2 = storage
+        .get_install_provenance(&pkg_name, &pkg_version)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(prov2.integrity, "sha512-BBBB");
+    assert_eq!(prov2.sri_sha1, None);
+    assert_eq!(prov2.dependencies, vec!["c@1"]);
+
+    // Lookup of unknown package returns None.
+    let none = storage
+        .get_install_provenance("does-not-exist", "0.0.0")
+        .await
+        .unwrap();
+    assert!(none.is_none());
+
+    // Recording for unknown package errors out.
+    let err = storage
+        .record_install_provenance(
+            "does-not-exist",
+            "0.0.0",
+            "u",
+            "u",
+            "sha512-XX",
+            None,
+            None,
+            &[],
+        )
+        .await;
+    assert!(err.is_err());
+}
+
 /// Helper function to create a test extracted package
 fn create_test_extracted_package(temp_dir: &TempDir) -> ExtractedPackage {
     // Create test resources

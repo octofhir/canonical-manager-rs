@@ -40,6 +40,16 @@ pub struct UnifiedStorage {
     package_store: Arc<dyn crate::traits::PackageStore + Send + Sync>,
     /// Search storage using trait object
     search_storage: Arc<dyn crate::traits::SearchStorage + Send + Sync>,
+    /// Direct handle to the bundled SQLite backend, when used.
+    ///
+    /// `None` for custom backends (e.g. Postgres) plumbed through
+    /// [`Self::new_with_custom_storage`]. Lets the install pipeline
+    /// reach SQLite-specific functionality — install provenance,
+    /// content-addressable store integration — without growing the
+    /// frozen [`crate::traits::PackageStore`] / [`crate::traits::SearchStorage`]
+    /// trait surface.
+    #[cfg(feature = "sqlite")]
+    sqlite_backend: Option<Arc<SqliteStorage>>,
 }
 
 impl UnifiedStorage {
@@ -71,8 +81,19 @@ impl UnifiedStorage {
         let sqlite_storage = Arc::new(SqliteStorage::new(config.clone()).await?);
         Ok(Self {
             package_store: sqlite_storage.clone(),
-            search_storage: sqlite_storage,
+            search_storage: sqlite_storage.clone(),
+            sqlite_backend: Some(sqlite_storage),
         })
+    }
+
+    /// Access the bundled SQLite backend, if present.
+    ///
+    /// Returns `None` for custom (Postgres etc.) backends. Callers that
+    /// need SQLite-specific features (install provenance, CAS) should
+    /// gracefully degrade when this returns `None`.
+    #[cfg(feature = "sqlite")]
+    pub fn sqlite_backend(&self) -> Option<&Arc<SqliteStorage>> {
+        self.sqlite_backend.as_ref()
     }
 
     /// Create a new unified storage system with custom storage backends
@@ -104,6 +125,8 @@ impl UnifiedStorage {
         Self {
             package_store,
             search_storage,
+            #[cfg(feature = "sqlite")]
+            sqlite_backend: None,
         }
     }
 

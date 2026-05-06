@@ -145,6 +145,7 @@ pub mod search;
 #[cfg(feature = "sqlite")]
 #[doc(hidden)]
 pub mod sqlite_storage;
+pub mod store;
 #[doc(hidden)]
 #[doc(hidden)]
 pub mod traits;
@@ -677,6 +678,102 @@ impl CanonicalManager {
         }
     }
 
+    /// Record install provenance — registry source, integrity hash,
+    /// dependency set — after a successful `add_package`.
+    ///
+    /// Best-effort: errors are logged and swallowed so a recoverable
+    /// metadata-write failure never blocks an otherwise-successful
+    /// install. The lockfile generator falls back to placeholders for
+    /// any package without provenance.
+    ///
+    /// **Backend boundary:** only the bundled SQLite backend persists
+    /// provenance. When `pkg_store_dyn` is set (custom Postgres-backed
+    /// stores), this is a no-op — the trait is intentionally frozen and
+    /// must not gain a `record_provenance` method. See
+    /// `src/traits.rs` for the stability contract.
+    async fn record_provenance_after_install(
+        &self,
+        spec: &PackageSpec,
+        download: &registry::PackageDownload,
+    ) {
+        // Only the bundled SQLite backend tracks provenance. Custom
+        // backends (Postgres etc.) opt out by setting `pkg_store_dyn`.
+        if self.pkg_store_dyn.is_some() {
+            return;
+        }
+
+        // Hash tarball bytes from the cached file. The bytes are still
+        // on disk at `download.file_path` (we just installed from it).
+        // Compute SHA-512 SRI; on read failure skip provenance silently.
+        let bytes = match tokio::fs::read(&download.file_path).await {
+            Ok(b) => b,
+            Err(e) => {
+                debug!(
+                    "Skipping provenance for {}@{}: tarball read failed at {}: {e}",
+                    spec.name,
+                    spec.version,
+                    download.file_path.display()
+                );
+                return;
+            }
+        };
+        let integrity = store::Lockfile::compute_integrity(&bytes);
+
+        // Resolved URL: best-effort guess from the configured primary
+        // registry. The orchestrator may have served the bytes from a
+        // fallback; threading that through requires plumbing the actual
+        // registry URL out of `RegistryClient` (P2 follow-up). For now
+        // record the configured primary so the lockfile is still
+        // human-meaningful.
+        let resolved_url = format!(
+            "{}/{}/{}",
+            self.config.registry.url.trim_end_matches('/'),
+            spec.name,
+            spec.version
+        );
+
+        let deps: Vec<String> = download
+            .metadata
+            .dependencies
+            .iter()
+            .map(|(n, v)| format!("{n}@{v}"))
+            .collect();
+
+        let fhir_version = if download.metadata.fhir_version.is_empty()
+            || download.metadata.fhir_version == "unknown"
+        {
+            None
+        } else {
+            Some(download.metadata.fhir_version.as_str())
+        };
+
+        let Some(sqlite) = self.storage.sqlite_backend() else {
+            // Custom backend (Postgres etc.); the trait doesn't expose
+            // provenance and we don't pretend it does. Lockfile entries
+            // for these packages stay placeholder until the consumer
+            // ships their own provenance integration.
+            return;
+        };
+        if let Err(e) = sqlite
+            .record_install_provenance(
+                &spec.name,
+                &spec.version,
+                &self.config.registry.url,
+                &resolved_url,
+                &integrity,
+                None,
+                fhir_version,
+                &deps,
+            )
+            .await
+        {
+            warn!(
+                "Provenance write failed for {}@{}: {e}",
+                spec.name, spec.version
+            );
+        }
+    }
+
     fn find_local_package(&self, name: &str, version: &str) -> Option<&config::LocalPackageSpec> {
         self.config
             .local_packages
@@ -970,6 +1067,21 @@ impl CanonicalManager {
 
         // SQLite automatically maintains indexes, no rebuild needed
         debug!("All packages installed (SQLite auto-indexed)");
+
+        // If a lockfile already exists in the working directory, refresh
+        // it. We *don't* create one when absent — projects opt in by
+        // committing an `fcm.lock` (or running `fcm install --lockfile`
+        // explicitly via the CLI in a future iteration). This avoids
+        // surprising downstream tools that don't expect a generated file.
+        if let Ok(cwd) = std::env::current_dir()
+            && cwd.join(store::Lockfile::FILE_NAME).exists()
+        {
+            if let Err(e) = self.write_lockfile(&cwd).await {
+                warn!("Failed to refresh fcm.lock: {e}");
+            } else {
+                debug!("fcm.lock refreshed at {}", cwd.display());
+            }
+        }
 
         let total_duration = tracker.finish();
 
@@ -1312,6 +1424,9 @@ impl CanonicalManager {
             debug!("Extracting package {}...", package_key);
             let extractor =
                 crate::package::PackageExtractor::new(self.config.storage.packages_dir.clone());
+            // Hold a snapshot so provenance can re-read the tarball after
+            // extract consumes the original `download`.
+            let download_for_provenance = download.clone();
             let extracted = extractor.extract_package(download).await?;
             debug!("Package {} extracted successfully", package_key);
 
@@ -1323,6 +1438,9 @@ impl CanonicalManager {
                 metrics::increment_counter!("packages_installed");
             }
             debug!("Package {} added to storage successfully", package_key);
+
+            self.record_provenance_after_install(&spec, &download_for_provenance)
+                .await;
 
             installed.insert(package_key.clone());
             info!(
@@ -1529,6 +1647,8 @@ impl CanonicalManager {
             // Download package and get metadata
             let download = self.registry_download(&spec).await?;
             let dependencies = download.metadata.dependencies.clone();
+            // Snapshot download for provenance recording after add_package.
+            let download_for_provenance = download.clone();
 
             // Extract package
             let extractor = package::PackageExtractor::new(self.config.storage.cache_dir.clone());
@@ -1573,6 +1693,9 @@ impl CanonicalManager {
             {
                 metrics::increment_counter!("packages_installed");
             }
+
+            self.record_provenance_after_install(&spec, &download_for_provenance)
+                .await;
 
             // Mark as installed
             installed.insert(package_key.clone());
@@ -1913,6 +2036,155 @@ impl CanonicalManager {
             .into_iter()
             .map(|p| format!("{}@{}", p.name, p.version))
             .collect())
+    }
+
+    /// Snapshot the current installed-package set as a [`store::Lockfile`].
+    ///
+    /// Walks the configured `PackageStore`, materialising one
+    /// `[[package]]` entry per installed package. Pulls integrity hash,
+    /// resolved URL, and dependency set from the SQLite-backend
+    /// `package_provenance` table when available
+    /// ([`SqliteStorage::get_install_provenance`]); falls back to
+    /// best-effort placeholders for packages installed before P2
+    /// provenance landed or for custom (Postgres) backends that don't
+    /// track provenance.
+    ///
+    /// Determinism: packages are sorted by `(name, version)` on save.
+    /// See [`store::Lockfile::canonicalise`] for the full rules.
+    pub async fn build_lockfile(&self) -> Result<store::Lockfile> {
+        let mut lock = store::Lockfile::empty();
+        let packages = self.storage.list_packages().await?;
+        let mut fhir_versions: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+
+        let sqlite = self.storage.sqlite_backend();
+
+        for p in packages {
+            fhir_versions.insert(p.fhir_version.clone());
+
+            // Try to fetch real provenance; fall back to placeholders.
+            let provenance = if let Some(s) = sqlite {
+                s.get_install_provenance(&p.name, &p.version)
+                    .await
+                    .ok()
+                    .flatten()
+            } else {
+                None
+            };
+
+            let (resolved, integrity, deps, fhir_version) = match provenance {
+                Some(prov) => (
+                    prov.resolved_url,
+                    prov.integrity,
+                    prov.dependencies,
+                    prov.fhir_version.unwrap_or_else(|| p.fhir_version.clone()),
+                ),
+                None => (
+                    format!(
+                        "{}/{}/{}",
+                        self.config.registry.url.trim_end_matches('/'),
+                        p.name,
+                        p.version
+                    ),
+                    // Empty SRI is the sentinel that this entry has no
+                    // recorded integrity. `--frozen-lockfile` (P2
+                    // follow-up) refuses to verify empties and forces a
+                    // re-resolve, which then populates real hashes.
+                    String::new(),
+                    Vec::new(),
+                    p.fhir_version.clone(),
+                ),
+            };
+
+            lock.upsert(store::LockedPackage {
+                name: p.name.clone(),
+                version: p.version.clone(),
+                resolved,
+                integrity,
+                fhir_version: Some(fhir_version),
+                dependencies: deps,
+            });
+        }
+        lock.meta.fhir_versions = fhir_versions.into_iter().collect();
+        Ok(lock)
+    }
+
+    /// Write `fcm.lock` into `project_root` using [`Self::build_lockfile`].
+    ///
+    /// The on-disk file is updated atomically (tmp + rename) and is
+    /// byte-deterministic across machines for the same package set.
+    /// Idempotent: calling repeatedly with no changes produces the same
+    /// bytes.
+    pub async fn write_lockfile(&self, project_root: &std::path::Path) -> Result<()> {
+        let mut lock = self.build_lockfile().await?;
+        lock.save(project_root).await?;
+        Ok(())
+    }
+
+    /// Materialise every installed package into `<project_root>/.fcm/modules/`.
+    ///
+    /// Walks the storage backend's installed-package list and links each
+    /// package's `package/` directory into the per-project virtual layout:
+    ///
+    /// ```text
+    /// <project_root>/.fcm/modules/
+    /// ├── <name> -> <name>@<version>/package        (symlink)
+    /// └── <name>@<version>/package/...              (linked from packages_dir)
+    /// ```
+    ///
+    /// Lives under `.fcm/` to match the project-local convention used
+    /// elsewhere (`.fcm/cache`, `.fcm/packages`). Gitignore via a single
+    /// `.fcm/` rule.
+    ///
+    /// Linking strategy is reflink → hardlink → copy ladder, probed
+    /// once per call. Source bytes live in
+    /// `<config.storage.packages_dir>/<name>-<version>/package/` per the
+    /// install pipeline's convention. When the source directory is
+    /// missing (custom backend that doesn't drop packages on disk), the
+    /// package is silently skipped — caller-visible report counts only
+    /// what was actually materialised.
+    pub async fn materialise_packages(
+        &self,
+        project_root: &std::path::Path,
+    ) -> Result<store::MaterialiseReport> {
+        let modules_root = project_root.join(".fcm").join("modules");
+        tokio::fs::create_dir_all(&modules_root).await?;
+        let store_root = self.config.storage.packages_dir.clone();
+        let linker = store::Linker::probe(&store_root, &modules_root, store::LinkerMode::Auto)
+            .await
+            .map_err(|e| {
+                crate::error::FcmError::Storage(crate::error::StorageError::IoError {
+                    message: format!("Linker probe failed: {e}"),
+                })
+            })?;
+
+        let mut total = store::MaterialiseReport::default();
+        for p in self.storage.list_packages().await? {
+            let source = store_root.join(format!("{}-{}", p.name, p.version));
+            if !tokio::fs::try_exists(&source).await.unwrap_or(false) {
+                debug!(
+                    "Skipping materialise for {}@{}: source dir missing at {}",
+                    p.name,
+                    p.version,
+                    source.display()
+                );
+                continue;
+            }
+            let report =
+                store::materialise_package(project_root, &p.name, &p.version, &source, &linker)
+                    .await?;
+            total.merge(&report);
+        }
+        info!(
+            "Materialised {} files (reflink {}, hardlink {}, copy {}, skipped {}) into {}",
+            total.total,
+            total.reflinked,
+            total.hardlinked,
+            total.copied,
+            total.skipped,
+            modules_root.display()
+        );
+        Ok(total)
     }
 
     /// List available versions for a package from the registry.
@@ -2680,5 +2952,47 @@ mod tests {
 
         let manager = CanonicalManager::new(config).await;
         assert!(manager.is_ok());
+    }
+
+    /// Empty manager produces an empty but valid lockfile.
+    #[tokio::test]
+    async fn write_lockfile_empty_state() {
+        let storage_dir = TempDir::new().unwrap();
+        let project_dir = TempDir::new().unwrap();
+        let config = FcmConfig::test_config(storage_dir.path());
+        let manager = CanonicalManager::new(config).await.unwrap();
+
+        manager.write_lockfile(project_dir.path()).await.unwrap();
+        let path = project_dir.path().join("fcm.lock");
+        assert!(path.exists(), "fcm.lock should be created");
+
+        let body = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(
+            body.contains(&format!("version = {}", store::Lockfile::CURRENT_VERSION)),
+            "lockfile should declare its version, got:\n{body}"
+        );
+        assert!(
+            !body.contains("[[package]]"),
+            "no packages installed → no [[package]] entries"
+        );
+    }
+
+    /// Two writes from the same package set produce byte-identical files.
+    #[tokio::test]
+    async fn write_lockfile_is_deterministic() {
+        let storage_dir = TempDir::new().unwrap();
+        let project_dir = TempDir::new().unwrap();
+        let config = FcmConfig::test_config(storage_dir.path());
+        let manager = CanonicalManager::new(config).await.unwrap();
+
+        manager.write_lockfile(project_dir.path()).await.unwrap();
+        let first = tokio::fs::read(project_dir.path().join("fcm.lock"))
+            .await
+            .unwrap();
+        manager.write_lockfile(project_dir.path()).await.unwrap();
+        let second = tokio::fs::read(project_dir.path().join("fcm.lock"))
+            .await
+            .unwrap();
+        assert_eq!(first, second, "deterministic write must produce same bytes");
     }
 }

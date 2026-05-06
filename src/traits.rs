@@ -1,3 +1,29 @@
+//! Storage backend traits.
+//!
+//! # Stability contract
+//!
+//! These trait signatures are **frozen for downstream backends**. The
+//! crate has at least one external consumer that implements
+//! [`PackageStore`] and [`SearchStorage`] against a Postgres backend.
+//! Adding methods is a breaking change for those consumers.
+//!
+//! Schema-level changes inside the bundled SQLite backend
+//! ([`crate::sqlite_storage`]) — including the new P2 virtual-store
+//! tables (`blobs`, `package_files`, `tarballs`, `package_provenance`) —
+//! are intentionally *not* surfaced on these traits. The new tables are
+//! SQLite-implementation detail; backends are free to use whatever
+//! addressing they want internally (Postgres LO storage, filesystem
+//! CAS, etc.) as long as they honour the trait contract below.
+//!
+//! Likewise, [`crate::store`] (file-level CAS, linker, lockfile,
+//! per-package install lock) lives in the install pipeline above this
+//! trait; backends are not required to integrate with it.
+//!
+//! If a P3+ refactor needs to grow the trait, prefer:
+//! 1. Default-method extension (preserves source compat for impls).
+//! 2. New trait composition (e.g. `BlobStore` extending `SearchStorage`).
+//! Avoid breaking changes; coordinate with downstream impls if unavoidable.
+
 use crate::domain::{PackageInfo, ResourceIndex};
 use crate::error::Result;
 use crate::package::FhirResource;

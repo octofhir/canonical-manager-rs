@@ -266,7 +266,7 @@ struct NpmDistInfo {
 /// println!("Description: {:?}", download.metadata.description);
 /// # }
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PackageDownload {
     pub spec: PackageSpec,
     pub file_path: PathBuf,

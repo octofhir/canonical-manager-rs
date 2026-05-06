@@ -92,6 +92,16 @@ rayon = "1.10"
 crossbeam-channel = "0.5"
 walkdir = "2.5"
 
+# Virtual-store dependencies (P2 milestone).
+# `reflink-copy` is used by Cargo and ripgrep; provides the
+# clone-or-fall-back-to-copy primitive across APFS clonefile,
+# Linux FICLONE on btrfs/xfs/bcachefs, and Windows ReFS Dev Drives.
+# `fs4` is the maintained successor to `fs2` (which has been unmaintained
+# since 2020); used for cross-process file locks during install.
+reflink-copy = "0.1"
+fs4 = { version = "1", features = ["tokio"] }
+bitflags = "2"
+
 # Async file I/O
 tokio-util = { version = "0.7", features = ["io", "compat"] }
 

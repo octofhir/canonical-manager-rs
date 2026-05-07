@@ -22,7 +22,8 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use octofhir_canonical_manager::config::{PackageSpec, RegistryConfig};
 use octofhir_canonical_manager::registry_clients::{
-    FhirRegistryClient, NpmRegistryClient, Packages2Client, RedundantRegistryClient, SearchQuery,
+    FhirRegistryClient, GetIgRegistryClient, NpmRegistryClient, Packages2Client,
+    RedundantRegistryClient, SearchQuery,
 };
 
 /// Minimal valid .tgz body produced by hand for tests that just need the
@@ -263,4 +264,89 @@ async fn redundant_client_download_falls_through_on_404() {
     );
     // Sanity: the file is not in a/ (the failing backend's dir).
     let _ = Path::new(&dl.file_path);
+}
+
+#[tokio::test]
+async fn getig_client_search_and_list_versions_return_not_supported() {
+    let server = MockServer::start().await;
+    let temp = TempDir::new().unwrap();
+    let client = GetIgRegistryClient::new(&server.uri(), temp.path().to_path_buf(), 30)
+        .await
+        .unwrap();
+
+    let s_err = client.search(&SearchQuery::by_name("x")).await.unwrap_err();
+    assert!(
+        format!("{s_err}").contains("not supported"),
+        "expected NotSupported, got: {s_err}"
+    );
+    let lv_err = client.list_versions("x").await.unwrap_err();
+    assert!(
+        format!("{lv_err}").contains("not supported"),
+        "expected NotSupported, got: {lv_err}"
+    );
+}
+
+#[tokio::test]
+async fn getig_client_download_follows_dist_tarball() {
+    let server = MockServer::start().await;
+    let body = fake_tarball_bytes();
+    // Two-step: stub returns dist.tarball pointing to /tarball/foo.tgz on
+    // the same MockServer; the client follows and stores bytes.
+    let tarball_url = format!("{}/tarball/foo.tgz", server.uri());
+    Mock::given(method("GET"))
+        .and(path("/pkgs/hl7.fhir.r4.core/4.0.1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "dist": { "tarball": tarball_url }
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/tarball/foo.tgz"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(body.clone()))
+        .mount(&server)
+        .await;
+
+    let temp = TempDir::new().unwrap();
+    let client = GetIgRegistryClient::new(&server.uri(), temp.path().to_path_buf(), 30)
+        .await
+        .unwrap();
+
+    let spec = PackageSpec {
+        name: "hl7.fhir.r4.core".to_string(),
+        version: "4.0.1".to_string(),
+        priority: 1,
+        url: None,
+    };
+    let dl = client.download(&spec, None).await.expect("download");
+    assert!(dl.file_path.exists());
+    let contents = std::fs::read(&dl.file_path).unwrap();
+    assert_eq!(contents, body);
+    let part = dl.file_path.with_extension("tgz.part");
+    assert!(!part.exists(), "stale .part should not remain");
+}
+
+#[tokio::test]
+async fn getig_client_download_404_maps_to_package_not_found() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/pkgs/missing.pkg/0.0.1"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+    let temp = TempDir::new().unwrap();
+    let client = GetIgRegistryClient::new(&server.uri(), temp.path().to_path_buf(), 30)
+        .await
+        .unwrap();
+    let spec = PackageSpec {
+        name: "missing.pkg".to_string(),
+        version: "0.0.1".to_string(),
+        priority: 1,
+        url: None,
+    };
+    let err = client.download(&spec, None).await.unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.to_lowercase().contains("not found") || msg.contains("missing.pkg"),
+        "expected PackageNotFound, got: {msg}"
+    );
 }

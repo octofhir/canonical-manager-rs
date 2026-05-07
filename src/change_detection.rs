@@ -86,13 +86,16 @@ impl Default for PackageChangeDetector {
     }
 }
 
+const DIFF_CACHE_CAP: std::num::NonZeroUsize = match std::num::NonZeroUsize::new(1000) {
+    Some(n) => n,
+    None => unreachable!(),
+};
+
 impl PackageChangeDetector {
     pub fn new() -> Self {
         Self {
             checksum_store: Arc::new(DashMap::new()),
-            diff_cache: Arc::new(tokio::sync::Mutex::new(LruCache::new(
-                std::num::NonZeroUsize::new(1000).unwrap(),
-            ))),
+            diff_cache: Arc::new(tokio::sync::Mutex::new(LruCache::new(DIFF_CACHE_CAP))),
         }
     }
 

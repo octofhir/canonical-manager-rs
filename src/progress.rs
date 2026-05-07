@@ -3,6 +3,11 @@
 //! This module provides a generic progress callback system for tracking
 //! multi-package installations with dependencies. It's designed to be
 //! used by both CLI applications and web servers (via SSE/WebSocket).
+//!
+//! `InstallEvent` variant fields are self-describing and are documented
+//! through the variant docstrings; per-field `missing_docs` is allowed.
+
+#![allow(missing_docs)]
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -10,6 +15,7 @@ use std::sync::Arc;
 /// Event types for package installation progress.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum InstallEvent {
     /// Installation started
     Started {

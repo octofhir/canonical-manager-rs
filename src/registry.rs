@@ -26,7 +26,7 @@
 //! from the `dist.tarball` URL inside the per-version object. Integrity is
 //! verified against `dist.shasum` (SHA-1) and/or `dist.integrity` (SRI). For
 //! non-NPM backends (e.g. `fs.get-ig.org` S3-flat layout) use a different
-//! client implementation — see `docs/refactor/REGISTRY_ANALYSIS.md`.
+//! client implementation — see [`crate::registry_clients`].
 
 use crate::cas_storage::{CasStorage, ContentType};
 use crate::config::{PackageSpec, RegistryConfig};
@@ -664,12 +664,13 @@ impl RegistryClient {
     ) -> Result<Vec<PackageDownload>> {
         info!("Starting parallel download of {} packages", specs.len());
 
+        let parallel = self.config.parallel_downloads.max(1);
         let results: Vec<Result<PackageDownload>> = stream::iter(specs)
             .map(|spec| async move {
                 // Each download is independent and uses CAS for deduplication
                 self.download_package(&spec).await
             })
-            .buffer_unordered(8) // 8 concurrent downloads
+            .buffer_unordered(parallel)
             .collect()
             .await;
 
@@ -687,18 +688,17 @@ impl RegistryClient {
             }
         }
 
-        if downloads.is_empty() && !errors.is_empty() {
-            // All downloads failed
-            return Err(errors
-                .into_iter()
-                .next()
-                .expect("guarded by !errors.is_empty() above"));
+        let error_count = errors.len();
+        if downloads.is_empty()
+            && let Some(first) = errors.into_iter().next()
+        {
+            return Err(first);
         }
 
         info!(
             "Parallel download complete: {} succeeded, {} failed",
             downloads.len(),
-            errors.len()
+            error_count
         );
 
         Ok(downloads)
@@ -1601,7 +1601,7 @@ impl RegistryClient {
     /// `packages2.fhir.org`). Verified 2026-05-06. The de-facto FHIR search
     /// contract is `GET {base}/catalog?name=&canonical=&fhirversion=&prerelease=`
     /// returning a JSON array, implemented by IG Publisher and the Firely
-    /// .NET client. See `docs/refactor/REGISTRY_ANALYSIS.md` §7.
+    /// .NET client.
     ///
     /// Casing of response keys differs across registries
     /// (`packages.fhir.org` returns PascalCase; `packages2.fhir.org/packages`
@@ -1850,9 +1850,8 @@ mod tests {
     // Live-network search test. Disabled because:
     //  - It hits the real default registry every time CI runs.
     //  - `packages.fhir.org` does not implement the NPM `/-/v1/search` endpoint
-    //    (verified via WebFetch on /-/all returning 404 — see
-    //    docs/refactor/REGISTRY_ANALYSIS.md §2.1).
-    // Re-enable as a wiremock-based test in P0.12.
+    //    (verified via WebFetch on /-/all returning 404).
+    // Wiremock-based coverage lives in `tests/unit/registry_clients_tests.rs`.
     #[tokio::test]
     #[ignore]
     async fn test_package_search() {

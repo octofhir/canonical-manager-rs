@@ -24,9 +24,8 @@
 //! - `extra` registries empty by default. Configure FHIRsmith / `fs.get-ig.org`
 //!   via `[[registry.extra]]` blocks with `client_type = "tarball-direct"` or
 //!   `"s3-flat"`.
-//! - Storage root: `~/.fcm/{cache,packages}`. Future P2 milestone moves to
-//!   `~/.fcm/store/` with content-addressable layout (see
-//!   `docs/refactor/VIRTUAL_STORE_DESIGN.md`).
+//! - Storage root: `~/.fcm/{cache,packages}`. Future milestone moves to
+//!   `~/.fcm/store/` with content-addressable layout under [`crate::store`].
 
 use crate::error::{ConfigError, Result, Validate};
 use serde::{Deserialize, Serialize};
@@ -51,6 +50,7 @@ use std::path::{Path, PathBuf};
 /// # }
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[allow(missing_docs)]
 pub struct FcmConfig {
     pub registry: RegistryConfig,
     pub packages: Vec<PackageSpec>,
@@ -91,6 +91,7 @@ pub struct FcmConfig {
 ///         token_env: None,
 ///     }],
 ///     token_env: None,
+///     parallel_downloads: 16,
 /// };
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,11 +121,19 @@ pub struct RegistryConfig {
     /// Useful for private NPM-compatible mirrors (Verdaccio, Artifactory).
     #[serde(default)]
     pub token_env: Option<String>,
+    /// In-flight cap for `RegistryClient::download_packages_parallel`.
+    /// `benches/download_parallelism.rs` showed 16 is ~50 % faster than
+    /// 8 against a 50 ms-RTT registry, with diminishing returns past
+    /// that on real-world FHIR mirrors. Override in `fcm.toml` if your
+    /// registry hates aggressive concurrency.
+    #[serde(default = "default_parallel_downloads")]
+    pub parallel_downloads: usize,
 }
 
 /// Additional non-NPM registry entry. Used for archive-style backends
 /// like `fs.get-ig.org` that don't implement the NPM Package Specification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(missing_docs)]
 pub struct ExtraRegistry {
     pub url: String,
     pub client_type: RegistryClientType,
@@ -167,6 +176,7 @@ pub enum RegistryClientType {
 /// };
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(missing_docs)]
 pub struct PackageSpec {
     pub name: String,
     pub version: String,
@@ -255,6 +265,7 @@ pub struct ResourceDirectorySpec {
 /// };
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(missing_docs)]
 pub struct StorageConfig {
     pub cache_dir: PathBuf,
     pub packages_dir: PathBuf,
@@ -316,6 +327,15 @@ pub struct OptimizationConfig {
     /// Metrics collection interval
     #[serde(default = "default_metrics_interval")]
     pub metrics_interval: String,
+
+    /// `true` (default): file-CAS writes go through `tmp + fsync + rename`,
+    /// surviving kernel crashes mid-install. `false`: drops the
+    /// `sync_all` call. Saves ~3 ms per blob on APFS / SSD; an
+    /// in-flight torn blob is recoverable by re-downloading the
+    /// containing package — the SQLite WAL still keeps the index
+    /// durable.
+    #[serde(default = "default_durable_writes")]
+    pub durable_writes: bool,
 }
 
 impl Default for RegistryConfig {
@@ -327,6 +347,7 @@ impl Default for RegistryConfig {
             fallbacks: default_fallbacks(),
             extra: Vec::new(),
             token_env: None,
+            parallel_downloads: default_parallel_downloads(),
         }
     }
 }
@@ -356,6 +377,7 @@ impl Default for OptimizationConfig {
             checksum_cache_size: default_checksum_cache_size(),
             enable_metrics: default_enable_metrics(),
             metrics_interval: default_metrics_interval(),
+            durable_writes: default_durable_writes(),
         }
     }
 }
@@ -780,6 +802,14 @@ fn default_fallbacks() -> Vec<String> {
     vec!["https://packages2.fhir.org/packages".to_string()]
 }
 
+fn default_durable_writes() -> bool {
+    true
+}
+
+fn default_parallel_downloads() -> usize {
+    16
+}
+
 fn default_timeout() -> u64 {
     30
 }
@@ -1086,7 +1116,7 @@ impl FcmConfig {
     /// let temp_dir = TempDir::new().unwrap();
     /// let config = FcmConfig::test_config(temp_dir.path());
     /// ```
-    #[cfg(any(test, feature = "test-utils"))]
+    #[doc(hidden)]
     pub fn test_config(temp_dir: &Path) -> Self {
         let mut config = FcmConfig {
             registry: RegistryConfig {

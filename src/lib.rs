@@ -22,10 +22,6 @@
 //! | Domain types (canonical URL, FHIR version, package info) | [`domain`] |
 //! | CLI subcommands (feature `cli`) | [`cli`] |
 //!
-//! Refactor docs: `docs/refactor/` — `CURRENT_STATE.md`, `AUDIT.md`,
-//! `REGISTRY_ANALYSIS.md`, `JS_PRIOR_ART.md`, `VIRTUAL_STORE_DESIGN.md`,
-//! `PLAN.md`. Read these before making structural changes.
-//!
 //! ## Features
 //!
 //! This crate supports several optional features:
@@ -114,50 +110,67 @@
 //! }
 //! ```
 
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+#![deny(missing_docs)]
+
 #[doc(hidden)]
+#[allow(missing_docs)]
 pub mod cas_storage;
 #[doc(hidden)]
+#[allow(missing_docs)]
 pub mod change_detection;
 #[doc(hidden)]
+#[allow(missing_docs)]
 pub mod concurrency;
 pub mod config;
 #[doc(hidden)]
+#[allow(missing_docs)]
 pub mod config_validator;
 pub mod content_hash;
 pub mod domain;
 pub mod error;
 #[cfg(feature = "fuzzy-search")]
 #[doc(hidden)]
+#[allow(missing_docs)]
 pub mod fuzzy;
 #[cfg(feature = "cli")]
 #[doc(hidden)]
+#[allow(missing_docs)]
 pub mod output;
 #[doc(hidden)]
+#[allow(missing_docs)]
 pub mod package;
 #[doc(hidden)]
+#[allow(missing_docs)]
 pub mod performance;
 pub mod progress;
 #[doc(hidden)]
+#[allow(missing_docs)]
 pub mod registry;
 pub mod registry_clients;
 pub mod resolver;
 pub mod search;
 #[cfg(feature = "sqlite")]
 #[doc(hidden)]
+#[allow(missing_docs)]
 pub mod sqlite_storage;
+#[allow(missing_docs)]
 pub mod store;
 #[doc(hidden)]
-#[doc(hidden)]
+#[allow(missing_docs)]
 pub mod traits;
 #[doc(hidden)]
+#[allow(missing_docs)]
 pub mod unified_storage;
 
 #[cfg(feature = "cli")]
 #[doc(hidden)]
+#[allow(missing_docs)]
 pub mod cli;
 
 #[cfg(feature = "cli")]
 #[doc(hidden)]
+#[allow(missing_docs)]
 pub mod cli_error;
 
 // Public facade: configs, domain, resolver/search entrypoints, storage stats, and top-level errors
@@ -250,6 +263,7 @@ impl registry::DownloadProgress for DownloadProgressBridge {
 }
 
 /// Performance metrics for optimization components
+#[allow(missing_docs)]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OptimizationMetrics {
     pub change_detector_cache_size: usize,
@@ -260,6 +274,7 @@ pub struct OptimizationMetrics {
 }
 
 /// Status of package changes
+#[allow(missing_docs)]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PackageChangeStatus {
     pub package_id: String,
@@ -270,6 +285,7 @@ pub struct PackageChangeStatus {
 }
 
 /// Information about a FHIR SearchParameter
+#[allow(missing_docs)]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SearchParameterInfo {
     pub name: String,
@@ -345,15 +361,32 @@ impl SearchParameterInfo {
 
 /// Package information for rebuild operations
 #[derive(Debug, Clone)]
+#[allow(missing_docs)]
 pub struct RebuildPackageInfo {
     pub id: String,
     pub path: std::path::PathBuf,
 }
 
 impl RebuildPackageInfo {
+    /// Construct a fresh `RebuildPackageInfo` from the package id and
+    /// extracted-path on disk.
     pub fn new(id: String, path: std::path::PathBuf) -> Self {
         Self { id, path }
     }
+}
+
+/// Knobs for [`CanonicalManager::install_packages_batch_with_options`].
+///
+/// `frozen_lockfile` mirrors pnpm: install proceeds only if the resulting
+/// `(name, version, integrity, dependencies)` set matches the on-disk
+/// `fcm.lock` byte-for-byte. The on-disk lockfile is never mutated in
+/// frozen mode — drift surfaces as
+/// [`error::StorageError::LockfileDrift`].
+#[derive(Debug, Clone, Default)]
+#[allow(missing_docs)]
+pub struct InstallOptions {
+    pub frozen_lockfile: bool,
+    pub project_root: Option<std::path::PathBuf>,
 }
 
 /// Main FHIR Canonical Manager
@@ -378,6 +411,12 @@ pub struct CanonicalManager {
     change_detector: Arc<PackageChangeDetector>,
     // Performance tracking
     performance_monitor: Arc<PerformanceMonitor>,
+    /// Cache of `(source_root, target_root) -> Linker`. Populated lazily
+    /// by [`Self::linker_for`]. The probe is ~400 µs on APFS (no
+    /// reflink); cache hits are sub-µs.
+    linker_cache: parking_lot::Mutex<
+        std::collections::HashMap<(std::path::PathBuf, std::path::PathBuf), store::Linker>,
+    >,
 }
 
 impl std::fmt::Debug for CanonicalManager {
@@ -452,7 +491,13 @@ impl CanonicalManager {
         }
 
         // Initialize unified storage system
-        let storage = Arc::new(UnifiedStorage::new(config.storage.clone()).await?);
+        let storage = Arc::new(
+            UnifiedStorage::new_with_durability(
+                config.storage.clone(),
+                config.optimization.durable_writes,
+            )
+            .await?,
+        );
 
         // Initialize registry client
         let expanded_storage = config.get_expanded_storage_config();
@@ -514,6 +559,7 @@ impl CanonicalManager {
             search_engine,
             change_detector,
             performance_monitor,
+            linker_cache: parking_lot::Mutex::new(std::collections::HashMap::new()),
         })
     }
 
@@ -644,6 +690,7 @@ impl CanonicalManager {
             search_engine,
             change_detector,
             performance_monitor,
+            linker_cache: parking_lot::Mutex::new(std::collections::HashMap::new()),
         })
     }
 
@@ -691,17 +738,45 @@ impl CanonicalManager {
     /// stores), this is a no-op — the trait is intentionally frozen and
     /// must not gain a `record_provenance` method. See
     /// `src/traits.rs` for the stability contract.
+    #[cfg_attr(not(feature = "sqlite"), allow(unused_variables))]
     async fn record_provenance_after_install(
         &self,
         spec: &PackageSpec,
         download: &registry::PackageDownload,
     ) {
         // Only the bundled SQLite backend tracks provenance. Custom
-        // backends (Postgres etc.) opt out by setting `pkg_store_dyn`.
+        // backends (Postgres etc.) opt out by setting `pkg_store_dyn`,
+        // and consumers building without the `sqlite` feature have no
+        // provenance store at all (record_provenance_after_install
+        // becomes a `populate_fhir_cache_for_package`-only stub).
         if self.pkg_store_dyn.is_some() {
+            #[cfg(feature = "sqlite")]
             return;
         }
+        #[cfg(feature = "sqlite")]
+        self.write_sqlite_provenance(spec, download).await;
 
+        if self.config.storage.fhir_cache_compat
+            && let Err(e) = self
+                .populate_fhir_cache_for_package(&spec.name, &spec.version)
+                .await
+        {
+            warn!(
+                "FHIR cache populate failed for {}@{}: {e}",
+                spec.name, spec.version
+            );
+        }
+    }
+
+    /// SQLite-only provenance write helper. Extracted so the parent
+    /// function can compile without the `sqlite` feature (custom
+    /// Postgres backends used via `new_with_components`).
+    #[cfg(feature = "sqlite")]
+    async fn write_sqlite_provenance(
+        &self,
+        spec: &PackageSpec,
+        download: &registry::PackageDownload,
+    ) {
         // Hash tarball bytes from the cached file. SHA-512 SRI and
         // blake3 are computed from the same in-memory buffer so the
         // lockfile entry and the `tarballs` row stay in sync.
@@ -795,17 +870,6 @@ impl CanonicalManager {
                 spec.name, spec.version
             );
         }
-
-        if self.config.storage.fhir_cache_compat
-            && let Err(e) = self
-                .populate_fhir_cache_for_package(&spec.name, &spec.version)
-                .await
-        {
-            warn!(
-                "FHIR cache populate failed for {}@{}: {e}",
-                spec.name, spec.version
-            );
-        }
     }
 
     /// Mirror a single installed package into `~/.fhir/packages/`.
@@ -830,13 +894,7 @@ impl CanonicalManager {
             );
             return Ok(());
         }
-        let linker = store::Linker::probe(&source, &target, store::LinkerMode::Auto)
-            .await
-            .map_err(|e| {
-                crate::error::FcmError::Storage(crate::error::StorageError::IoError {
-                    message: format!("Linker probe failed: {e}"),
-                })
-            })?;
+        let linker = self.linker_for(&source, &target).await?;
         store::populate_fhir_cache(&target, name, version, &source, &linker).await?;
         Ok(())
     }
@@ -1117,12 +1175,65 @@ impl CanonicalManager {
 
     /// Install multiple FHIR packages in batch, rebuilding index only once
     /// This is much more efficient than calling install_package() multiple times
-    #[tracing::instrument(name = "manager.install_packages_batch", skip(self), fields(count = %packages.len()))]
     pub async fn install_packages_batch(&self, packages: Vec<PackageSpec>) -> Result<()> {
+        self.install_packages_batch_with_options(packages, InstallOptions::default())
+            .await
+    }
+
+    /// Install multiple FHIR packages with explicit options.
+    ///
+    /// With `InstallOptions::default()` this matches the legacy
+    /// [`Self::install_packages_batch`]: any pre-existing `fcm.lock` in the
+    /// working directory is refreshed in place after install.
+    ///
+    /// With `frozen_lockfile = true` (pnpm semantics):
+    /// 1. an on-disk `fcm.lock` MUST exist under `project_root`
+    ///    (defaults to `cwd`); absence is a hard error;
+    /// 2. the lockfile is never mutated;
+    /// 3. after install, the in-memory lockfile is compared against the
+    ///    on-disk one — any drift in
+    ///    `(name, version, integrity, dependencies, resolved)` returns
+    ///    [`error::StorageError::LockfileDrift`].
+    #[tracing::instrument(
+        name = "manager.install_packages_batch_with_options",
+        skip(self, opts),
+        fields(count = %packages.len(), frozen = %opts.frozen_lockfile)
+    )]
+    pub async fn install_packages_batch_with_options(
+        &self,
+        packages: Vec<PackageSpec>,
+        opts: InstallOptions,
+    ) -> Result<()> {
         let tracker = self
             .performance_monitor
             .start_operation("install_packages_batch");
         let mut installed = HashSet::new();
+
+        let project_root: Option<std::path::PathBuf> = opts
+            .project_root
+            .clone()
+            .or_else(|| std::env::current_dir().ok());
+
+        if opts.frozen_lockfile {
+            let root = project_root.as_ref().ok_or_else(|| {
+                FcmError::Storage(crate::error::StorageError::LockfileDrift {
+                    details:
+                        "--frozen-lockfile requires a project root, but cwd could not be resolved"
+                            .to_string(),
+                })
+            })?;
+            if !root.join(store::Lockfile::FILE_NAME).exists() {
+                return Err(FcmError::Storage(
+                    crate::error::StorageError::LockfileDrift {
+                        details: format!(
+                            "{} not found in {} — --frozen-lockfile requires a committed lockfile",
+                            store::Lockfile::FILE_NAME,
+                            root.display()
+                        ),
+                    },
+                ));
+            }
+        }
 
         info!("Installing {} packages in batch mode", packages.len());
 
@@ -1132,21 +1243,19 @@ impl CanonicalManager {
                 .await?;
         }
 
-        // SQLite automatically maintains indexes, no rebuild needed
         debug!("All packages installed (SQLite auto-indexed)");
 
-        // If a lockfile already exists in the working directory, refresh
-        // it. We *don't* create one when absent — projects opt in by
-        // committing an `fcm.lock` (or running `fcm install --lockfile`
-        // explicitly via the CLI in a future iteration). This avoids
-        // surprising downstream tools that don't expect a generated file.
-        if let Ok(cwd) = std::env::current_dir()
-            && cwd.join(store::Lockfile::FILE_NAME).exists()
+        if let Some(root) = project_root.as_ref()
+            && opts.frozen_lockfile
         {
-            if let Err(e) = self.write_lockfile(&cwd).await {
+            self.assert_lockfile_unchanged(root).await?;
+        } else if let Some(root) = project_root.as_ref()
+            && root.join(store::Lockfile::FILE_NAME).exists()
+        {
+            if let Err(e) = self.write_lockfile(root).await {
                 warn!("Failed to refresh fcm.lock: {e}");
             } else {
-                debug!("fcm.lock refreshed at {}", cwd.display());
+                debug!("fcm.lock refreshed at {}", root.display());
             }
         }
 
@@ -1368,6 +1477,52 @@ impl CanonicalManager {
         .await
     }
 
+    /// Acquire the per-`(name, version)` cross-process install lock at
+    /// `<cache_dir>/store/locks/<name>@<version>.lock`. Held across
+    /// download → extract → `add_package` so two concurrent `fcm install`
+    /// processes targeting the same package serialise instead of
+    /// double-fetching.
+    async fn acquire_install_lock(
+        &self,
+        name: &str,
+        version: &str,
+    ) -> Result<store::PackageInstallLock> {
+        let paths = store::StorePaths::with_root(self.config.storage.cache_dir.join("store"));
+        paths.ensure_dirs().await.map_err(|e| {
+            FcmError::Storage(crate::error::StorageError::IoError {
+                message: format!("Failed to ensure store dirs for install lock: {e}"),
+            })
+        })?;
+        store::PackageInstallLock::acquire(&paths, name, version).await
+    }
+
+    /// Cached `Linker::probe` over `(source_root, target_root)`.
+    ///
+    /// `Linker::probe` writes a tiny scratch file under each root and
+    /// attempts a reflink + hardlink to detect FS capabilities — ~400 µs
+    /// on APFS, more on slow disks. Repeated `materialise_packages` /
+    /// `populate_fhir_cache_all` invocations between the same root pair
+    /// would otherwise re-pay that cost. Cache hit is sub-µs.
+    async fn linker_for(
+        &self,
+        source: &std::path::Path,
+        target: &std::path::Path,
+    ) -> Result<store::Linker> {
+        let key = (source.to_path_buf(), target.to_path_buf());
+        if let Some(linker) = self.linker_cache.lock().get(&key).cloned() {
+            return Ok(linker);
+        }
+        let linker = store::Linker::probe(source, target, store::LinkerMode::Auto)
+            .await
+            .map_err(|e| {
+                FcmError::Storage(crate::error::StorageError::IoError {
+                    message: format!("Linker probe failed: {e}"),
+                })
+            })?;
+        self.linker_cache.lock().insert(key, linker.clone());
+        Ok(linker)
+    }
+
     /// Simplified package installation for testing (bypasses complex optimizations)
     async fn install_package_simple(&self, name: &str, version: &str) -> Result<()> {
         debug!("Installing package {}@{} in simplified mode", name, version);
@@ -1457,6 +1612,23 @@ impl CanonicalManager {
                     "Package {} installed successfully from local directory",
                     package_key
                 );
+                return Ok(());
+            }
+
+            let _install_lock = self.acquire_install_lock(name, version).await?;
+
+            // Re-check storage under the cross-process lock — another
+            // process may have completed this package while we waited.
+            let packages = self.storage.list_packages().await?;
+            if packages
+                .iter()
+                .any(|p| p.name == name && p.version == version)
+            {
+                debug!(
+                    "Package installed by another process while waiting for install lock: {}",
+                    package_key
+                );
+                installed.insert(package_key);
                 return Ok(());
             }
 
@@ -1704,6 +1876,27 @@ impl CanonicalManager {
 
             debug!("Installing package: {}@{} (url: {:?})", name, version, url);
 
+            // Per-(name, version) cross-process install lock. Held until
+            // the end of this Box::pin future so download → extract →
+            // add_package run uncontested. Recursive dep installs each
+            // grab their own lock.
+            let _install_lock = self.acquire_install_lock(name, version).await?;
+
+            // Re-check the trait store under the lock: another process
+            // may have completed this package while we waited.
+            let packages = self.list_packages_via_store().await?;
+            if packages
+                .iter()
+                .any(|p| p.name == name && p.version == version)
+            {
+                debug!(
+                    "Package installed by another process while waiting for install lock: {}",
+                    package_key
+                );
+                installed.insert(package_key);
+                return Ok(());
+            }
+
             let spec = PackageSpec {
                 name: name.to_string(),
                 version: version.to_string(),
@@ -1870,6 +2063,24 @@ impl CanonicalManager {
             let stream_progress = progress.create_stream_progress();
 
             debug!("Installing package: {}@{}", name, version);
+
+            let _install_lock = self.acquire_install_lock(name, version).await?;
+
+            let packages = self.storage.list_packages().await?;
+            if packages
+                .iter()
+                .any(|p| p.name == name && p.version == version)
+            {
+                debug!(
+                    "Package installed by another process while waiting for install lock: {}",
+                    package_key
+                );
+                #[cfg(feature = "cli")]
+                Progress::step(&format!("✓ Package already installed: {package_key}"));
+                installed.insert(package_key);
+                return Ok(());
+            }
+
             #[cfg(feature = "cli")]
             Progress::step(&format!("Downloading {package_key}"));
 
@@ -2124,27 +2335,20 @@ impl CanonicalManager {
         let mut fhir_versions: std::collections::BTreeSet<String> =
             std::collections::BTreeSet::new();
 
-        let sqlite = self.storage.sqlite_backend();
-
         for p in packages {
             fhir_versions.insert(p.fhir_version.clone());
 
             // Try to fetch real provenance; fall back to placeholders.
-            let provenance = if let Some(s) = sqlite {
-                s.get_install_provenance(&p.name, &p.version)
-                    .await
-                    .ok()
-                    .flatten()
-            } else {
-                None
-            };
+            // Returns `None` for both "no SQLite feature" and "no
+            // provenance row" (custom backend or pre-P2 install).
+            let provenance = self.lockfile_provenance_for(&p.name, &p.version).await;
 
             let (resolved, integrity, deps, fhir_version) = match provenance {
-                Some(prov) => (
-                    prov.resolved_url,
-                    prov.integrity,
-                    prov.dependencies,
-                    prov.fhir_version.unwrap_or_else(|| p.fhir_version.clone()),
+                Some((resolved_url, integrity, dependencies, fhir_v)) => (
+                    resolved_url,
+                    integrity,
+                    dependencies,
+                    fhir_v.unwrap_or_else(|| p.fhir_version.clone()),
                 ),
                 None => (
                     format!(
@@ -2176,6 +2380,39 @@ impl CanonicalManager {
         Ok(lock)
     }
 
+    /// Feature-gated provenance lookup. Returns `(resolved_url,
+    /// integrity, dependencies, fhir_version)` when the SQLite
+    /// `package_provenance` row exists, `None` otherwise (custom
+    /// backend, pre-P2 install, or `sqlite` feature off).
+    #[cfg(feature = "sqlite")]
+    async fn lockfile_provenance_for(
+        &self,
+        name: &str,
+        version: &str,
+    ) -> Option<(String, String, Vec<String>, Option<String>)> {
+        let sqlite = self.storage.sqlite_backend()?;
+        let prov = sqlite
+            .get_install_provenance(name, version)
+            .await
+            .ok()
+            .flatten()?;
+        Some((
+            prov.resolved_url,
+            prov.integrity,
+            prov.dependencies,
+            prov.fhir_version,
+        ))
+    }
+
+    #[cfg(not(feature = "sqlite"))]
+    async fn lockfile_provenance_for(
+        &self,
+        _name: &str,
+        _version: &str,
+    ) -> Option<(String, String, Vec<String>, Option<String>)> {
+        None
+    }
+
     /// Write `fcm.lock` into `project_root` using [`Self::build_lockfile`].
     ///
     /// The on-disk file is updated atomically (tmp + rename) and is
@@ -2186,6 +2423,83 @@ impl CanonicalManager {
         let mut lock = self.build_lockfile().await?;
         lock.save(project_root).await?;
         Ok(())
+    }
+
+    /// Compare the in-memory lockfile against the on-disk `fcm.lock`
+    /// under `project_root`. Returns
+    /// [`error::StorageError::LockfileDrift`] on any mismatch in
+    /// `(name, version, integrity, dependencies, resolved, fhir_version)`.
+    ///
+    /// Used by `install_packages_batch_with_options` when
+    /// `frozen_lockfile = true` and exposed publicly so callers can run
+    /// the same check independently (e.g. as a CI gate).
+    ///
+    /// Does not write to disk.
+    pub async fn assert_lockfile_unchanged(&self, project_root: &std::path::Path) -> Result<()> {
+        let mut current = self.build_lockfile().await?;
+        current.canonicalise();
+
+        let mut on_disk = store::Lockfile::load_or_empty(project_root).await?;
+        on_disk.canonicalise();
+
+        use std::collections::BTreeMap;
+        let key = |p: &store::LockedPackage| (p.name.clone(), p.version.clone());
+        let on_disk_map: BTreeMap<_, _> = on_disk.packages.iter().map(|p| (key(p), p)).collect();
+        let current_map: BTreeMap<_, _> = current.packages.iter().map(|p| (key(p), p)).collect();
+
+        let mut diffs: Vec<String> = Vec::new();
+        for (k, want) in &on_disk_map {
+            match current_map.get(k) {
+                Some(got) => {
+                    if got.integrity != want.integrity {
+                        diffs.push(format!(
+                            "{}@{}: integrity {} != {}",
+                            k.0, k.1, want.integrity, got.integrity
+                        ));
+                    }
+                    if got.resolved != want.resolved {
+                        diffs.push(format!(
+                            "{}@{}: resolved {} != {}",
+                            k.0, k.1, want.resolved, got.resolved
+                        ));
+                    }
+                    if got.dependencies != want.dependencies {
+                        diffs.push(format!(
+                            "{}@{}: dependencies {:?} != {:?}",
+                            k.0, k.1, want.dependencies, got.dependencies
+                        ));
+                    }
+                    if got.fhir_version != want.fhir_version {
+                        diffs.push(format!(
+                            "{}@{}: fhir_version {:?} != {:?}",
+                            k.0, k.1, want.fhir_version, got.fhir_version
+                        ));
+                    }
+                }
+                None => diffs.push(format!(
+                    "{}@{}: present in lockfile, missing after install",
+                    k.0, k.1
+                )),
+            }
+        }
+        for k in current_map.keys() {
+            if !on_disk_map.contains_key(k) {
+                diffs.push(format!(
+                    "{}@{}: installed but not present in lockfile",
+                    k.0, k.1
+                ));
+            }
+        }
+
+        if diffs.is_empty() {
+            Ok(())
+        } else {
+            Err(FcmError::Storage(
+                crate::error::StorageError::LockfileDrift {
+                    details: diffs.join("; "),
+                },
+            ))
+        }
     }
 
     /// Direct handle to the bundled SQLite backend, when used.
@@ -2225,13 +2539,7 @@ impl CanonicalManager {
         tokio::fs::create_dir_all(&target).await?;
 
         let store_root = self.config.storage.packages_dir.clone();
-        let linker = store::Linker::probe(&store_root, &target, store::LinkerMode::Auto)
-            .await
-            .map_err(|e| {
-                crate::error::FcmError::Storage(crate::error::StorageError::IoError {
-                    message: format!("Linker probe failed: {e}"),
-                })
-            })?;
+        let linker = self.linker_for(&store_root, &target).await?;
 
         let mut total = store::MaterialiseReport::default();
         for p in self.storage.list_packages().await? {
@@ -2290,13 +2598,7 @@ impl CanonicalManager {
         let modules_root = project_root.join(".fcm").join("modules");
         tokio::fs::create_dir_all(&modules_root).await?;
         let store_root = self.config.storage.packages_dir.clone();
-        let linker = store::Linker::probe(&store_root, &modules_root, store::LinkerMode::Auto)
-            .await
-            .map_err(|e| {
-                crate::error::FcmError::Storage(crate::error::StorageError::IoError {
-                    message: format!("Linker probe failed: {e}"),
-                })
-            })?;
+        let linker = self.linker_for(&store_root, &modules_root).await?;
 
         let mut total = store::MaterialiseReport::default();
         for p in self.storage.list_packages().await? {

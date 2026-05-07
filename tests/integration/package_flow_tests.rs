@@ -42,6 +42,7 @@ async fn test_canonical_manager_creation_simple() {
             checksum_cache_size: 1000,
             enable_metrics: false,
             metrics_interval: "30s".to_string(),
+            durable_writes: true,
         },
     };
 
@@ -111,6 +112,7 @@ async fn test_package_installation_with_timeout() {
             checksum_cache_size: 1000,
             enable_metrics: false,
             metrics_interval: "30s".to_string(),
+            durable_writes: true,
         },
     };
 
@@ -196,6 +198,7 @@ async fn test_full_package_installation_original() {
             checksum_cache_size: 1000,
             enable_metrics: false,
             metrics_interval: "30s".to_string(),
+            durable_writes: true,
         },
     };
 
@@ -274,6 +277,7 @@ async fn test_package_installation_with_dependencies() {
             checksum_cache_size: 1000,
             enable_metrics: false,
             metrics_interval: "30s".to_string(),
+            durable_writes: true,
         },
     };
 
@@ -332,6 +336,7 @@ async fn test_duplicate_package_installation() {
             checksum_cache_size: 1000,
             enable_metrics: false,
             metrics_interval: "30s".to_string(),
+            durable_writes: true,
         },
     };
 
@@ -387,6 +392,7 @@ async fn test_package_removal() {
             checksum_cache_size: 1000,
             enable_metrics: false,
             metrics_interval: "30s".to_string(),
+            durable_writes: true,
         },
     };
 
@@ -445,6 +451,7 @@ async fn test_canonical_resolution_after_installation() {
             checksum_cache_size: 1000,
             enable_metrics: false,
             metrics_interval: "30s".to_string(),
+            durable_writes: true,
         },
     };
 
@@ -505,6 +512,7 @@ async fn test_batch_canonical_resolution() {
             checksum_cache_size: 1000,
             enable_metrics: false,
             metrics_interval: "30s".to_string(),
+            durable_writes: true,
         },
     };
 
@@ -567,6 +575,7 @@ async fn test_package_installation_error_handling() {
             checksum_cache_size: 1000,
             enable_metrics: false,
             metrics_interval: "30s".to_string(),
+            durable_writes: true,
         },
     };
 
@@ -623,6 +632,7 @@ async fn test_concurrent_package_installations() {
             checksum_cache_size: 1000,
             enable_metrics: false,
             metrics_interval: "30s".to_string(),
+            durable_writes: true,
         },
     };
 
@@ -685,6 +695,7 @@ async fn test_package_counting() {
             checksum_cache_size: 1000,
             enable_metrics: false,
             metrics_interval: "30s".to_string(),
+            durable_writes: true,
         },
     };
 
@@ -750,6 +761,7 @@ async fn test_installation_with_priorities() {
             checksum_cache_size: 1000,
             enable_metrics: false,
             metrics_interval: "30s".to_string(),
+            durable_writes: true,
         },
     };
 
@@ -793,6 +805,7 @@ async fn test_search_parameter_retrieval_simple() {
             checksum_cache_size: 1000,
             enable_metrics: false,
             metrics_interval: "30s".to_string(),
+            durable_writes: true,
         },
     };
 
@@ -852,6 +865,7 @@ async fn test_search_parameter_retrieval_with_installation() {
             checksum_cache_size: 1000,
             enable_metrics: false,
             metrics_interval: "30s".to_string(),
+            durable_writes: true,
         },
     };
 

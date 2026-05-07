@@ -1,4 +1,10 @@
-//! Domain types: canonical URLs, versions, and storage-agnostic data structures
+//! Domain types: canonical URLs, versions, and storage-agnostic data
+//! structures.
+//!
+//! Field-level docs are intentionally kept terse on these data carriers;
+//! `missing_docs` is allowed at module scope.
+
+#![allow(missing_docs)]
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

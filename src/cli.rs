@@ -221,6 +221,12 @@ pub struct InstallCommand {
     /// Install all packages from fcm.toml
     #[arg(long)]
     pub all: bool,
+
+    /// pnpm-style: fail if installed package set drifts from `fcm.lock`.
+    /// Requires a committed lockfile in the working directory; never
+    /// mutates it.
+    #[arg(long)]
+    pub frozen_lockfile: bool,
 }
 
 /// Remove command
@@ -409,6 +415,10 @@ async fn handle_install(cli: &Cli, cmd: &InstallCommand) -> crate::Result<()> {
     let config = load_config(cli).await?;
     let manager = CanonicalManager::new(config).await?;
 
+    if cmd.frozen_lockfile {
+        return handle_install_frozen(cli, cmd, &manager).await;
+    }
+
     if cmd.all {
         Progress::start("Installing all packages from configuration");
         let config = load_config(cli).await?;
@@ -483,6 +493,60 @@ async fn handle_install(cli: &Cli, cmd: &InstallCommand) -> crate::Result<()> {
     }
 
     Ok(())
+}
+
+/// `--frozen-lockfile` install path. Routes every spec through
+/// `install_packages_batch_with_options` so the post-install drift check
+/// runs exactly once across the whole batch.
+async fn handle_install_frozen(
+    cli: &Cli,
+    cmd: &InstallCommand,
+    manager: &CanonicalManager,
+) -> crate::Result<()> {
+    let specs: Vec<crate::PackageSpec> = if cmd.all {
+        let cfg = load_config(cli).await?;
+        cfg.packages
+            .iter()
+            .map(|p| crate::PackageSpec {
+                name: p.name.clone(),
+                version: p.version.clone(),
+                priority: p.priority,
+                url: None,
+            })
+            .collect()
+    } else if let Some(package_spec) = &cmd.package {
+        let (name, version) = parse_package_spec(package_spec)?;
+        vec![crate::PackageSpec {
+            name,
+            version,
+            priority: 1,
+            url: None,
+        }]
+    } else {
+        Output::error("Please specify a package to install or use --all");
+        std::process::exit(1);
+    };
+
+    Progress::start("Installing packages with --frozen-lockfile");
+
+    let opts = crate::InstallOptions {
+        frozen_lockfile: true,
+        project_root: std::env::current_dir().ok(),
+    };
+
+    match manager
+        .install_packages_batch_with_options(specs, opts)
+        .await
+    {
+        Ok(()) => {
+            Output::success("All packages installed; lockfile verified");
+            Ok(())
+        }
+        Err(e) => {
+            Output::error("Installation failed (frozen lockfile)");
+            Err(e)
+        }
+    }
 }
 
 /// Handle remove command

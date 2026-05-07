@@ -66,11 +66,21 @@ impl std::fmt::Display for BlobHash {
 #[derive(Debug, Clone)]
 pub struct FileCas {
     paths: StorePaths,
+    /// When `true` (default), every blob insert calls `sync_all` before
+    /// the atomic rename so the blob bytes survive a kernel crash. When
+    /// `false`, skip the fsync and rely on rename atomicity alone — a
+    /// torn blob from a crash is recoverable by re-downloading its
+    /// containing package. Drops ~3 ms per blob on APFS.
+    durable: bool,
 }
 
 impl FileCas {
     pub fn new(paths: StorePaths) -> Self {
-        Self { paths }
+        Self::new_with_durability(paths, true)
+    }
+
+    pub fn new_with_durability(paths: StorePaths, durable: bool) -> Self {
+        Self { paths, durable }
     }
 
     /// Insert raw bytes into CAS. Idempotent: returns the hash even when
@@ -97,7 +107,9 @@ impl FileCas {
         let tmp_path = tmp_dir.join(format!("blob-{}.part", uuid::Uuid::new_v4()));
         let mut file = tokio::fs::File::create(&tmp_path).await?;
         file.write_all(bytes).await?;
-        file.sync_all().await?;
+        if self.durable {
+            file.sync_all().await?;
+        }
         drop(file);
 
         match tokio::fs::rename(&tmp_path, &dest).await {

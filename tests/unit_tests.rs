@@ -8,6 +8,7 @@ mod unit {
     mod package_tests;
     mod registry_clients_tests;
     mod registry_tests;
+    mod resolver_proptest;
     mod resolver_tests;
     mod storage_tests;
 }

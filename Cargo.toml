@@ -1,6 +1,6 @@
 [package]
 name = "octofhir-canonical-manager"
-version = "0.1.26"
+version = "0.2.0"
 edition = "2024"
 description = "FHIR Canonical Manager - Library-first FHIR package management"
 license = "MIT OR Apache-2.0"
@@ -40,8 +40,6 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "0.9"
 semver = "1"
-async-compression = { version = "0.4", features = ["tokio", "gzip"] }
-async-tar = "0.5"
 sha1 = "0.10"
 hex = "0.4"
 rand = "0.9"
@@ -102,9 +100,6 @@ reflink-copy = "0.1"
 fs4 = { version = "1", features = ["tokio"] }
 bitflags = "2"
 
-# Async file I/O
-tokio-util = { version = "0.7", features = ["io", "compat"] }
-
 # Date/time handling
 chrono = { version = "0.4", features = ["serde"] }
 
@@ -124,6 +119,7 @@ wiremock = "0.6"
 assert_cmd = "2.0"
 predicates = "3.0"
 criterion = { version = "0.7", features = ["async_tokio"] }
+proptest = "1.5"
 
 [[bench]]
 name = "cas"
@@ -147,6 +143,22 @@ harness = false
 
 [[bench]]
 name = "install"
+harness = false
+
+[[bench]]
+name = "disk_usage"
+harness = false
+
+[[bench]]
+name = "durable_writes"
+harness = false
+
+[[bench]]
+name = "tar_extract"
+harness = false
+
+[[bench]]
+name = "download_parallelism"
 harness = false
 
 [features]

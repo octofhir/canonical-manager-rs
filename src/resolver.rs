@@ -75,6 +75,7 @@ pub struct CanonicalResolver {
 /// };
 /// ```
 #[derive(Debug, Clone)]
+#[allow(missing_docs)]
 pub struct ResolutionConfig {
     pub package_priorities: Vec<String>,
     pub version_preference: VersionPreference,
@@ -95,6 +96,8 @@ pub struct ResolutionConfig {
 /// * `Exact` - Only match exact versions specified
 /// * `Compatible` - Use semantic versioning compatibility rules
 #[derive(Debug, Clone)]
+#[non_exhaustive]
+#[allow(missing_docs)]
 pub enum VersionPreference {
     Latest,
     Exact,
@@ -130,6 +133,7 @@ impl Default for ResolutionConfig {
 /// # }
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(missing_docs)]
 pub struct ResolvedResource {
     pub canonical_url: String,
     pub resource: FhirResource,
@@ -150,6 +154,8 @@ pub struct ResolvedResource {
 /// * `PackageFallback` - Resolved by searching alternative packages
 /// * `FuzzyMatch` - Resolved using fuzzy string matching
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
+#[allow(missing_docs)]
 pub enum ResolutionPath {
     ExactMatch,
     VersionFallback { requested: String, resolved: String },
@@ -552,20 +558,19 @@ impl CanonicalResolver {
             .filter(|idx| idx.fhir_version == fhir_version)
             .collect();
 
-        if !matching_resources.is_empty() {
-            // Sort by package version (descending) to get the latest
-            matching_resources.sort_by(|a, b| b.package_version.cmp(&a.package_version));
-
-            let resolved_canonical = matching_resources[0].canonical_url.clone();
+        // Sort by package version (descending) to get the latest
+        matching_resources.sort_by(|a, b| b.package_version.cmp(&a.package_version));
+        let count = matching_resources.len();
+        if let Some(best) = matching_resources.into_iter().next() {
+            let resolved_canonical = best.canonical_url.clone();
             debug!(
                 "Found {} resources with FHIR version {}, using latest",
-                matching_resources.len(),
-                fhir_version
+                count, fhir_version
             );
             return self
                 .build_resolved_resource(
                     canonical_url,
-                    matching_resources.into_iter().next().unwrap(),
+                    best,
                     ResolutionPath::VersionFallback {
                         requested: canonical_url.to_string(),
                         resolved: resolved_canonical,

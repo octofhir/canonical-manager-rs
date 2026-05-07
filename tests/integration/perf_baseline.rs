@@ -31,6 +31,7 @@ async fn install_and_resolve_timing_baseline() {
             checksum_cache_size: 1000,
             enable_metrics: false,
             metrics_interval: "30s".to_string(),
+            durable_writes: true,
         },
     };
 

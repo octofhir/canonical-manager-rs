@@ -1,4 +1,12 @@
-//! Error types for the FHIR Canonical Manager
+//! Error types for the FHIR Canonical Manager.
+//!
+//! Variants carry their human-readable message in the `#[error("...")]`
+//! `thiserror` attribute, which is the canonical documentation surfaced
+//! by `Display`/`std::error::Error::source` and by `cargo doc`. Module
+//! suppresses `missing_docs` for variant fields because the attribute
+//! already conveys their intent.
+
+#![allow(missing_docs)]
 
 use thiserror::Error;
 
@@ -37,6 +45,7 @@ pub type Result<T> = std::result::Result<T, FcmError>;
 /// let fcm_error: FcmError = config_error.into();
 /// ```
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum FcmError {
     #[error("Configuration error: {0}")]
     Config(#[from] ConfigError),
@@ -120,6 +129,7 @@ impl Clone for FcmError {
 /// println!("Configuration error: {}", error);
 /// ```
 #[derive(Error, Debug, Clone)]
+#[non_exhaustive]
 pub enum ConfigError {
     #[error("Invalid configuration file: {path}")]
     InvalidFile { path: std::path::PathBuf },
@@ -157,6 +167,7 @@ pub enum ConfigError {
 /// println!("Registry error: {}", error);
 /// ```
 #[derive(Error, Debug, Clone)]
+#[non_exhaustive]
 pub enum RegistryError {
     #[error("Package not found: {name}@{version}")]
     PackageNotFound { name: String, version: String },
@@ -200,6 +211,7 @@ pub enum RegistryError {
 /// println!("Package error: {}", error);
 /// ```
 #[derive(Error, Debug, Clone)]
+#[non_exhaustive]
 pub enum PackageError {
     #[error("Invalid package format: {message}")]
     InvalidFormat { message: String },
@@ -233,6 +245,7 @@ pub enum PackageError {
 /// println!("Storage error: {}", error);
 /// ```
 #[derive(Error, Debug, Clone)]
+#[non_exhaustive]
 pub enum StorageError {
     #[error("Index corruption detected: {message}")]
     IndexCorruption { message: String },
@@ -267,6 +280,9 @@ pub enum StorageError {
         required: i32,
         message: String,
     },
+
+    #[error("Lockfile drift: {details}")]
+    LockfileDrift { details: String },
 }
 
 /// Errors related to canonical URL resolution.
@@ -286,6 +302,7 @@ pub enum StorageError {
 /// println!("Resolution error: {}", error);
 /// ```
 #[derive(Error, Debug, Clone)]
+#[non_exhaustive]
 pub enum ResolutionError {
     #[error("Canonical URL not found: {url}")]
     CanonicalUrlNotFound { url: String },
@@ -316,6 +333,7 @@ pub enum ResolutionError {
 /// println!("Search error: {}", error);
 /// ```
 #[derive(Error, Debug, Clone)]
+#[non_exhaustive]
 pub enum SearchError {
     #[error("Invalid search query: {message}")]
     InvalidQuery { message: String },

@@ -171,11 +171,10 @@ impl Linker {
                 tokio::task::spawn_blocking(move || reflink_copy::reflink(&src_owned, &dst_owned))
                     .await
                     .map_err(|e| io::Error::other(format!("Join error: {e}")))?;
-            if r.is_ok() {
-                return Ok(MaterialiseOutcome::Reflink);
-            }
-            if must_reflink {
-                return Err(r.unwrap_err());
+            match r {
+                Ok(_) => return Ok(MaterialiseOutcome::Reflink),
+                Err(e) if must_reflink => return Err(e),
+                Err(_) => {}
             }
         } else if must_reflink {
             return Err(io::Error::new(
@@ -190,11 +189,10 @@ impl Linker {
             let r = tokio::task::spawn_blocking(move || std::fs::hard_link(&src_owned, &dst_owned))
                 .await
                 .map_err(|e| io::Error::other(format!("Join error: {e}")))?;
-            if r.is_ok() {
-                return Ok(MaterialiseOutcome::Hardlink);
-            }
-            if must_hardlink {
-                return Err(r.unwrap_err());
+            match r {
+                Ok(_) => return Ok(MaterialiseOutcome::Hardlink),
+                Err(e) if must_hardlink => return Err(e),
+                Err(_) => {}
             }
         } else if must_hardlink {
             return Err(io::Error::new(

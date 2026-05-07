@@ -78,7 +78,16 @@ impl UnifiedStorage {
     /// ```
     #[cfg(feature = "sqlite")]
     pub async fn new(config: StorageConfig) -> Result<Self> {
-        let sqlite_storage = Arc::new(SqliteStorage::new(config.clone()).await?);
+        Self::new_with_durability(config, true).await
+    }
+
+    /// Like [`Self::new`] but threads a `durable` flag through to the
+    /// underlying [`SqliteStorage`]. See
+    /// [`crate::config::OptimizationConfig::durable_writes`].
+    #[cfg(feature = "sqlite")]
+    pub async fn new_with_durability(config: StorageConfig, durable: bool) -> Result<Self> {
+        let sqlite_storage =
+            Arc::new(SqliteStorage::new_with_durability(config.clone(), durable).await?);
         Ok(Self {
             package_store: sqlite_storage.clone(),
             search_storage: sqlite_storage.clone(),

@@ -52,7 +52,10 @@ use tracing::{debug, info};
 /// ```
 pub struct SearchEngine {
     storage: Arc<dyn SearchStorage + Send + Sync>,
-    text_index: TextIndex,
+    /// Atomically swappable text index. `build_metadata_index` writes a
+    /// fresh `TextIndex` and rotates the `Arc` under the write lock so a
+    /// cancelled build never leaves partial state visible to readers.
+    text_index: parking_lot::RwLock<Arc<TextIndex>>,
     filters: FilterEngine,
     // Simple LRU-style cache for search results
     search_cache: ConcurrentMap<String, (SearchResult, Instant)>,
@@ -60,6 +63,15 @@ pub struct SearchEngine {
     // Lazily build the text index only when needed
     index_built: std::sync::atomic::AtomicBool,
     index_build_lock: tokio::sync::Mutex<()>,
+}
+
+impl SearchEngine {
+    /// Snapshot the current text index. Cheap `Arc` clone; the returned
+    /// handle stays valid even if a concurrent rebuild swaps the live
+    /// index.
+    fn index_snapshot(&self) -> Arc<TextIndex> {
+        Arc::clone(&self.text_index.read())
+    }
 }
 
 /// Inverted text index for fast full-text search.
@@ -119,6 +131,7 @@ pub struct FilterEngine {
 /// # }
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(missing_docs)]
 pub struct SearchFacets {
     pub resource_types: HashMap<String, usize>,
     pub packages: HashMap<String, usize>,
@@ -186,6 +199,7 @@ pub struct SearchQueryBuilder {
 /// };
 /// ```
 #[derive(Debug, Clone, Default, Hash, Serialize, Deserialize)]
+#[allow(missing_docs)]
 pub struct SearchQuery {
     pub text: Option<String>,
     pub resource_types: Vec<String>,
@@ -213,6 +227,7 @@ pub struct SearchQuery {
 /// };
 /// ```
 #[derive(Debug, Clone, Hash, Serialize, Deserialize)]
+#[allow(missing_docs)]
 pub struct VersionConstraint {
     pub package: String,
     pub version: String,
@@ -235,6 +250,7 @@ pub struct VersionConstraint {
 /// # }
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(missing_docs)]
 pub struct SearchResult {
     pub resources: Vec<ResourceMatch>,
     pub total_count: usize,
@@ -261,6 +277,7 @@ pub struct SearchResult {
 /// # }
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(missing_docs)]
 pub struct ResourceMatch {
     pub resource: FhirResource,
     pub index: ResourceIndex,
@@ -284,6 +301,7 @@ pub struct ResourceMatch {
 /// };
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(missing_docs)]
 pub struct SearchHighlight {
     pub field: String,
     pub fragment: String,
@@ -486,6 +504,11 @@ impl TextIndex {
             .sum();
         (term_count, total_entries)
     }
+
+    /// Snapshot all indexed terms. Used for prefix-based suggestions.
+    pub fn term_keys(&self) -> Vec<String> {
+        self.index.keys()
+    }
 }
 
 impl Default for FilterEngine {
@@ -640,7 +663,7 @@ impl SearchEngine {
     pub fn new(storage: Arc<dyn SearchStorage + Send + Sync>) -> Self {
         Self {
             storage,
-            text_index: TextIndex::new(),
+            text_index: parking_lot::RwLock::new(Arc::new(TextIndex::new())),
             filters: FilterEngine::new(),
             search_cache: ConcurrentMap::new(),
             cache_ttl: Duration::from_secs(300), // 5 minutes cache TTL
@@ -649,45 +672,40 @@ impl SearchEngine {
         }
     }
 
-    /// Build metadata index from current storage (fast - no file I/O)
+    /// Build metadata index from current storage (fast - no file I/O).
+    ///
+    /// Writes into a fresh, locally-owned `TextIndex` and atomically
+    /// rotates the `Arc` under `text_index` once the build completes.
+    /// If this future is cancelled mid-build, the partially-populated
+    /// instance is dropped without ever becoming visible to readers.
     async fn build_metadata_index(&self) {
         debug!("Building text index from storage");
         let cache_entries = self.storage.get_cache_entries().await;
+        let new_index = TextIndex::new();
 
         for resource_index in cache_entries {
             let canonical_url = &resource_index.canonical_url;
-            // Index the canonical URL itself
-            self.text_index.add_resource(canonical_url, canonical_url);
-
-            // Index the resource type
-            self.text_index
-                .add_resource(canonical_url, &resource_index.resource_type);
-
-            // Index the resource ID
+            new_index.add_resource(canonical_url, canonical_url);
+            new_index.add_resource(canonical_url, &resource_index.resource_type);
             if let Some(id) = &resource_index.id {
-                self.text_index.add_resource(canonical_url, id);
+                new_index.add_resource(canonical_url, id);
             }
-
-            // Index package information
             let package_text = format!(
                 "{} {}",
                 resource_index.package_name, resource_index.package_version
             );
-            self.text_index.add_resource(canonical_url, &package_text);
-
-            // Index name and version fields
+            new_index.add_resource(canonical_url, &package_text);
             if let Some(name) = &resource_index.name {
-                self.text_index.add_resource(canonical_url, name);
+                new_index.add_resource(canonical_url, name);
             }
             if let Some(version) = &resource_index.version {
-                self.text_index.add_resource(canonical_url, version);
+                new_index.add_resource(canonical_url, version);
             }
-
-            // Skip loading actual FHIR resource content during initialization for performance
-            // Content will be indexed on-demand when needed or during scheduled indexing
+            // Resource content is indexed on-demand by `add_resource_to_index`.
         }
 
-        let (term_count, total_entries) = self.text_index.get_stats();
+        let (term_count, total_entries) = new_index.get_stats();
+        *self.text_index.write() = Arc::new(new_index);
         debug!(
             "Text index built with {} terms and {} total entries",
             term_count, total_entries
@@ -696,54 +714,41 @@ impl SearchEngine {
 
     /// Add a single resource to the text index (for incremental updates)
     pub async fn add_resource_to_index(&self, canonical_url: &str, resource_index: &ResourceIndex) {
-        // Index the canonical URL itself
-        self.text_index.add_resource(canonical_url, canonical_url);
-
-        // Index the resource type
-        self.text_index
-            .add_resource(canonical_url, &resource_index.resource_type);
-
-        // Index the resource ID
+        let idx = self.index_snapshot();
+        idx.add_resource(canonical_url, canonical_url);
+        idx.add_resource(canonical_url, &resource_index.resource_type);
         if let Some(id) = &resource_index.id {
-            self.text_index.add_resource(canonical_url, id);
+            idx.add_resource(canonical_url, id);
         }
-
-        // Index package information
         let package_text = format!(
             "{} {}",
             resource_index.package_name, resource_index.package_version
         );
-        self.text_index.add_resource(canonical_url, &package_text);
-
-        // Index name and version fields
+        idx.add_resource(canonical_url, &package_text);
         if let Some(name) = &resource_index.name {
-            self.text_index.add_resource(canonical_url, name);
+            idx.add_resource(canonical_url, name);
         }
         if let Some(version) = &resource_index.version {
-            self.text_index.add_resource(canonical_url, version);
+            idx.add_resource(canonical_url, version);
         }
 
-        // Try to index actual FHIR resource content
         if let Ok(fhir_resource) = self.storage.get_resource(resource_index).await {
-            // Index the resource content as JSON string for full-text search
             let content_str = serde_json::to_string(&fhir_resource.content).unwrap_or_default();
-            self.text_index.add_resource(canonical_url, &content_str);
-
-            // Index specific FHIR fields if available
+            idx.add_resource(canonical_url, &content_str);
             if let Some(description) = fhir_resource.content.get("description")
                 && let Some(desc_str) = description.as_str()
             {
-                self.text_index.add_resource(canonical_url, desc_str);
+                idx.add_resource(canonical_url, desc_str);
             }
             if let Some(title) = fhir_resource.content.get("title")
                 && let Some(title_str) = title.as_str()
             {
-                self.text_index.add_resource(canonical_url, title_str);
+                idx.add_resource(canonical_url, title_str);
             }
             if let Some(name) = fhir_resource.content.get("name")
                 && let Some(name_str) = name.as_str()
             {
-                self.text_index.add_resource(canonical_url, name_str);
+                idx.add_resource(canonical_url, name_str);
             }
         }
 
@@ -752,13 +757,13 @@ impl SearchEngine {
 
     /// Remove a resource from the text index (for incremental updates)
     pub fn remove_resource_from_index(&self, canonical_url: &str) {
-        self.text_index.remove_resource(canonical_url);
+        self.index_snapshot().remove_resource(canonical_url);
         debug!("Removed resource {} from text index", canonical_url);
     }
 
     /// Get index statistics for monitoring
     pub fn get_index_stats(&self) -> (usize, usize) {
-        self.text_index.get_stats()
+        self.index_snapshot().get_stats()
     }
 
     /// Generate a cache key from a search query
@@ -909,7 +914,7 @@ impl SearchEngine {
             // Ensure the text index is ready only when text search is requested
             self.ensure_text_index_built().await;
             // Text search - use text index
-            let matching_urls = self.text_index.search(text);
+            let matching_urls = self.index_snapshot().search(text);
             let cache_entries = self.storage.get_cache_entries().await;
 
             Ok(cache_entries
@@ -1160,9 +1165,8 @@ impl SearchEngine {
 
         // Suggest terms from text index
         let mut index_terms: Vec<String> = self
-            .text_index
-            .index
-            .keys()
+            .index_snapshot()
+            .term_keys()
             .into_iter()
             .filter(|term| term.starts_with(&prefix_lower))
             .collect();
@@ -1204,11 +1208,12 @@ impl SearchEngine {
     /// # Ok(())
     /// # }
     /// ```
+    #[tracing::instrument(name = "search.get_facets", skip(self, query))]
     pub async fn get_facets(&self, query: &SearchQuery) -> Result<SearchFacets> {
         // Get candidate resources
         let cache_entries = self.storage.get_cache_entries().await;
         let resources: Vec<ResourceIndex> = if let Some(text) = &query.text {
-            let matching_urls = self.text_index.search(text);
+            let matching_urls = self.index_snapshot().search(text);
             cache_entries
                 .into_iter()
                 .filter(|ri| matching_urls.contains(&ri.canonical_url))
@@ -1466,6 +1471,7 @@ impl SearchQueryBuilder {
     /// # Ok(())
     /// # }
     /// ```
+    #[tracing::instrument(name = "search.builder.execute", skip(self))]
     pub async fn execute(self) -> Result<SearchResult> {
         let engine = SearchEngine::new(self.storage);
         engine.search(&self.query).await

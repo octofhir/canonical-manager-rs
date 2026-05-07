@@ -16,7 +16,7 @@
 //! # Why a trait?
 //!
 //! Three distinct registry protocols are in active use across the FHIR
-//! ecosystem (verified 2026-05-06, see `docs/refactor/REGISTRY_ANALYSIS.md`):
+//! ecosystem:
 //!
 //! - **NPM Package Specification**: `GET /{name}` returns a multi-version
 //!   manifest with `dist-tags`. Used by `packages.fhir.org`,
@@ -95,6 +95,7 @@ impl SearchQuery {
 /// `version`, `canonical`, `url`, `date`, `kind`. Callers should not assume
 /// any non-name field is populated.
 #[derive(Debug, Clone)]
+#[allow(missing_docs)]
 pub struct PackageHit {
     pub name: String,
     pub version: Option<String>,
@@ -168,6 +169,8 @@ impl std::fmt::Debug for NpmRegistryClient {
 }
 
 impl NpmRegistryClient {
+    /// Construct a client against the registry described by `config`.
+    /// `cache_dir` receives downloaded tarballs; it is created if missing.
     pub async fn new(config: &RegistryConfig, cache_dir: PathBuf) -> Result<Self> {
         let id = url::Url::parse(&config.url)
             .ok()
@@ -250,6 +253,8 @@ pub struct Packages2Client {
 }
 
 impl Packages2Client {
+    /// Construct a client against the `packages2.fhir.org`-style endpoint
+    /// at `base_url`. `cache_dir` receives downloaded tarballs.
     pub async fn new(base_url: &str, cache_dir: PathBuf, timeout_secs: u64) -> Result<Self> {
         let parsed = url::Url::parse(base_url).map_err(|e| RegistryError::InvalidMetadata {
             message: format!("Invalid Packages2 base URL '{base_url}': {e}"),
@@ -469,6 +474,8 @@ pub struct GetIgRegistryClient {
 }
 
 impl GetIgRegistryClient {
+    /// Construct a client against the `fs.get-ig.org`-style S3 archive at
+    /// `base_url`. `cache_dir` receives downloaded tarballs.
     pub async fn new(base_url: &str, cache_dir: PathBuf, timeout_secs: u64) -> Result<Self> {
         let parsed = url::Url::parse(base_url).map_err(|e| RegistryError::InvalidMetadata {
             message: format!("Invalid get-ig base URL '{base_url}': {e}"),
@@ -668,6 +675,9 @@ impl std::fmt::Debug for RedundantRegistryClient {
 }
 
 impl RedundantRegistryClient {
+    /// Build a chain over `clients`. Order matters: `download` and
+    /// `list_versions` try clients sequentially first-success; `search`
+    /// fans out in parallel.
     pub fn new(clients: Vec<Arc<dyn FhirRegistryClient>>) -> Self {
         assert!(
             !clients.is_empty(),

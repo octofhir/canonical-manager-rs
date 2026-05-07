@@ -293,11 +293,16 @@ impl PackageExtractor {
             return Err(e);
         }
 
-        // Move into final location atomically (replace if exists)
+        // Move into final location atomically (replace if exists). On
+        // rename failure (e.g. cross-device), drop the tmp dir so it does
+        // not leak into `temp_dir/`.
         if final_extraction_path.exists() {
             let _ = fs::remove_dir_all(&final_extraction_path).await;
         }
-        fs::rename(&tmp_extraction_path, &final_extraction_path).await?;
+        if let Err(e) = fs::rename(&tmp_extraction_path, &final_extraction_path).await {
+            let _ = fs::remove_dir_all(&tmp_extraction_path).await;
+            return Err(e.into());
+        }
 
         // Validate package structure
         self.validate_package(&final_extraction_path).await?;
@@ -413,11 +418,9 @@ impl PackageExtractor {
                 errors.len(),
                 extracted.len() + errors.len()
             );
-            // For now, return the first error. Could be enhanced to collect all errors.
-            return Err(errors
-                .into_iter()
-                .next()
-                .expect("guarded by !errors.is_empty() above"));
+            if let Some(first) = errors.into_iter().next() {
+                return Err(first);
+            }
         }
 
         let duration = start.elapsed();
@@ -551,7 +554,14 @@ impl PackageExtractor {
         Ok(manifest)
     }
 
-    /// Extract .tgz file to directory
+    /// Extract a `.tgz` archive into `output_dir`. Streams via the
+    /// blocking `tar` + `flate2` crates inside `spawn_blocking`. The
+    /// previous fully-async path (`async-tar` + `async-compression`)
+    /// was 1.5–2 × slower across all tested IG sizes
+    /// (`benches/tar_extract.rs`); blocking-on-thread-pool wins because
+    /// `flate2` is a tight CPU loop and the per-entry context-switch
+    /// cost in `async-tar` dwarfs any I/O parallelism win for the
+    /// disk-local extraction we're doing here.
     async fn extract_tgz_file(&self, tgz_path: &Path, output_dir: &Path) -> Result<()> {
         debug!(
             "Extracting .tgz file: {} to {}",
@@ -559,145 +569,75 @@ impl PackageExtractor {
             output_dir.display()
         );
 
-        // Prefer fully-async extraction; fall back to blocking if async path fails
-        if let Err(e) = self.extract_tgz_file_async(tgz_path, output_dir).await {
-            warn!(
-                "Async extraction failed ({}), falling back to blocking path",
-                e
-            );
+        let tgz_path = tgz_path.to_path_buf();
+        let output_dir = output_dir.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            let file =
+                std::fs::File::open(&tgz_path).map_err(|e| PackageError::ExtractionFailed {
+                    message: format!("Failed to open archive: {e}"),
+                })?;
+            let reader = std::io::BufReader::new(file);
+            let tar = GzDecoder::new(reader);
+            let mut archive = Archive::new(tar);
 
-            // Fallback: blocking streaming extraction without loading whole file
-            let tgz_path = tgz_path.to_path_buf();
-            let output_dir = output_dir.to_path_buf();
-            tokio::task::spawn_blocking(move || {
-                let file =
-                    std::fs::File::open(&tgz_path).map_err(|e| PackageError::ExtractionFailed {
-                        message: format!("Failed to open archive: {e}"),
-                    })?;
-                let reader = std::io::BufReader::new(file);
-                let tar = GzDecoder::new(reader);
-                let mut archive = Archive::new(tar);
+            for entry in archive
+                .entries()
+                .map_err(|e| PackageError::ExtractionFailed {
+                    message: format!("Failed to read archive entries: {e}"),
+                })?
+            {
+                let mut entry = entry.map_err(|e| PackageError::ExtractionFailed {
+                    message: format!("Invalid entry: {e}"),
+                })?;
+                let path = entry.path().map_err(|e| PackageError::ExtractionFailed {
+                    message: format!("Invalid entry path: {e}"),
+                })?;
 
-                for entry in archive
-                    .entries()
-                    .map_err(|e| PackageError::ExtractionFailed {
-                        message: format!("Failed to read archive entries: {e}"),
-                    })?
+                // Skip non-regular entries: a tar with `Symlink`/`Link`
+                // entries pointing outside `base` would otherwise create
+                // links that escape the sandbox even though
+                // `sanitize_extract_path` cleared the entry path of `..`.
+                // FHIR packages contain only regular files + directories;
+                // symlinks/devices/fifos are never legitimate.
+                let entry_type = entry.header().entry_type();
+                if !(entry_type.is_file()
+                    || entry_type.is_dir()
+                    || entry_type.is_gnu_longname()
+                    || entry_type.is_gnu_longlink()
+                    || entry_type.is_pax_global_extensions()
+                    || entry_type.is_pax_local_extensions())
                 {
-                    let mut entry = entry.map_err(|e| PackageError::ExtractionFailed {
-                        message: format!("Invalid entry: {e}"),
-                    })?;
-                    let path = entry.path().map_err(|e| PackageError::ExtractionFailed {
-                        message: format!("Invalid entry path: {e}"),
-                    })?;
-
-                    // Skip non-regular entries: a tar with `Symlink`/`Link`
-                    // entries pointing outside `base` would otherwise create
-                    // links that escape the sandbox even though
-                    // `sanitize_extract_path` cleared the entry path of `..`.
-                    // FHIR packages contain only regular files + directories;
-                    // symlinks/devices/fifos are never legitimate.
-                    let entry_type = entry.header().entry_type();
-                    if !(entry_type.is_file()
-                        || entry_type.is_dir()
-                        || entry_type.is_gnu_longname()
-                        || entry_type.is_gnu_longlink()
-                        || entry_type.is_pax_global_extensions()
-                        || entry_type.is_pax_local_extensions())
-                    {
-                        warn!(
-                            "Skipping unsafe tar entry type {:?} for path {}",
-                            entry_type,
-                            path.display()
-                        );
-                        continue;
-                    }
-
-                    let out_path = Self::sanitize_extract_path(&output_dir, &path)?;
-
-                    if let Some(parent) = out_path.parent() {
-                        std::fs::create_dir_all(parent).map_err(|e| {
-                            PackageError::ExtractionFailed {
-                                message: format!("Failed to create directories: {e}"),
-                            }
-                        })?;
-                    }
-
-                    entry
-                        .unpack(&out_path)
-                        .map_err(|e| PackageError::ExtractionFailed {
-                            message: format!("Failed to unpack entry: {e}"),
-                        })?;
+                    warn!(
+                        "Skipping unsafe tar entry type {:?} for path {}",
+                        entry_type,
+                        path.display()
+                    );
+                    continue;
                 }
 
-                Ok::<(), crate::error::FcmError>(())
-            })
-            .await
-            .map_err(|e| PackageError::ExtractionFailed {
-                message: format!("Task join error: {e}"),
-            })??;
-        }
+                let out_path = Self::sanitize_extract_path(&output_dir, &path)?;
 
-        Ok(())
-    }
+                if let Some(parent) = out_path.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| {
+                        PackageError::ExtractionFailed {
+                            message: format!("Failed to create directories: {e}"),
+                        }
+                    })?;
+                }
 
-    async fn extract_tgz_file_async(&self, tgz_path: &Path, output_dir: &Path) -> Result<()> {
-        use async_compression::tokio::bufread::GzipDecoder as AsyncGzipDecoder;
-        use futures_util::StreamExt;
-        use tokio_util::compat::TokioAsyncReadCompatExt;
-
-        let file = fs::File::open(tgz_path).await?;
-        let reader = tokio::io::BufReader::new(file);
-        let gz = AsyncGzipDecoder::new(reader);
-        let archive = async_tar::Archive::new(gz.compat());
-        let mut entries = archive
-            .entries()
-            .map_err(|e| PackageError::ExtractionFailed {
-                message: format!("Failed to read archive entries: {e}"),
-            })?;
-
-        while let Some(next) = entries.next().await {
-            let mut entry = next.map_err(|e| PackageError::ExtractionFailed {
-                message: format!("Invalid archive entry: {e}"),
-            })?;
-
-            let path = entry.path().map_err(|e| PackageError::ExtractionFailed {
-                message: format!("Invalid entry path: {e}"),
-            })?;
-            let std_path = std::path::Path::new(path.as_os_str());
-
-            // Same entry-type filter as the blocking fallback path above.
-            // FHIR packages should only ship regular files and directories.
-            let entry_type = entry.header().entry_type();
-            if !(entry_type.is_file()
-                || entry_type.is_dir()
-                || entry_type.is_gnu_longname()
-                || entry_type.is_gnu_longlink()
-                || entry_type.is_pax_global_extensions()
-                || entry_type.is_pax_local_extensions())
-            {
-                warn!(
-                    "Skipping unsafe tar entry type {:?} for path {}",
-                    entry_type,
-                    std_path.display()
-                );
-                continue;
+                entry
+                    .unpack(&out_path)
+                    .map_err(|e| PackageError::ExtractionFailed {
+                        message: format!("Failed to unpack entry: {e}"),
+                    })?;
             }
 
-            let out_path = Self::sanitize_extract_path(output_dir, std_path)?;
-
-            if let Some(parent) = out_path.parent() {
-                fs::create_dir_all(parent).await?;
-            }
-
-            // Use built-in unpack if available; otherwise stream copy
-            entry
-                .unpack(&out_path)
-                .await
-                .map_err(|e| PackageError::ExtractionFailed {
-                    message: format!("Failed to unpack entry: {e}"),
-                })?;
-        }
+            Ok::<(), crate::error::FcmError>(())
+        })
+        .await
+        .map_err(|e| PackageError::ExtractionFailed {
+            message: format!("Task join error: {e}"),
+        })??;
 
         Ok(())
     }

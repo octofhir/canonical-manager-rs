@@ -111,6 +111,13 @@ impl SqliteStorage {
     }
 
     pub async fn new(config: StorageConfig) -> Result<Self> {
+        Self::new_with_durability(config, true).await
+    }
+
+    /// Like [`Self::new`] but lets the caller opt out of `fsync` on
+    /// every blob write. See [`crate::config::OptimizationConfig::durable_writes`]
+    /// for the durability trade-off.
+    pub async fn new_with_durability(config: StorageConfig, durable: bool) -> Result<Self> {
         tokio::fs::create_dir_all(&config.packages_dir).await?;
         let db_path = config.packages_dir.join("storage.db");
 
@@ -183,7 +190,7 @@ impl SqliteStorage {
                 message: format!("Failed to materialise store layout: {e}"),
             })
         })?;
-        let file_cas = Arc::new(FileCas::new(store_paths));
+        let file_cas = Arc::new(FileCas::new_with_durability(store_paths, durable));
 
         let storage = Self {
             pool,
@@ -447,18 +454,28 @@ impl SqliteStorage {
     ) -> Result<Vec<ResourceRow>> {
         let mut out: Vec<ResourceRow> = Vec::with_capacity(resources.len());
         for resource in resources {
-            let content_json = serde_json::to_string(&resource.content).map_err(|e| {
-                FcmError::Storage(StorageError::IoError {
-                    message: format!("Failed to serialize resource: {e}"),
-                })
-            })?;
-            let content_bytes = content_json.as_bytes();
+            // Hash the on-disk file bytes directly. Re-serializing
+            // `resource.content` via `serde_json::to_string` produces a
+            // different byte stream than the original file (key order,
+            // whitespace) and was the dominant cost on N=1500 resources.
+            // Read once and hand the same bytes to both the blake3
+            // column key and the file CAS.
+            // Falls back to re-serializing only if the path can't be
+            // read (e.g. a synthetic/in-memory `FhirResource`).
+            let content_bytes: Vec<u8> = match tokio::fs::read(&resource.file_path).await {
+                Ok(b) => b,
+                Err(_) => serde_json::to_vec(&resource.content).map_err(|e| {
+                    FcmError::Storage(StorageError::IoError {
+                        message: format!("Failed to serialize resource: {e}"),
+                    })
+                })?,
+            };
 
             // Two hashes per resource: blake3 stays as the existing
             // `content_hash` column key; sha256 is the file-level CAS
             // handle. Both are stable for identical bytes.
-            let content_hash = ContentHash::from_bytes(content_bytes);
-            let blob_hash = self.file_cas.insert_bytes(content_bytes).await?;
+            let content_hash = ContentHash::from_bytes(&content_bytes);
+            let blob_hash = self.file_cas.insert_bytes(&content_bytes).await?;
 
             // `content_path` mirrors the FileCas blob path so rows
             // remain self-describing on disk even without joining
@@ -896,6 +913,7 @@ impl SqliteStorage {
         })
     }
 
+    #[tracing::instrument(name = "sqlite.find_by_base_url", skip(self), fields(base = %base_url))]
     pub async fn find_by_base_url(&self, base_url: &str) -> Result<Vec<ResourceIndex>> {
         // Escape LIKE metacharacters in the user-supplied prefix: `%` and
         // `_` would otherwise act as wildcards inside `LIKE`, matching
@@ -956,6 +974,7 @@ impl SqliteStorage {
         Ok(resources.into_iter().next())
     }
 
+    #[tracing::instrument(name = "sqlite.get_resource", skip(self, resource_index), fields(canonical = %resource_index.canonical_url))]
     pub async fn get_resource(&self, resource_index: &ResourceIndex) -> Result<FhirResource> {
         let canonical_url = resource_index.canonical_url.clone();
         let resource_type = resource_index.resource_type.clone();
@@ -1584,15 +1603,16 @@ impl SqliteStorage {
     ) -> Result<Option<InstallProvenance>> {
         let name = name.to_string();
         let version = version.to_string();
+        type ProvenanceRow = (
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+        );
         self.with_connection(move |conn| {
-            let row: Option<(
-                String,
-                String,
-                String,
-                Option<String>,
-                Option<String>,
-                String,
-            )> = conn
+            let row: Option<ProvenanceRow> = conn
                 .query_row(
                     r#"
                     SELECT pp.registry_url, pp.resolved_url, pp.integrity,

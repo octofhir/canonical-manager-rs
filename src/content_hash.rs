@@ -1,13 +1,9 @@
-// Content-addressable storage using Blake3 hashing
-//
-// Blake3 is significantly faster than SHA256 while maintaining cryptographic security.
-// It's designed for parallel execution and provides consistent performance across platforms.
-//
-// Why Blake3 over SHA256:
-// - 10x faster on large files
-// - Better security margin (256-bit output from 512-bit internal state)
-// - Officially recommended by Rust community for content addressing
-// - Widely adopted in modern package managers
+//! Blake3-based content hashing primitives used by the package and
+//! resource indexes. Blake3 is faster than SHA-256 on large inputs while
+//! providing a 256-bit output, which is sufficient for content
+//! addressing inside this crate.
+
+#![allow(missing_docs)]
 
 use std::fmt;
 use std::io::{self, Read};

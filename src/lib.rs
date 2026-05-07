@@ -702,9 +702,9 @@ impl CanonicalManager {
             return;
         }
 
-        // Hash tarball bytes from the cached file. The bytes are still
-        // on disk at `download.file_path` (we just installed from it).
-        // Compute SHA-512 SRI; on read failure skip provenance silently.
+        // Hash tarball bytes from the cached file. SHA-512 SRI and
+        // blake3 are computed from the same in-memory buffer so the
+        // lockfile entry and the `tarballs` row stay in sync.
         let bytes = match tokio::fs::read(&download.file_path).await {
             Ok(b) => b,
             Err(e) => {
@@ -718,6 +718,8 @@ impl CanonicalManager {
             }
         };
         let integrity = store::Lockfile::compute_integrity(&bytes);
+        let blake3_hex = blake3::hash(&bytes).to_hex().to_string();
+        let tarball_size = bytes.len() as u64;
 
         // Resolved URL: best-effort guess from the configured primary
         // registry. The orchestrator may have served the bytes from a
@@ -772,6 +774,71 @@ impl CanonicalManager {
                 spec.name, spec.version
             );
         }
+
+        // Tarball metadata is keyed by `(name, version)` so
+        // `store verify` / `store gc` can locate the local CAS file
+        // without joining `package_provenance`.
+        if let Err(e) = sqlite
+            .record_tarball(
+                &spec.name,
+                &spec.version,
+                &blake3_hex,
+                tarball_size,
+                Some(&integrity),
+                None,
+                Some(&self.config.registry.url),
+            )
+            .await
+        {
+            warn!(
+                "Tarball metadata write failed for {}@{}: {e}",
+                spec.name, spec.version
+            );
+        }
+
+        if self.config.storage.fhir_cache_compat
+            && let Err(e) = self
+                .populate_fhir_cache_for_package(&spec.name, &spec.version)
+                .await
+        {
+            warn!(
+                "FHIR cache populate failed for {}@{}: {e}",
+                spec.name, spec.version
+            );
+        }
+    }
+
+    /// Mirror a single installed package into `~/.fhir/packages/`.
+    /// Called from the install pipeline when
+    /// `config.storage.fhir_cache_compat` is on; no-ops when `HOME`
+    /// is unset.
+    async fn populate_fhir_cache_for_package(&self, name: &str, version: &str) -> Result<()> {
+        let Some(target) = store::default_fhir_cache_root() else {
+            debug!("HOME unset; skipping ~/.fhir/packages mirror for {name}@{version}");
+            return Ok(());
+        };
+        tokio::fs::create_dir_all(&target).await?;
+        let source = self
+            .config
+            .storage
+            .packages_dir
+            .join(format!("{name}-{version}"));
+        if !tokio::fs::try_exists(&source).await.unwrap_or(false) {
+            debug!(
+                "FHIR cache mirror skipped: source missing at {}",
+                source.display()
+            );
+            return Ok(());
+        }
+        let linker = store::Linker::probe(&source, &target, store::LinkerMode::Auto)
+            .await
+            .map_err(|e| {
+                crate::error::FcmError::Storage(crate::error::StorageError::IoError {
+                    message: format!("Linker probe failed: {e}"),
+                })
+            })?;
+        store::populate_fhir_cache(&target, name, version, &source, &linker).await?;
+        Ok(())
     }
 
     fn find_local_package(&self, name: &str, version: &str) -> Option<&config::LocalPackageSpec> {
@@ -2119,6 +2186,79 @@ impl CanonicalManager {
         let mut lock = self.build_lockfile().await?;
         lock.save(project_root).await?;
         Ok(())
+    }
+
+    /// Direct handle to the bundled SQLite backend, when used.
+    /// Returns `None` for custom-backend (Postgres etc.) callers.
+    /// Used by the CLI `store` subcommands to reach SQLite-only
+    /// helpers (`file_cas`, `verify_blobs`, GC) without growing the
+    /// frozen `PackageStore` / `SearchStorage` traits.
+    #[cfg(feature = "sqlite")]
+    pub fn sqlite_storage_handle(&self) -> Option<&Arc<crate::sqlite_storage::SqliteStorage>> {
+        self.storage.sqlite_backend()
+    }
+
+    /// Mirror every installed package into the FHIR ecosystem's
+    /// shared cache at `<target_root>/<name>-<version>/package/...` so
+    /// SUSHI / IG Publisher / Firely tooling pick them up without
+    /// knowing about FCM.
+    ///
+    /// `target_root` defaults to [`crate::store::default_fhir_cache_root`]
+    /// when called without an explicit override; pass an explicit path
+    /// in tests to avoid touching the real `$HOME`. Files are linked
+    /// (reflink → hardlink → copy) from `<packages_dir>/<name>-<version>/`,
+    /// so disk usage stays flat when the destination FS supports CoW.
+    pub async fn populate_fhir_cache_all(
+        &self,
+        target_root: Option<&std::path::Path>,
+    ) -> Result<store::MaterialiseReport> {
+        let target = match target_root {
+            Some(p) => p.to_path_buf(),
+            None => match store::default_fhir_cache_root() {
+                Some(p) => p,
+                None => {
+                    warn!("HOME is unset; skipping ~/.fhir/packages population");
+                    return Ok(store::MaterialiseReport::default());
+                }
+            },
+        };
+        tokio::fs::create_dir_all(&target).await?;
+
+        let store_root = self.config.storage.packages_dir.clone();
+        let linker = store::Linker::probe(&store_root, &target, store::LinkerMode::Auto)
+            .await
+            .map_err(|e| {
+                crate::error::FcmError::Storage(crate::error::StorageError::IoError {
+                    message: format!("Linker probe failed: {e}"),
+                })
+            })?;
+
+        let mut total = store::MaterialiseReport::default();
+        for p in self.storage.list_packages().await? {
+            let source = store_root.join(format!("{}-{}", p.name, p.version));
+            if !tokio::fs::try_exists(&source).await.unwrap_or(false) {
+                debug!(
+                    "Skipping FHIR cache populate for {}@{}: source missing at {}",
+                    p.name,
+                    p.version,
+                    source.display()
+                );
+                continue;
+            }
+            let report =
+                store::populate_fhir_cache(&target, &p.name, &p.version, &source, &linker).await?;
+            total.merge(&report);
+        }
+        info!(
+            "Populated FHIR cache at {}: {} files (reflink {}, hardlink {}, copy {}, skipped {})",
+            target.display(),
+            total.total,
+            total.reflinked,
+            total.hardlinked,
+            total.copied,
+            total.skipped
+        );
+        Ok(total)
     }
 
     /// Materialise every installed package into `<project_root>/.fcm/modules/`.

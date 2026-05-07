@@ -3,39 +3,42 @@
 //! Uses a deadpool-backed SQLite connection pool to provide async access
 //! without blocking the Tokio runtime. All public APIs remain unchanged.
 
-use crate::cas_storage::{CasStorage, ContentType};
+use crate::cas_storage::CasStorage;
 use crate::config::StorageConfig;
 use crate::content_hash::ContentHash;
 use crate::domain::{PackageInfo, ResourceIndex, SD_FLAVORS};
 use crate::error::{FcmError, Result, StorageError};
 use crate::package::{ExtractedPackage, FhirResource};
+use crate::store::{BlobHash, FileCas, StorePaths};
 use chrono::{DateTime, Utc};
 use deadpool_sqlite::rusqlite::{self, OptionalExtension};
 use deadpool_sqlite::{Config as DeadpoolConfig, Pool, Runtime};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
-// Schema version 2 (P2 milestone, 2026-05-06):
-// - Adds `blobs`, `package_files`, `tarballs`, `package_provenance` tables
-//   for the content-addressable virtual store (see `src/store/`).
-// - On version mismatch detection the existing DB tables are dropped and
-//   recreated fresh — packages re-download from the registry on next install.
-//   No migration path is supported per project policy: lockfile is the only
-//   reproducibility contract across versions.
+// Schema-version mismatch is handled by dropping every table and
+// recreating it; packages then re-download on next install. The lockfile
+// (`fcm.lock`) is the only cross-version reproducibility contract.
 //
-// These new tables are **SQLite-backend-specific**. They are not surfaced
-// on the `PackageStore` / `SearchStorage` traits in `crate::traits`,
-// which is a frozen interface used by external Postgres backends. Other
-// backends are free to ignore CAS entirely and store packages in
-// whatever native form they prefer.
+// Tables `blobs`, `package_files`, `tarballs`, `package_provenance` are
+// SQLite-only; they are not surfaced on the `PackageStore` /
+// `SearchStorage` traits in `crate::traits`, which is a frozen interface
+// used by external backends.
 const SCHEMA_VERSION: i32 = 2;
 
 pub struct SqliteStorage {
     pool: Pool,
     db_path: PathBuf,
+    /// Tarball-level CAS shared with the registry client. Resource-level
+    /// content lives in [`Self::file_cas`].
+    #[allow(dead_code)]
     cas: Arc<CasStorage>,
+    /// File-level CAS (SHA-256 hex, 2-char fanout) under
+    /// `<cache_dir>/store/blobs/`. Holds canonicalised bytes for every
+    /// resource; `resources.blob_hash` keys directly into it.
+    file_cas: Arc<FileCas>,
 }
 
 /// Internal struct for building resource rows during insertion
@@ -58,6 +61,16 @@ struct ResourceRow {
     content_path: String,
     id_lower: Option<String>,
     name_lower: Option<String>,
+    /// SHA-256 hex of canonical resource bytes — points into the
+    /// file-level CAS at `<store>/blobs/<aa>/<bbcc...>`. `None` for
+    /// rows whose bytes were never routed through the CAS.
+    blob_hash: Option<String>,
+    /// Relative file path inside the package tarball
+    /// (e.g. `package/StructureDefinition-Patient.json`). Used to
+    /// populate `package_files` for GC and the `~/.fhir/packages/` shim.
+    package_relpath: Option<String>,
+    /// Size of the canonical bytes (matches what FileCas stored).
+    blob_size: u64,
 }
 
 impl SqliteStorage {
@@ -155,16 +168,28 @@ impl SqliteStorage {
                 ),
             }));
         };
-        let cas = Arc::new(CasStorage::new(cas_path).await.map_err(|e| {
+        let cas = Arc::new(CasStorage::new(cas_path.clone()).await.map_err(|e| {
             FcmError::Storage(StorageError::IoError {
                 message: format!("Failed to initialize CAS storage: {e}"),
             })
         })?);
 
+        // File-level CAS sits under `<cache_dir>/store/` so it shares a
+        // filesystem with the legacy CAS — keeps reflink/hardlink
+        // viable when materialising into project-local layouts.
+        let store_paths = StorePaths::with_root(cas_path.join("store"));
+        store_paths.ensure_dirs().await.map_err(|e| {
+            FcmError::Storage(StorageError::IoError {
+                message: format!("Failed to materialise store layout: {e}"),
+            })
+        })?;
+        let file_cas = Arc::new(FileCas::new(store_paths));
+
         let storage = Self {
             pool,
             db_path: db_path.clone(),
             cas,
+            file_cas,
         };
 
         storage.init_schema().await?;
@@ -273,6 +298,10 @@ impl SqliteStorage {
                     fhir_version TEXT NOT NULL,
                     content_hash TEXT NOT NULL,
                     content_path TEXT NOT NULL,
+                    -- SHA-256 hex of canonical bytes; nullable so rows
+                    -- written before this column existed still resolve
+                    -- via `content_path`.
+                    blob_hash TEXT,
                     -- Lowercase variants for case-insensitive search (our extension)
                     id_lower TEXT,
                     name_lower TEXT,
@@ -290,15 +319,12 @@ impl SqliteStorage {
                 CREATE INDEX IF NOT EXISTS idx_resource_package ON resources(package_name, package_version);
                 CREATE INDEX IF NOT EXISTS idx_resource_fhir_version ON resources(fhir_version);
                 CREATE INDEX IF NOT EXISTS idx_content_hash ON resources(content_hash);
+                CREATE INDEX IF NOT EXISTS idx_resource_blob_hash ON resources(blob_hash) WHERE blob_hash IS NOT NULL;
 
-                -- ============================================================
-                -- P2 virtual-store tables (schema v2, 2026-05-06).
-                -- See `src/store/` and `docs/refactor/VIRTUAL_STORE_DESIGN.md`.
-                -- ============================================================
-
-                -- File-level CAS index. Each row pins a SHA-256 blob that
-                -- lives at `<store>/blobs/<aa>/<bb...>`. Inserted lazily
-                -- as packages are extracted; orphaned by `fcm store gc`.
+                -- File-level CAS index. Each row pins a SHA-256 blob
+                -- that lives at `<store>/blobs/<aa>/<bb...>`. Inserted
+                -- lazily as packages are extracted; orphaned by
+                -- `fcm store gc`.
                 CREATE TABLE IF NOT EXISTS blobs (
                     hash TEXT PRIMARY KEY,           -- sha-256 hex
                     size INTEGER NOT NULL,
@@ -307,10 +333,8 @@ impl SqliteStorage {
                 );
 
                 -- Per-package file map: which blob each file inside a
-                -- package resolves to. Replaces the old approach of
-                -- writing one resource JSON per file path; now everything
-                -- routes through CAS so identical files dedupe across
-                -- versions and IGs.
+                -- package resolves to. Identical files dedupe across
+                -- versions and IGs because the blob hash is content-keyed.
                 CREATE TABLE IF NOT EXISTS package_files (
                     package_id INTEGER NOT NULL,
                     file_path TEXT NOT NULL,
@@ -322,11 +346,10 @@ impl SqliteStorage {
                 );
                 CREATE INDEX IF NOT EXISTS idx_package_files_blob ON package_files(blob_hash);
 
-                -- Tarball CAS metadata. Tarball bytes themselves live at
-                -- `<store>/tarballs/<aa>/<bb...>.tgz`. Both blake3 (for
-                -- legacy registries that publish only sha-1 / nothing)
-                -- and sha-512 SRI (lockfile-grade) are recorded so the
-                -- tarball can be verified against either form.
+                -- Tarball CAS metadata. Both blake3 (for the legacy
+                -- per-cache CAS path) and sha-512 SRI (lockfile-grade)
+                -- are recorded so verification can run against either
+                -- form regardless of which the registry advertised.
                 CREATE TABLE IF NOT EXISTS tarballs (
                     hash TEXT PRIMARY KEY,          -- blake3 hex
                     size INTEGER NOT NULL,
@@ -340,9 +363,9 @@ impl SqliteStorage {
                 );
 
                 -- Provenance: which registry served each installed
-                -- package, what integrity claim was made, FHIR version,
-                -- and the resolved dependency set. Drives lockfile
-                -- emission (`build_lockfile`) and audit/`store verify`.
+                -- package, integrity claim, FHIR version, resolved
+                -- dependency set. Drives lockfile emission and
+                -- `store verify`.
                 CREATE TABLE IF NOT EXISTS package_provenance (
                     package_id INTEGER PRIMARY KEY,
                     registry_url TEXT NOT NULL,
@@ -407,6 +430,105 @@ impl SqliteStorage {
         Ok(())
     }
 
+    /// Hand back the file-level CAS so callers (CLI `store` subcommands,
+    /// the `~/.fhir/packages/` shim, GC walkers) can address blobs by
+    /// hash without going through SQLite each time.
+    pub fn file_cas(&self) -> &Arc<FileCas> {
+        &self.file_cas
+    }
+
+    /// Serialise + hash + CAS-insert each resource and assemble the
+    /// per-row insert payload. Single source of truth shared by
+    /// `add_package` and `add_packages_batch`.
+    async fn build_resource_rows(
+        &self,
+        resources: &[FhirResource],
+        extraction_path: &Path,
+    ) -> Result<Vec<ResourceRow>> {
+        let mut out: Vec<ResourceRow> = Vec::with_capacity(resources.len());
+        for resource in resources {
+            let content_json = serde_json::to_string(&resource.content).map_err(|e| {
+                FcmError::Storage(StorageError::IoError {
+                    message: format!("Failed to serialize resource: {e}"),
+                })
+            })?;
+            let content_bytes = content_json.as_bytes();
+
+            // Two hashes per resource: blake3 stays as the existing
+            // `content_hash` column key; sha256 is the file-level CAS
+            // handle. Both are stable for identical bytes.
+            let content_hash = ContentHash::from_bytes(content_bytes);
+            let blob_hash = self.file_cas.insert_bytes(content_bytes).await?;
+
+            // `content_path` mirrors the FileCas blob path so rows
+            // remain self-describing on disk even without joining
+            // through `package_files` — and writes don't fan out to a
+            // second CAS tree. `get_resource` prefers `blob_hash` when
+            // set; the path here is a robust fallback.
+            let content_path = self
+                .file_cas
+                .path_for(&blob_hash)
+                .to_string_lossy()
+                .into_owned();
+
+            let canonical_url = resource
+                .url
+                .clone()
+                .unwrap_or_else(|| format!("{}/{}", resource.resource_type, resource.id));
+
+            let name = resource
+                .content
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+
+            let sd_fields = extract_sd_fields(&resource.content);
+
+            // Relative path inside the package tarball
+            // (e.g. `package/StructureDefinition-Patient.json`). Used
+            // by `package_files` for GC and by the `~/.fhir/packages/`
+            // shim. Falls back to the bare file name when stripping
+            // fails (some callers pass absolute paths).
+            let package_relpath = resource
+                .file_path
+                .strip_prefix(extraction_path)
+                .ok()
+                .and_then(|p| p.to_str())
+                .map(String::from)
+                .or_else(|| {
+                    resource
+                        .file_path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .map(String::from)
+                });
+
+            out.push(ResourceRow {
+                resource_type: resource.resource_type.clone(),
+                id: Some(resource.id.clone()),
+                url: Some(canonical_url),
+                name: name.clone(),
+                version: resource.version.clone(),
+                sd_kind: sd_fields.sd_kind,
+                sd_derivation: sd_fields.sd_derivation,
+                sd_type: sd_fields.sd_type,
+                sd_base_definition: sd_fields.sd_base_definition,
+                sd_abstract: sd_fields.sd_abstract,
+                sd_impose_profiles: sd_fields.sd_impose_profiles,
+                sd_characteristics: sd_fields.sd_characteristics,
+                sd_flavor: sd_fields.sd_flavor,
+                content_hash: content_hash.to_hex(),
+                content_path,
+                id_lower: Some(resource.id.to_lowercase()),
+                name_lower: name.map(|n| n.to_lowercase()),
+                blob_hash: Some(blob_hash.as_hex().to_string()),
+                package_relpath,
+                blob_size: content_bytes.len() as u64,
+            });
+        }
+        Ok(out)
+    }
+
     /// Set package priority (higher = more preferred for resolution)
     pub async fn set_package_priority(
         &self,
@@ -461,66 +583,9 @@ impl SqliteStorage {
             .cloned()
             .unwrap_or_else(|| "4.0.1".to_string());
 
-        // Prepare resource data with new schema fields
-        let mut resource_data: Vec<ResourceRow> = Vec::new();
-        for resource in &package.resources {
-            let content_json = serde_json::to_string(&resource.content).map_err(|e| {
-                FcmError::Storage(StorageError::IoError {
-                    message: format!("Failed to serialize resource: {e}"),
-                })
-            })?;
-
-            let content_bytes = content_json.as_bytes();
-            let content_hash = ContentHash::from_bytes(content_bytes);
-
-            let content_path = self
-                .cas
-                .store(content_bytes, &content_hash, ContentType::Resource)
-                .await
-                .map_err(|e| {
-                    FcmError::Storage(StorageError::IoError {
-                        message: format!("Failed to store resource in CAS: {e}"),
-                    })
-                })?
-                .to_string_lossy()
-                .into_owned();
-
-            let canonical_url = resource
-                .url
-                .clone()
-                .unwrap_or_else(|| format!("{}/{}", resource.resource_type, resource.id));
-
-            // Extract name from content
-            let name = resource
-                .content
-                .get("name")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-
-            // Extract SD-specific fields (following fhir-package-loader)
-            let sd_fields = extract_sd_fields(&resource.content);
-
-            resource_data.push(ResourceRow {
-                resource_type: resource.resource_type.clone(),
-                id: Some(resource.id.clone()),
-                url: Some(canonical_url),
-                name: name.clone(),
-                version: resource.version.clone(),
-                sd_kind: sd_fields.sd_kind,
-                sd_derivation: sd_fields.sd_derivation,
-                sd_type: sd_fields.sd_type,
-                sd_base_definition: sd_fields.sd_base_definition,
-                sd_abstract: sd_fields.sd_abstract,
-                sd_impose_profiles: sd_fields.sd_impose_profiles,
-                sd_characteristics: sd_fields.sd_characteristics,
-                sd_flavor: sd_fields.sd_flavor,
-                content_hash: content_hash.to_hex(),
-                content_path,
-                // Case-insensitive search columns
-                id_lower: Some(resource.id.to_lowercase()),
-                name_lower: name.map(|n| n.to_lowercase()),
-            });
-        }
+        let resource_data = self
+            .build_resource_rows(&package.resources, &package.extraction_path)
+            .await?;
 
         let manifest_json = serde_json::to_string(&package.manifest).map_err(|e| {
             FcmError::Storage(StorageError::IoError {
@@ -536,6 +601,7 @@ impl SqliteStorage {
         let fhir_version_tx = fhir_version.clone();
         let manifest_hash_hex = manifest_hash.to_hex();
 
+        let now = installed_at.clone();
         self.with_connection(move |conn| {
             let tx = conn.transaction()?;
 
@@ -552,6 +618,7 @@ impl SqliteStorage {
                     0,  // default priority
                 ],
             )?;
+            let package_id = tx.last_insert_rowid();
 
             for r in resource_data {
                 let sd_impose_profiles_json = r.sd_impose_profiles
@@ -567,13 +634,13 @@ impl SqliteStorage {
                         sd_kind, sd_derivation, sd_type, sd_base_definition, sd_abstract,
                         sd_impose_profiles, sd_characteristics, sd_flavor,
                         package_name, package_version, fhir_version,
-                        content_hash, content_path, id_lower, name_lower
+                        content_hash, content_path, blob_hash, id_lower, name_lower
                     ) VALUES (
                         ?1, ?2, ?3, ?4, ?5,
                         ?6, ?7, ?8, ?9, ?10,
                         ?11, ?12, ?13,
                         ?14, ?15, ?16,
-                        ?17, ?18, ?19, ?20
+                        ?17, ?18, ?19, ?20, ?21
                     )"#,
                     rusqlite::params![
                         &r.resource_type,
@@ -594,10 +661,15 @@ impl SqliteStorage {
                         &fhir_version_tx,
                         &r.content_hash,
                         &r.content_path,
+                        &r.blob_hash,
                         &r.id_lower,
                         &r.name_lower,
                     ],
                 )?;
+
+                if let (Some(blob), Some(relpath)) = (r.blob_hash.as_ref(), r.package_relpath.as_ref()) {
+                    upsert_blob_and_file(&tx, package_id, blob, r.blob_size, relpath, "resource", &now)?;
+                }
             }
 
             tx.commit()?;
@@ -645,64 +717,9 @@ impl SqliteStorage {
             })?;
             let manifest_hash = ContentHash::from_bytes(manifest_json.as_bytes());
 
-            let mut resource_data: Vec<ResourceRow> = Vec::new();
-            for resource in &package.resources {
-                let content_json = serde_json::to_string(&resource.content).map_err(|e| {
-                    FcmError::Storage(StorageError::IoError {
-                        message: format!("Failed to serialize resource: {e}"),
-                    })
-                })?;
-
-                let content_bytes = content_json.as_bytes();
-                let content_hash = ContentHash::from_bytes(content_bytes);
-
-                let content_path = self
-                    .cas
-                    .store(content_bytes, &content_hash, ContentType::Resource)
-                    .await
-                    .map_err(|e| {
-                        FcmError::Storage(StorageError::IoError {
-                            message: format!("Failed to store resource in CAS: {e}"),
-                        })
-                    })?
-                    .to_string_lossy()
-                    .into_owned();
-
-                let canonical_url = resource
-                    .url
-                    .clone()
-                    .unwrap_or_else(|| format!("{}/{}", resource.resource_type, resource.id));
-
-                // Extract name from content
-                let name = resource
-                    .content
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
-
-                // Extract SD-specific fields (following fhir-package-loader)
-                let sd_fields = extract_sd_fields(&resource.content);
-
-                resource_data.push(ResourceRow {
-                    resource_type: resource.resource_type.clone(),
-                    id: Some(resource.id.clone()),
-                    url: Some(canonical_url),
-                    name: name.clone(),
-                    version: resource.version.clone(),
-                    sd_kind: sd_fields.sd_kind,
-                    sd_derivation: sd_fields.sd_derivation,
-                    sd_type: sd_fields.sd_type,
-                    sd_base_definition: sd_fields.sd_base_definition,
-                    sd_abstract: sd_fields.sd_abstract,
-                    sd_impose_profiles: sd_fields.sd_impose_profiles,
-                    sd_characteristics: sd_fields.sd_characteristics,
-                    sd_flavor: sd_fields.sd_flavor,
-                    content_hash: content_hash.to_hex(),
-                    content_path,
-                    id_lower: Some(resource.id.to_lowercase()),
-                    name_lower: name.map(|n| n.to_lowercase()),
-                });
-            }
+            let resource_data = self
+                .build_resource_rows(&package.resources, &package.extraction_path)
+                .await?;
 
             batch_data.push(BatchPackage {
                 name: package.name,
@@ -729,13 +746,13 @@ impl SqliteStorage {
                     sd_kind, sd_derivation, sd_type, sd_base_definition, sd_abstract,
                     sd_impose_profiles, sd_characteristics, sd_flavor,
                     package_name, package_version, fhir_version,
-                    content_hash, content_path, id_lower, name_lower
+                    content_hash, content_path, blob_hash, id_lower, name_lower
                 ) VALUES (
                     ?1, ?2, ?3, ?4, ?5,
                     ?6, ?7, ?8, ?9, ?10,
                     ?11, ?12, ?13,
                     ?14, ?15, ?16,
-                    ?17, ?18, ?19, ?20
+                    ?17, ?18, ?19, ?20, ?21
                 )"#,
             )?;
 
@@ -751,6 +768,14 @@ impl SqliteStorage {
                     pkg.resource_count,
                     0,  // default priority
                 ])?;
+                // `INSERT OR REPLACE` reissues the rowid when replacing
+                // an existing row, so re-query rather than trust
+                // `last_insert_rowid()` for the FK target.
+                let package_id: i64 = tx.query_row(
+                    "SELECT rowid FROM packages WHERE name = ?1 AND version = ?2",
+                    rusqlite::params![&pkg.name, &pkg.version],
+                    |row| row.get(0),
+                )?;
 
                 for r in pkg.resources {
                     let sd_impose_profiles_json = r.sd_impose_profiles
@@ -779,9 +804,14 @@ impl SqliteStorage {
                         &pkg.fhir_version,
                         &r.content_hash,
                         &r.content_path,
+                        &r.blob_hash,
                         &r.id_lower,
                         &r.name_lower,
                     ])?;
+
+                    if let (Some(blob), Some(relpath)) = (r.blob_hash.as_ref(), r.package_relpath.as_ref()) {
+                        upsert_blob_and_file(&tx, package_id, blob, r.blob_size, relpath, "resource", &now)?;
+                    }
                 }
             }
 
@@ -936,13 +966,15 @@ impl SqliteStorage {
         let package_version = resource_index.package_version.clone();
         let fhir_version = resource_index.fhir_version.clone();
 
-        let content_path: String = tokio::time::timeout(
+        // One DB hit pulls both addresses: `blob_hash` for the
+        // file-level CAS, `content_path` as legacy fallback.
+        let (blob_hex, content_path): (Option<String>, String) = tokio::time::timeout(
             std::time::Duration::from_secs(30),
             self.with_connection(move |conn| {
                 conn.query_row(
-                    "SELECT content_path FROM resources WHERE url = ?1 AND package_name = ?2 AND package_version = ?3 AND fhir_version = ?4",
+                    "SELECT blob_hash, content_path FROM resources WHERE url = ?1 AND package_name = ?2 AND package_version = ?3 AND fhir_version = ?4",
                     rusqlite::params![canonical_url, package_name, package_version, fhir_version],
-                    |row| row.get(0),
+                    |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?)),
                 )
             }),
         )
@@ -950,7 +982,7 @@ impl SqliteStorage {
         .map_err(|_| {
             FcmError::Storage(StorageError::IoError {
                 message: format!(
-                    "Timeout getting content_path for {}",
+                    "Timeout getting resource address for {}",
                     resource_index.canonical_url
                 ),
             })
@@ -958,24 +990,48 @@ impl SqliteStorage {
         .map_err(|err| match err {
             FcmError::Storage(StorageError::DatabaseError { message }) => {
                 FcmError::Storage(StorageError::IoError {
-                    message: format!("Failed to get resource content_path: {message}"),
+                    message: format!("Failed to get resource address: {message}"),
                 })
             }
             other => other,
         })?;
 
-        let content = tokio::fs::read_to_string(&content_path)
-            .await
-            .map_err(|e| {
+        let bytes = match blob_hex {
+            Some(hex) => {
+                let blob = BlobHash::from_hex(hex);
+                match self.file_cas.read(&blob).await {
+                    Ok(b) => b,
+                    Err(e) => {
+                        // Blob row exists but the file vanished (manual
+                        // GC, partial wipe, race with `store gc`). Fall
+                        // back to the legacy CAS path so reads stay
+                        // robust; let `store verify` surface the gap.
+                        debug!(
+                            "blob {} missing from FileCas, falling back to content_path: {e}",
+                            blob.as_hex()
+                        );
+                        tokio::fs::read(&content_path).await.map_err(|e| {
+                            FcmError::Storage(StorageError::IoError {
+                                message: format!(
+                                    "Failed to read resource from CAS at {} (blob fallback): {}",
+                                    content_path, e
+                                ),
+                            })
+                        })?
+                    }
+                }
+            }
+            None => tokio::fs::read(&content_path).await.map_err(|e| {
                 FcmError::Storage(StorageError::IoError {
                     message: format!(
                         "Failed to read resource from CAS at {}: {}",
                         content_path, e
                     ),
                 })
-            })?;
+            })?,
+        };
 
-        let json_content: serde_json::Value = serde_json::from_str(&content).map_err(|e| {
+        let json_content: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
             FcmError::Storage(StorageError::IoError {
                 message: format!("Failed to parse resource JSON from CAS: {e}"),
             })
@@ -1576,6 +1632,304 @@ impl SqliteStorage {
             })
         })
     }
+
+    /// Record a downloaded tarball's identity.
+    ///
+    /// `blake3_hex` matches the key [`crate::cas_storage::CasStorage`]
+    /// uses on disk so verification can locate the bytes. `sri_sha512`
+    /// is the lockfile integrity claim; `sri_sha1` is whatever the
+    /// registry advertised. Idempotent on `(name, version)`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_tarball(
+        &self,
+        name: &str,
+        version: &str,
+        blake3_hex: &str,
+        size: u64,
+        sri_sha512: Option<&str>,
+        sri_sha1: Option<&str>,
+        downloaded_from: Option<&str>,
+    ) -> Result<()> {
+        let name = name.to_string();
+        let version = version.to_string();
+        let blake3_hex = blake3_hex.to_string();
+        let sri_sha512 = sri_sha512.map(String::from);
+        let sri_sha1 = sri_sha1.map(String::from);
+        let downloaded_from = downloaded_from.map(String::from);
+        let now = Utc::now().to_rfc3339();
+        self.with_connection(move |conn| {
+            conn.execute(
+                r#"
+                INSERT INTO tarballs (hash, size, package_name, package_version,
+                                      sri_sha512, sri_sha1, downloaded_from, downloaded_at)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                ON CONFLICT(package_name, package_version) DO UPDATE SET
+                    hash            = excluded.hash,
+                    size            = excluded.size,
+                    sri_sha512      = excluded.sri_sha512,
+                    sri_sha1        = excluded.sri_sha1,
+                    downloaded_from = excluded.downloaded_from,
+                    downloaded_at   = excluded.downloaded_at
+                "#,
+                rusqlite::params![
+                    blake3_hex,
+                    size as i64,
+                    name,
+                    version,
+                    sri_sha512,
+                    sri_sha1,
+                    downloaded_from,
+                    now,
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Fetch a previously-recorded tarball metadata row.
+    pub async fn get_tarball(&self, name: &str, version: &str) -> Result<Option<TarballRecord>> {
+        let name = name.to_string();
+        let version = version.to_string();
+        self.with_connection(move |conn| {
+            conn.query_row(
+                r#"SELECT hash, size, sri_sha512, sri_sha1, downloaded_from, downloaded_at
+                   FROM tarballs WHERE package_name = ?1 AND package_version = ?2"#,
+                rusqlite::params![name, version],
+                |row| {
+                    Ok(TarballRecord {
+                        blake3_hex: row.get(0)?,
+                        size: row.get::<_, i64>(1)? as u64,
+                        sri_sha512: row.get(2)?,
+                        sri_sha1: row.get(3)?,
+                        downloaded_from: row.get(4)?,
+                        downloaded_at: row.get(5)?,
+                    })
+                },
+            )
+            .optional()
+        })
+        .await
+    }
+
+    /// List blobs that no `package_files` row references. Used by
+    /// `fcm store gc`. Returns `(hash, size)` pairs; caller decides
+    /// whether to actually delete (so dry-run flows can preview).
+    pub async fn list_orphan_blobs(&self) -> Result<Vec<(String, u64)>> {
+        self.with_connection(move |conn| {
+            let mut stmt = conn.prepare(
+                r#"SELECT b.hash, b.size FROM blobs b
+                   LEFT JOIN package_files pf ON pf.blob_hash = b.hash
+                   WHERE pf.blob_hash IS NULL"#,
+            )?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })
+        .await
+    }
+
+    /// List tarballs whose `(package_name, package_version)` no longer
+    /// matches an installed package. Used by `fcm store gc`.
+    pub async fn list_orphan_tarballs(&self) -> Result<Vec<TarballRecord>> {
+        self.with_connection(move |conn| {
+            let mut stmt = conn.prepare(
+                r#"SELECT t.hash, t.size, t.sri_sha512, t.sri_sha1,
+                          t.downloaded_from, t.downloaded_at,
+                          t.package_name, t.package_version
+                   FROM tarballs t
+                   LEFT JOIN packages p
+                     ON p.name = t.package_name AND p.version = t.package_version
+                   WHERE p.rowid IS NULL"#,
+            )?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        TarballRecord {
+                            blake3_hex: row.get(0)?,
+                            size: row.get::<_, i64>(1)? as u64,
+                            sri_sha512: row.get(2)?,
+                            sri_sha1: row.get(3)?,
+                            downloaded_from: row.get(4)?,
+                            downloaded_at: row.get(5)?,
+                        },
+                        row.get::<_, String>(6)?,
+                        row.get::<_, String>(7)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+                .into_iter()
+                .map(|(rec, _, _)| rec)
+                .collect();
+            Ok(rows)
+        })
+        .await
+    }
+
+    /// Delete blob metadata rows whose hash is in `hashes`. Caller is
+    /// responsible for removing the on-disk files via [`FileCas`] —
+    /// kept separate so dry-run callers can preview without mutating
+    /// disk state.
+    pub async fn delete_blob_rows(&self, hashes: Vec<String>) -> Result<usize> {
+        if hashes.is_empty() {
+            return Ok(0);
+        }
+        self.with_connection(move |conn| {
+            let tx = conn.transaction()?;
+            let mut count = 0usize;
+            {
+                let mut stmt = tx.prepare("DELETE FROM blobs WHERE hash = ?1")?;
+                for h in &hashes {
+                    count += stmt.execute(rusqlite::params![h])?;
+                }
+            }
+            tx.commit()?;
+            Ok(count)
+        })
+        .await
+    }
+
+    /// Delete tarball metadata rows for the given hashes.
+    pub async fn delete_tarball_rows(&self, hashes: Vec<String>) -> Result<usize> {
+        if hashes.is_empty() {
+            return Ok(0);
+        }
+        self.with_connection(move |conn| {
+            let tx = conn.transaction()?;
+            let mut count = 0usize;
+            {
+                let mut stmt = tx.prepare("DELETE FROM tarballs WHERE hash = ?1")?;
+                for h in &hashes {
+                    count += stmt.execute(rusqlite::params![h])?;
+                }
+            }
+            tx.commit()?;
+            Ok(count)
+        })
+        .await
+    }
+
+    /// Walk every blob row and re-hash the on-disk file, comparing
+    /// against the recorded hash. Returns the list of mismatches.
+    /// Empty list means the file CAS is consistent with the index.
+    pub async fn verify_blobs(&self) -> Result<Vec<BlobMismatch>> {
+        // Pull (hash, size) from SQLite, then verify on disk outside the
+        // SQL connection so we don't tie up the pool while hashing.
+        let rows: Vec<(String, u64)> = self
+            .with_connection(move |conn| {
+                let mut stmt = conn.prepare("SELECT hash, size FROM blobs")?;
+                let rs = stmt
+                    .query_map([], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(rs)
+            })
+            .await?;
+
+        let mut mismatches = Vec::new();
+        for (hex, expected_size) in rows {
+            let blob = BlobHash::from_hex(hex.clone());
+            match self.file_cas.read(&blob).await {
+                Ok(bytes) => {
+                    if bytes.len() as u64 != expected_size {
+                        mismatches.push(BlobMismatch {
+                            hash: hex,
+                            kind: BlobMismatchKind::SizeMismatch {
+                                want: expected_size,
+                                got: bytes.len() as u64,
+                            },
+                        });
+                        continue;
+                    }
+                    let actual = BlobHash::from_bytes(&bytes);
+                    if actual.as_hex() != blob.as_hex() {
+                        mismatches.push(BlobMismatch {
+                            hash: blob.as_hex().to_string(),
+                            kind: BlobMismatchKind::HashMismatch {
+                                got: actual.as_hex().to_string(),
+                            },
+                        });
+                    }
+                }
+                Err(e) => mismatches.push(BlobMismatch {
+                    hash: hex,
+                    kind: BlobMismatchKind::Missing(e.to_string()),
+                }),
+            }
+        }
+        Ok(mismatches)
+    }
+}
+
+/// Inserts (or refreshes) a `blobs` row plus the matching
+/// `package_files` row inside an open transaction. Uses
+/// `INSERT OR IGNORE` for `blobs` so identical-content inserts dedupe;
+/// `INSERT OR REPLACE` for `package_files` so re-installs of the same
+/// path under a refreshed package_id don't double-insert.
+fn upsert_blob_and_file(
+    tx: &rusqlite::Transaction<'_>,
+    package_id: i64,
+    blob_hash: &str,
+    blob_size: u64,
+    file_path: &str,
+    file_kind: &str,
+    now_rfc3339: &str,
+) -> rusqlite::Result<()> {
+    tx.execute(
+        "INSERT OR IGNORE INTO blobs (hash, size, algo, inserted_at) VALUES (?1, ?2, 'sha256', ?3)",
+        rusqlite::params![blob_hash, blob_size as i64, now_rfc3339],
+    )?;
+    tx.execute(
+        r#"INSERT INTO package_files (package_id, file_path, blob_hash, file_kind)
+           VALUES (?1, ?2, ?3, ?4)
+           ON CONFLICT(package_id, file_path) DO UPDATE SET
+               blob_hash = excluded.blob_hash,
+               file_kind = excluded.file_kind"#,
+        rusqlite::params![package_id, file_path, blob_hash, file_kind],
+    )?;
+    Ok(())
+}
+
+/// One row of `tarballs`: identity + integrity claims for an installed
+/// package's tarball bytes. Returned by [`SqliteStorage::get_tarball`].
+#[derive(Debug, Clone)]
+pub struct TarballRecord {
+    /// Blake3 hex of the raw tarball — primary key, also the legacy
+    /// CAS path under `<cache>/cas/packages/<hex>.tgz`.
+    pub blake3_hex: String,
+    pub size: u64,
+    /// SHA-512 SRI string (`sha512-<base64>`) computed at install time.
+    /// Same value mirrored in `package_provenance.integrity` and the
+    /// lockfile's `integrity` field.
+    pub sri_sha512: Option<String>,
+    /// Whatever SHA-1 the registry advertised, kept verbatim.
+    pub sri_sha1: Option<String>,
+    /// Registry URL the bytes came from on first install.
+    pub downloaded_from: Option<String>,
+    /// RFC3339 timestamp.
+    pub downloaded_at: String,
+}
+
+/// Per-blob verification finding. Empty list returned by
+/// [`SqliteStorage::verify_blobs`] means the file CAS is consistent.
+#[derive(Debug, Clone)]
+pub struct BlobMismatch {
+    pub hash: String,
+    pub kind: BlobMismatchKind,
+}
+
+#[derive(Debug, Clone)]
+pub enum BlobMismatchKind {
+    /// The on-disk blob hashes to a different value than the row name.
+    HashMismatch { got: String },
+    /// The file size disagrees with what we recorded.
+    SizeMismatch { want: u64, got: u64 },
+    /// The on-disk file is gone entirely.
+    Missing(String),
 }
 
 /// Per-package provenance record. Returned by

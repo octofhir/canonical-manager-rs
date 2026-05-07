@@ -19,6 +19,7 @@ async fn test_indexed_storage_creation() {
         packages_dir: temp_dir.path().join("packages"),
         max_cache_size: "100MB".to_string(),
         connection_pool_size: 8,
+        fhir_cache_compat: false,
     };
 
     let storage = SqliteStorage::new(config).await.unwrap();
@@ -40,6 +41,7 @@ fn test_storage_config_validation() {
         packages_dir: temp_dir.path().join("packages"),
         max_cache_size: "100MB".to_string(),
         connection_pool_size: 8,
+        fhir_cache_compat: false,
     };
 
     // Valid config should pass
@@ -65,6 +67,7 @@ async fn test_add_package_to_storage() {
         packages_dir: temp_dir.path().join("packages"),
         max_cache_size: "100MB".to_string(),
         connection_pool_size: 8,
+        fhir_cache_compat: false,
     };
 
     let storage = SqliteStorage::new(config).await.unwrap();
@@ -107,6 +110,7 @@ async fn test_canonical_url_lookup() {
         packages_dir: temp_dir.path().join("packages"),
         max_cache_size: "100MB".to_string(),
         connection_pool_size: 8,
+        fhir_cache_compat: false,
     };
 
     let storage = SqliteStorage::new(config).await.unwrap();
@@ -148,6 +152,7 @@ async fn test_get_resource_content() {
         packages_dir: temp_dir.path().join("packages"),
         max_cache_size: "100MB".to_string(),
         connection_pool_size: 8,
+        fhir_cache_compat: false,
     };
 
     let storage = SqliteStorage::new(config).await.unwrap();
@@ -183,6 +188,7 @@ async fn test_search_by_type() {
         packages_dir: temp_dir.path().join("packages"),
         max_cache_size: "100MB".to_string(),
         connection_pool_size: 8,
+        fhir_cache_compat: false,
     };
 
     let storage = SqliteStorage::new(config).await.unwrap();
@@ -233,6 +239,7 @@ async fn install_provenance_round_trip() {
         packages_dir: temp_dir.path().join("packages"),
         max_cache_size: "100MB".to_string(),
         connection_pool_size: 8,
+        fhir_cache_compat: false,
     };
     let storage = SqliteStorage::new(config).await.unwrap();
 
@@ -398,4 +405,166 @@ fn create_test_extracted_package(temp_dir: &TempDir) -> ExtractedPackage {
         resources,
         extraction_path: temp_dir.path().to_path_buf(),
     }
+}
+
+/// `add_package` routes every resource through the file-level CAS:
+/// `resources.content_path` lands inside `<cache>/store/blobs/<aa>/<...>`
+/// and `get_resource` reads from that path.
+#[tokio::test]
+async fn add_package_routes_resources_through_file_cas() {
+    let temp_dir = setup_test_env();
+    let config = StorageConfig {
+        cache_dir: temp_dir.path().join("cache"),
+        packages_dir: temp_dir.path().join("packages"),
+        max_cache_size: "100MB".to_string(),
+        connection_pool_size: 4,
+        fhir_cache_compat: false,
+    };
+    let storage = SqliteStorage::new(config).await.unwrap();
+    let pkg = create_test_extracted_package(&temp_dir);
+    storage.add_package(pkg).await.unwrap();
+
+    let idx = storage
+        .find_resource("http://example.com/StructureDefinition/test-patient")
+        .await
+        .unwrap()
+        .unwrap();
+    let resource = storage.get_resource(&idx).await.unwrap();
+    assert_eq!(resource.content["resourceType"], "StructureDefinition");
+
+    // The persisted path lives under the new blob layout, not the
+    // legacy `<cache>/resources/<blake3>.json` directory.
+    let path_str = idx.file_path.to_string_lossy().into_owned();
+    assert!(
+        path_str.contains("/store/blobs/"),
+        "expected content_path under the blob CAS, got {path_str}"
+    );
+    assert!(idx.file_path.exists(), "blob path must exist on disk");
+}
+
+/// Re-installing the same package twice is idempotent: identical bytes
+/// dedupe to the same blob, package_files row count stays stable.
+#[tokio::test]
+async fn add_package_dedups_identical_resource_bytes() {
+    let temp_dir = setup_test_env();
+    let config = StorageConfig {
+        cache_dir: temp_dir.path().join("cache"),
+        packages_dir: temp_dir.path().join("packages"),
+        max_cache_size: "100MB".to_string(),
+        connection_pool_size: 4,
+        fhir_cache_compat: false,
+    };
+    let storage = SqliteStorage::new(config).await.unwrap();
+    let pkg = create_test_extracted_package(&temp_dir);
+    storage.add_package(pkg.clone()).await.unwrap();
+
+    // Same package re-added: short-circuits on `name+version` exists check.
+    storage.add_package(pkg).await.unwrap();
+    let pkgs = storage.list_packages().await.unwrap();
+    assert_eq!(pkgs.len(), 1);
+
+    // No orphans expected — every blob has at least one package_files row.
+    let orphans = storage.list_orphan_blobs().await.unwrap();
+    assert!(
+        orphans.is_empty(),
+        "no orphan blobs after idempotent re-install, got {orphans:?}"
+    );
+}
+
+/// `record_tarball` round-trips through `get_tarball` and supports
+/// upsert-on-conflict (re-recording the same `(name, version)` pair).
+#[tokio::test]
+async fn record_tarball_round_trip() {
+    let temp_dir = setup_test_env();
+    let config = StorageConfig {
+        cache_dir: temp_dir.path().join("cache"),
+        packages_dir: temp_dir.path().join("packages"),
+        max_cache_size: "100MB".to_string(),
+        connection_pool_size: 4,
+        fhir_cache_compat: false,
+    };
+    let storage = SqliteStorage::new(config).await.unwrap();
+
+    storage
+        .record_tarball(
+            "x.pkg",
+            "1.0.0",
+            "deadbeef",
+            123,
+            Some("sha512-AAA"),
+            Some("sha1-bbb"),
+            Some("https://packages.fhir.org"),
+        )
+        .await
+        .unwrap();
+    let rec = storage
+        .get_tarball("x.pkg", "1.0.0")
+        .await
+        .unwrap()
+        .expect("recorded tarball");
+    assert_eq!(rec.blake3_hex, "deadbeef");
+    assert_eq!(rec.size, 123);
+    assert_eq!(rec.sri_sha512.as_deref(), Some("sha512-AAA"));
+
+    // Re-record updates in place rather than failing on UNIQUE.
+    storage
+        .record_tarball(
+            "x.pkg",
+            "1.0.0",
+            "cafebabe",
+            456,
+            Some("sha512-BBB"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let rec2 = storage
+        .get_tarball("x.pkg", "1.0.0")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(rec2.blake3_hex, "cafebabe");
+    assert_eq!(rec2.size, 456);
+    assert_eq!(rec2.sri_sha1, None);
+}
+
+/// `verify_blobs` flags a tampered file. Hash mismatch surfaces with
+/// the actual hash so operators can investigate.
+#[tokio::test]
+async fn verify_blobs_detects_tampering() {
+    use octofhir_canonical_manager::store::FileCas;
+
+    let temp_dir = setup_test_env();
+    let config = StorageConfig {
+        cache_dir: temp_dir.path().join("cache"),
+        packages_dir: temp_dir.path().join("packages"),
+        max_cache_size: "100MB".to_string(),
+        connection_pool_size: 4,
+        fhir_cache_compat: false,
+    };
+    let storage = SqliteStorage::new(config).await.unwrap();
+    let pkg = create_test_extracted_package(&temp_dir);
+    storage.add_package(pkg).await.unwrap();
+
+    // Healthy state: no mismatches.
+    let issues = storage.verify_blobs().await.unwrap();
+    assert!(issues.is_empty(), "expected clean store, got {issues:?}");
+
+    // Tamper: overwrite one blob with different bytes.
+    let cas: &FileCas = storage.file_cas();
+    let blob_root = cas.paths().blobs();
+    let walk = walkdir::WalkDir::new(&blob_root);
+    let mut blob_file = None;
+    for entry in walk.into_iter().flatten() {
+        if entry.file_type().is_file() {
+            blob_file = Some(entry.path().to_path_buf());
+            break;
+        }
+    }
+    let blob_file = blob_file.expect("at least one blob exists after install");
+    std::fs::write(&blob_file, b"tampered-bytes").unwrap();
+
+    let issues = storage.verify_blobs().await.unwrap();
+    assert_eq!(issues.len(), 1, "exactly one mismatch expected");
 }

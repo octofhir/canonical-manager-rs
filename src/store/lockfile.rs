@@ -111,7 +111,7 @@ impl Lockfile {
         let path = project_root.join(Self::FILE_NAME);
         match tokio::fs::read_to_string(&path).await {
             Ok(text) => {
-                let lock: Self = toml::from_str(&text).map_err(|e| FcmError::TomlDe(e))?;
+                let lock: Self = toml::from_str(&text).map_err(FcmError::TomlDe)?;
                 if lock.version > Self::CURRENT_VERSION {
                     return Err(FcmError::Storage(StorageError::IoError {
                         message: format!(

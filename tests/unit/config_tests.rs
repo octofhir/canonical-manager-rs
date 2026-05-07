@@ -112,6 +112,7 @@ fn test_storage_config_validation() {
         packages_dir: temp_dir.path().join("packages"),
         max_cache_size: "1GB".to_string(),
         connection_pool_size: 32,
+        fhir_cache_compat: false,
     };
 
     // Valid config should pass

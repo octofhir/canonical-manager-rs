@@ -31,6 +31,7 @@ use url::Url;
 ///     packages_dir: PathBuf::from("/tmp/packages"),
 ///     max_cache_size: "1GB".to_string(),
 ///     connection_pool_size: 4,
+///     fhir_cache_compat: false,
 /// };
 /// let storage = Arc::new(SqliteStorage::new(config).await?);
 /// let resolver = CanonicalResolver::new(storage).await;
@@ -43,6 +44,13 @@ use url::Url;
 pub struct CanonicalResolver {
     storage: Arc<dyn SearchStorage + Send + Sync>,
     resolution_config: ResolutionConfig,
+    /// `(package_name, package_version) -> PackageInfo` cache. Populated
+    /// lazily on first resolve; refreshed on miss. The package list
+    /// changes only on install/remove, so cache hits dominate the
+    /// resolve hot path. Cuts a per-resolve `list_packages()` SELECT.
+    package_info_cache: parking_lot::RwLock<
+        std::collections::HashMap<(String, String), crate::domain::PackageInfo>,
+    >,
     #[cfg(feature = "fuzzy-search")]
     fuzzy_index: crate::fuzzy::NGramIndex,
 }
@@ -171,6 +179,7 @@ impl CanonicalResolver {
     ///     packages_dir: PathBuf::from("/tmp/packages"),
     ///     max_cache_size: "1GB".to_string(),
     ///     connection_pool_size: 4,
+    ///     fhir_cache_compat: false,
     /// };
     /// let storage = Arc::new(SqliteStorage::new(config).await?);
     /// let resolver = CanonicalResolver::new(storage);
@@ -191,6 +200,7 @@ impl CanonicalResolver {
         Self {
             storage,
             resolution_config: ResolutionConfig::default(),
+            package_info_cache: parking_lot::RwLock::new(Default::default()),
             #[cfg(feature = "fuzzy-search")]
             fuzzy_index,
         }
@@ -218,6 +228,7 @@ impl CanonicalResolver {
     ///     packages_dir: PathBuf::from("/tmp/packages"),
     ///     max_cache_size: "1GB".to_string(),
     ///     connection_pool_size: 4,
+    ///     fhir_cache_compat: false,
     /// };
     /// let storage = Arc::new(SqliteStorage::new(storage_config).await?);
     ///
@@ -248,6 +259,7 @@ impl CanonicalResolver {
         Self {
             storage,
             resolution_config: config,
+            package_info_cache: parking_lot::RwLock::new(Default::default()),
             #[cfg(feature = "fuzzy-search")]
             fuzzy_index,
         }
@@ -863,19 +875,35 @@ impl CanonicalResolver {
         // Get the full resource content
         let resource = self.storage.get_resource(&resource_index).await?;
 
-        // Get package info
-        let packages = self.storage.list_packages().await?;
-        let package_info = packages
-            .into_iter()
-            .find(|p| {
-                p.name == resource_index.package_name && p.version == resource_index.package_version
-            })
-            .ok_or_else(|| ResolutionError::CanonicalUrlNotFound {
-                url: format!(
-                    "Package {}@{} not found",
-                    resource_index.package_name, resource_index.package_version
-                ),
-            })?;
+        // Look up `PackageInfo` via the in-memory cache; on miss, refresh
+        // from `list_packages()` once and re-check. Drops one SQL roundtrip
+        // per resolve in the steady state.
+        let key = (
+            resource_index.package_name.clone(),
+            resource_index.package_version.clone(),
+        );
+        let package_info = {
+            let cached = self.package_info_cache.read().get(&key).cloned();
+            match cached {
+                Some(p) => p,
+                None => {
+                    let fresh = self.storage.list_packages().await?;
+                    let mut cache = self.package_info_cache.write();
+                    cache.clear();
+                    for p in &fresh {
+                        cache.insert((p.name.clone(), p.version.clone()), p.clone());
+                    }
+                    cache.get(&key).cloned().ok_or_else(|| {
+                        ResolutionError::CanonicalUrlNotFound {
+                            url: format!(
+                                "Package {}@{} not found",
+                                resource_index.package_name, resource_index.package_version
+                            ),
+                        }
+                    })?
+                }
+            }
+        };
 
         // Build legacy ResourceMetadata from new ResourceIndex fields
         let metadata = ResourceMetadata {
@@ -912,6 +940,7 @@ mod tests {
             packages_dir: temp_dir.path().join("packages"),
             max_cache_size: "100MB".to_owned(),
             connection_pool_size: 8,
+            fhir_cache_compat: false,
         };
 
         let storage = Arc::new(SqliteStorage::new(config).await.unwrap());
@@ -928,6 +957,7 @@ mod tests {
             packages_dir: temp_dir.path().join("packages"),
             max_cache_size: "100MB".to_owned(),
             connection_pool_size: 8,
+            fhir_cache_compat: false,
         };
 
         let storage = Arc::new(SqliteStorage::new(config).await.unwrap());
@@ -945,6 +975,7 @@ mod tests {
             packages_dir: temp_dir.path().join("packages"),
             max_cache_size: "100MB".to_owned(),
             connection_pool_size: 8,
+            fhir_cache_compat: false,
         };
 
         let storage = Arc::new(SqliteStorage::new(config).await.unwrap());

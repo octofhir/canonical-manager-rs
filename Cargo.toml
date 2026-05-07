@@ -123,6 +123,31 @@ tempfile = "3.0"
 wiremock = "0.6"
 assert_cmd = "2.0"
 predicates = "3.0"
+criterion = { version = "0.7", features = ["async_tokio"] }
+
+[[bench]]
+name = "cas"
+harness = false
+
+[[bench]]
+name = "lockfile"
+harness = false
+
+[[bench]]
+name = "resolve"
+harness = false
+
+[[bench]]
+name = "search"
+harness = false
+
+[[bench]]
+name = "linker"
+harness = false
+
+[[bench]]
+name = "install"
+harness = false
 
 [features]
 default = ["cli"]

@@ -144,6 +144,72 @@ pub enum Commands {
     Update,
     /// Manage configuration
     Config(ConfigCommand),
+    /// Inspect, verify, and clean the content-addressable store
+    Store(StoreCommand),
+    /// Materialise installed packages into `<cwd>/.fcm/modules/`
+    Materialize(MaterializeCommand),
+    /// Write or refresh `fcm.lock` in the current directory
+    Lock(LockCommand),
+}
+
+/// Store subcommand router
+#[derive(Parser, Debug)]
+pub struct StoreCommand {
+    #[command(subcommand)]
+    pub action: StoreAction,
+}
+
+/// Operations on the file-level CAS and tarball CAS
+#[derive(Subcommand, Debug)]
+pub enum StoreAction {
+    /// Print the resolved store root path
+    Path {
+        /// Output format (text, json)
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
+    /// Re-hash every blob and verify recorded hashes match disk content
+    Verify {
+        /// Output format (text, json)
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
+    /// Remove orphan blobs (no `package_files` reference) and orphan tarballs
+    Gc {
+        /// Print what would be removed without touching disk
+        #[arg(long)]
+        dry_run: bool,
+        /// Output format (text, json)
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
+    /// Stricter GC. Currently behaves like `gc` plus `--days N`
+    /// (only candidates whose tarball was downloaded more than N days
+    /// ago are removed). `--days 0` is equivalent to `gc`.
+    Prune {
+        #[arg(long, default_value = "30")]
+        days: i64,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
+}
+
+/// Materialize command
+#[derive(Parser, Debug)]
+pub struct MaterializeCommand {
+    /// Project root (defaults to cwd)
+    #[arg(long)]
+    pub project: Option<PathBuf>,
+}
+
+/// Lock command
+#[derive(Parser, Debug)]
+pub struct LockCommand {
+    /// Project root (defaults to cwd)
+    #[arg(long)]
+    pub project: Option<PathBuf>,
 }
 
 /// Install command
@@ -275,6 +341,9 @@ pub async fn run() -> crate::Result<()> {
         Commands::Resolve(ref cmd) => handle_resolve(&cli, cmd).await,
         Commands::Update => handle_update(&cli).await,
         Commands::Config(ref cmd) => handle_config(&cli, cmd).await,
+        Commands::Store(ref cmd) => handle_store(&cli, cmd).await,
+        Commands::Materialize(ref cmd) => handle_materialize(&cli, cmd).await,
+        Commands::Lock(ref cmd) => handle_lock(&cli, cmd).await,
     };
 
     // Handle errors with suggestions
@@ -932,6 +1001,202 @@ fn print_search_params_table(params: &[SearchParameterInfo]) {
 fn print_search_params_json(params: &[SearchParameterInfo]) -> crate::Result<()> {
     let json = serde_json::to_string_pretty(params)?;
     Output::result(&json);
+    Ok(())
+}
+
+/// Handle `fcm store` subcommands.
+async fn handle_store(cli: &Cli, cmd: &StoreCommand) -> crate::Result<()> {
+    let config = load_config(cli).await?;
+    let manager = CanonicalManager::new(config).await?;
+    match &cmd.action {
+        StoreAction::Path { format } => store_path(&manager, format).await,
+        StoreAction::Verify { format } => store_verify(&manager, format).await,
+        StoreAction::Gc { dry_run, format } => store_gc(&manager, *dry_run, 0, format).await,
+        StoreAction::Prune {
+            days,
+            dry_run,
+            format,
+        } => store_gc(&manager, *dry_run, *days, format).await,
+    }
+}
+
+async fn store_path(manager: &CanonicalManager, format: &str) -> crate::Result<()> {
+    let sqlite = manager.sqlite_storage_handle().ok_or_else(|| {
+        crate::error::FcmError::Storage(crate::error::StorageError::IoError {
+            message: "fcm store path requires the SQLite backend".to_string(),
+        })
+    })?;
+    let path = sqlite.file_cas().paths().root().to_path_buf();
+    if format == "json" {
+        Output::result(&serde_json::json!({ "store_root": path }).to_string());
+    } else {
+        Output::result(&path.display().to_string());
+    }
+    Ok(())
+}
+
+async fn store_verify(manager: &CanonicalManager, format: &str) -> crate::Result<()> {
+    let sqlite = manager.sqlite_storage_handle().ok_or_else(|| {
+        crate::error::FcmError::Storage(crate::error::StorageError::IoError {
+            message: "fcm store verify requires the SQLite backend".to_string(),
+        })
+    })?;
+    let mismatches = sqlite.verify_blobs().await?;
+    if format == "json" {
+        let body: Vec<_> = mismatches
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "hash": m.hash,
+                    "kind": format!("{:?}", m.kind),
+                })
+            })
+            .collect();
+        Output::result(&serde_json::Value::Array(body).to_string());
+    } else if mismatches.is_empty() {
+        Output::success("Store is consistent — every blob matches its recorded hash");
+    } else {
+        Output::warning(&format!("{} mismatches found", mismatches.len()));
+        for m in &mismatches {
+            Output::list_item(&format!("{}: {:?}", m.hash, m.kind));
+        }
+    }
+    Ok(())
+}
+
+async fn store_gc(
+    manager: &CanonicalManager,
+    dry_run: bool,
+    days: i64,
+    format: &str,
+) -> crate::Result<()> {
+    let sqlite = manager.sqlite_storage_handle().ok_or_else(|| {
+        crate::error::FcmError::Storage(crate::error::StorageError::IoError {
+            message: "fcm store gc requires the SQLite backend".to_string(),
+        })
+    })?;
+
+    let orphan_blobs = sqlite.list_orphan_blobs().await?;
+    let orphan_tarballs = sqlite.list_orphan_tarballs().await?;
+
+    // `--days N` filters tarballs by `downloaded_at`. Blobs have no
+    // download timestamp; the filter applies only to tarballs.
+    let cutoff = if days > 0 {
+        Some(chrono::Utc::now() - chrono::Duration::days(days))
+    } else {
+        None
+    };
+    let orphan_tarballs: Vec<_> = orphan_tarballs
+        .into_iter()
+        .filter(|t| match cutoff {
+            None => true,
+            Some(c) => match chrono::DateTime::parse_from_rfc3339(&t.downloaded_at) {
+                Ok(dt) => dt.with_timezone(&chrono::Utc) < c,
+                Err(_) => true,
+            },
+        })
+        .collect();
+
+    let blob_count = orphan_blobs.len();
+    let tarball_count = orphan_tarballs.len();
+    let blob_bytes: u64 = orphan_blobs.iter().map(|(_, s)| *s).sum();
+    let tarball_bytes: u64 = orphan_tarballs.iter().map(|t| t.size).sum();
+
+    if !dry_run {
+        // Delete on-disk blobs first; if the SQL delete then fails the
+        // index is more conservative than disk (over-reports orphans
+        // next run rather than under-reports).
+        let cas = sqlite.file_cas();
+        for (hex, _) in &orphan_blobs {
+            let path = cas.paths().blob_path(hex);
+            let _ = tokio::fs::remove_file(&path).await;
+        }
+        let _ = sqlite
+            .delete_blob_rows(orphan_blobs.iter().map(|(h, _)| h.clone()).collect())
+            .await?;
+
+        // Tarball bytes live in the legacy CasStorage at
+        // `<cache>/cas/packages/<hex>.tgz`. Best-effort delete; the
+        // metadata row is the source of truth either way.
+        let cache_root = cas.paths().root().parent().map(|p| p.to_path_buf());
+        if let Some(root) = cache_root {
+            for t in &orphan_tarballs {
+                let p = root
+                    .join("cas/packages")
+                    .join(format!("{}.tgz", t.blake3_hex));
+                let _ = tokio::fs::remove_file(&p).await;
+            }
+        }
+        let _ = sqlite
+            .delete_tarball_rows(
+                orphan_tarballs
+                    .iter()
+                    .map(|t| t.blake3_hex.clone())
+                    .collect(),
+            )
+            .await?;
+    }
+
+    if format == "json" {
+        Output::result(
+            &serde_json::json!({
+                "dry_run": dry_run,
+                "days": days,
+                "blobs_removed": blob_count,
+                "blob_bytes": blob_bytes,
+                "tarballs_removed": tarball_count,
+                "tarball_bytes": tarball_bytes,
+            })
+            .to_string(),
+        );
+    } else if dry_run {
+        Output::info(&format!(
+            "Dry run: {blob_count} blobs ({blob_bytes} B), {tarball_count} tarballs ({tarball_bytes} B) would be removed"
+        ));
+    } else {
+        Output::success(&format!(
+            "Removed {blob_count} blobs ({blob_bytes} B), {tarball_count} tarballs ({tarball_bytes} B)"
+        ));
+    }
+    Ok(())
+}
+
+/// Handle `fcm materialize`.
+async fn handle_materialize(cli: &Cli, cmd: &MaterializeCommand) -> crate::Result<()> {
+    let config = load_config(cli).await?;
+    let manager = CanonicalManager::new(config).await?;
+    let project_root = match &cmd.project {
+        Some(p) => p.clone(),
+        None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+    };
+    let report = manager.materialise_packages(&project_root).await?;
+    Output::success(&format!(
+        "Materialised {} files into {} (reflink {}, hardlink {}, copy {}, skipped {})",
+        report.total,
+        project_root.join(".fcm/modules").display(),
+        report.reflinked,
+        report.hardlinked,
+        report.copied,
+        report.skipped
+    ));
+    Ok(())
+}
+
+/// Handle `fcm lock`.
+async fn handle_lock(cli: &Cli, cmd: &LockCommand) -> crate::Result<()> {
+    let config = load_config(cli).await?;
+    let manager = CanonicalManager::new(config).await?;
+    let project_root = match &cmd.project {
+        Some(p) => p.clone(),
+        None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+    };
+    manager.write_lockfile(&project_root).await?;
+    Output::success(&format!(
+        "Wrote {}",
+        project_root
+            .join(crate::store::Lockfile::FILE_NAME)
+            .display()
+    ));
     Ok(())
 }
 

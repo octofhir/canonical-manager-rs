@@ -22,6 +22,7 @@ async fn test_resolver_creation() {
         packages_dir: temp_dir.path().join("packages"),
         max_cache_size: "100MB".to_string(),
         connection_pool_size: 8,
+        fhir_cache_compat: false,
     };
 
     let storage = Arc::new(SqliteStorage::new(config).await.unwrap());
@@ -53,6 +54,7 @@ async fn test_exact_canonical_resolution() {
         packages_dir: temp_dir.path().join("packages"),
         max_cache_size: "100MB".to_string(),
         connection_pool_size: 8,
+        fhir_cache_compat: false,
     };
 
     let storage = SqliteStorage::new(config).await.unwrap();
@@ -94,6 +96,7 @@ async fn test_canonical_url_not_found() {
         packages_dir: temp_dir.path().join("packages"),
         max_cache_size: "100MB".to_string(),
         connection_pool_size: 8,
+        fhir_cache_compat: false,
     };
 
     let storage = Arc::new(SqliteStorage::new(config).await.unwrap());
@@ -115,6 +118,7 @@ async fn test_version_fallback_resolution() {
         packages_dir: temp_dir.path().join("packages"),
         max_cache_size: "100MB".to_string(),
         connection_pool_size: 8,
+        fhir_cache_compat: false,
     };
 
     let storage = SqliteStorage::new(config).await.unwrap();
@@ -159,6 +163,7 @@ async fn test_resolution_with_specific_version() {
         packages_dir: temp_dir.path().join("packages"),
         max_cache_size: "100MB".to_string(),
         connection_pool_size: 8,
+        fhir_cache_compat: false,
     };
 
     let storage = SqliteStorage::new(config).await.unwrap();
@@ -198,6 +203,7 @@ async fn test_batch_resolution() {
         packages_dir: temp_dir.path().join("packages"),
         max_cache_size: "100MB".to_string(),
         connection_pool_size: 8,
+        fhir_cache_compat: false,
     };
 
     let storage = SqliteStorage::new(config).await.unwrap();
@@ -239,6 +245,7 @@ async fn test_fuzzy_matching() {
         packages_dir: temp_dir.path().join("packages"),
         max_cache_size: "100MB".to_string(),
         connection_pool_size: 8,
+        fhir_cache_compat: false,
     };
 
     let storage = SqliteStorage::new(config).await.unwrap();
@@ -285,6 +292,7 @@ async fn test_fuzzy_matching_disabled() {
         packages_dir: temp_dir.path().join("packages"),
         max_cache_size: "100MB".to_string(),
         connection_pool_size: 8,
+        fhir_cache_compat: false,
     };
 
     let storage = SqliteStorage::new(config).await.unwrap();
@@ -321,6 +329,7 @@ async fn test_version_detection_through_resolution() {
         packages_dir: temp_dir.path().join("packages"),
         max_cache_size: "100MB".to_string(),
         connection_pool_size: 8,
+        fhir_cache_compat: false,
     };
 
     let storage = SqliteStorage::new(config).await.unwrap();
@@ -359,6 +368,7 @@ async fn test_list_canonical_urls() {
         packages_dir: temp_dir.path().join("packages"),
         max_cache_size: "100MB".to_string(),
         connection_pool_size: 8,
+        fhir_cache_compat: false,
     };
 
     let storage = SqliteStorage::new(config).await.unwrap();

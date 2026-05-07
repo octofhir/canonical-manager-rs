@@ -251,6 +251,7 @@ pub struct ResourceDirectorySpec {
 ///     packages_dir: PathBuf::from("~/.fcm/packages"),
 ///     max_cache_size: "1GB".to_string(),
 ///     connection_pool_size: 4,
+///     fhir_cache_compat: false,
 /// };
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -262,6 +263,12 @@ pub struct StorageConfig {
     /// SQLite connection pool size (for concurrent workloads)
     #[serde(default = "default_connection_pool_size")]
     pub connection_pool_size: usize,
+    /// Mirror every successful install into `~/.fhir/packages/<name>-<version>/`
+    /// so SUSHI / IG Publisher / Firely tooling can read FCM-managed
+    /// packages. Default off: shared state under `$HOME/.fhir` races
+    /// when multiple package managers touch the same directory.
+    #[serde(default)]
+    pub fhir_cache_compat: bool,
 }
 
 /// Configuration for performance optimization settings.
@@ -334,6 +341,7 @@ impl Default for StorageConfig {
             packages_dir: fcm_dir.join("packages"),
             max_cache_size: default_max_cache_size(),
             connection_pool_size: default_connection_pool_size(),
+            fhir_cache_compat: false,
         }
     }
 }
@@ -623,6 +631,7 @@ impl FcmConfig {
             packages_dir: Self::expand_path(&self.storage.packages_dir),
             max_cache_size: self.storage.max_cache_size.clone(),
             connection_pool_size: self.storage.connection_pool_size,
+            fhir_cache_compat: self.storage.fhir_cache_compat,
         }
     }
 }
@@ -1092,6 +1101,7 @@ impl FcmConfig {
                 packages_dir: temp_dir.join("packages"),
                 max_cache_size: "100MB".to_string(),
                 connection_pool_size: default_connection_pool_size(),
+                fhir_cache_compat: false,
             },
             optimization: OptimizationConfig::default(),
             local_packages: vec![],

@@ -34,6 +34,7 @@ use tracing::{debug, info};
 ///     packages_dir: PathBuf::from("/tmp/packages"),
 ///     max_cache_size: "1GB".to_string(),
 ///     connection_pool_size: 4,
+///     fhir_cache_compat: false,
 /// };
 /// let storage = Arc::new(SqliteStorage::new(config).await?);
 /// let engine = SearchEngine::new(storage);
@@ -146,6 +147,7 @@ pub struct SearchFacets {
 ///     packages_dir: PathBuf::from("/tmp/packages"),
 ///     max_cache_size: "1GB".to_string(),
 ///     connection_pool_size: 4,
+///     fhir_cache_compat: false,
 /// };
 /// let storage = Arc::new(SqliteStorage::new(config).await?);
 ///
@@ -628,6 +630,7 @@ impl SearchEngine {
     ///     packages_dir: PathBuf::from("/tmp/packages"),
     ///     max_cache_size: "1GB".to_string(),
     ///     connection_pool_size: 4,
+    ///     fhir_cache_compat: false,
     /// };
     /// let storage = Arc::new(SqliteStorage::new(config).await?);
     /// let engine = SearchEngine::new(storage);
@@ -1261,6 +1264,7 @@ impl SearchQueryBuilder {
     ///     packages_dir: PathBuf::from("/tmp/packages"),
     ///     max_cache_size: "1GB".to_string(),
     ///     connection_pool_size: 4,
+    ///     fhir_cache_compat: false,
     /// };
     /// let storage = Arc::new(SqliteStorage::new(config).await?);
     /// let builder = SearchQueryBuilder::new(storage);
@@ -1447,6 +1451,7 @@ impl SearchQueryBuilder {
     ///     packages_dir: PathBuf::from("/tmp/packages"),
     ///     max_cache_size: "1GB".to_string(),
     ///     connection_pool_size: 4,
+    ///     fhir_cache_compat: false,
     /// };
     /// let storage = Arc::new(SqliteStorage::new(config).await?);
     ///
@@ -1482,6 +1487,7 @@ mod tests {
             packages_dir: temp_dir.path().join("packages"),
             max_cache_size: "100MB".to_string(),
             connection_pool_size: 8,
+            fhir_cache_compat: false,
         };
 
         let storage = Arc::new(SqliteStorage::new(config).await.unwrap());
@@ -1505,6 +1511,7 @@ mod tests {
             packages_dir: temp_dir.path().join("packages"),
             max_cache_size: "100MB".to_string(),
             connection_pool_size: 8,
+            fhir_cache_compat: false,
         };
 
         let storage = Arc::new(SqliteStorage::new(config).await.unwrap());
@@ -1528,6 +1535,7 @@ mod tests {
             packages_dir: temp_dir.path().join("packages"),
             max_cache_size: "100MB".to_string(),
             connection_pool_size: 8,
+            fhir_cache_compat: false,
         };
 
         let storage = Arc::new(SqliteStorage::new(config).await.unwrap());
@@ -1645,6 +1653,7 @@ mod tests {
             packages_dir: temp_dir.path().join("packages"),
             max_cache_size: "100MB".to_string(),
             connection_pool_size: 8,
+            fhir_cache_compat: false,
         };
 
         let storage = Arc::new(SqliteStorage::new(config).await.unwrap());

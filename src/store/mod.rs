@@ -1,24 +1,19 @@
 //! Content-addressable virtual store for FHIR packages.
 //!
-//! Implements the P2 architecture from `docs/refactor/VIRTUAL_STORE_DESIGN.md`:
-//! per-machine global store at `~/.fcm/store/` with file-level CAS, plus a
-//! deterministic per-project lockfile (`fcm.lock`).
+//! Per-machine global store at `<cache_dir>/store/` with file-level CAS
+//! and a deterministic per-project lockfile (`fcm.lock`).
 //!
 //! # Backend boundary
 //!
-//! This module is **SQLite-backend-specific install infrastructure**. It
-//! is invoked by the install pipeline above the [`crate::traits::PackageStore`]
-//! and [`crate::traits::SearchStorage`] interfaces and is *not* surfaced
-//! on those traits. Downstream consumers that implement the storage
-//! traits against Postgres (or any other backend) are not required to
-//! use this module — they can store packages however they want as long
-//! as they honour the trait contract.
+//! This module is **SQLite-backend-specific install infrastructure**.
+//! It is invoked by the install pipeline above the
+//! [`crate::traits::PackageStore`] and [`crate::traits::SearchStorage`]
+//! interfaces and is *not* surfaced on those traits. Custom backends
+//! (Postgres etc.) are free to ignore CAS entirely.
 //!
-//! Practical implication: when you add functionality here (new CAS
-//! features, new linker modes, lockfile fields), do *not* add
-//! corresponding methods to `PackageStore` / `SearchStorage`. Wire them
-//! into [`crate::CanonicalManager`] or [`crate::sqlite_storage::SqliteStorage`]
-//! directly so the trait surface stays frozen.
+//! New features here go through [`crate::CanonicalManager`] or
+//! [`crate::sqlite_storage::SqliteStorage`], never through new methods
+//! on the frozen trait surface.
 //!
 //! # Where to look
 //!
@@ -29,6 +24,7 @@
 //! | Reflink → hardlink → copy linker ladder + capability probing | [`linker`] |
 //! | Per-package cross-process install locks (`fs4`) | [`lock`] |
 //! | `fcm.lock` schema, deterministic serde, integrity SRI | [`lockfile`] |
+//! | `~/.fhir/packages/` cross-tool compat shim | [`fhir_cache`] |
 //!
 //! # Disk layout
 //!
@@ -58,14 +54,8 @@
 //!         └── *.json
 //! ```
 //!
-//! # What's NOT yet wired
-//!
-//! Phase A (this milestone) lands the foundations: CAS, linker, lockfile,
-//! locks, schema v2. Phase B (separate work) wires per-project virtual
-//! layout materialisation, the `~/.fhir/packages/` shim, and the
-//! `fcm store …` CLI. See PLAN.md P2 for the full breakdown.
-
 pub mod cas;
+pub mod fhir_cache;
 pub mod linker;
 pub mod lock;
 pub mod lockfile;
@@ -73,6 +63,7 @@ pub mod materialize;
 pub mod paths;
 
 pub use cas::{BlobHash, FileCas};
+pub use fhir_cache::{default_fhir_cache_root, populate_fhir_cache};
 pub use linker::{LinkCapability, Linker, LinkerMode};
 pub use lock::PackageInstallLock;
 pub use lockfile::{LockedPackage, Lockfile};

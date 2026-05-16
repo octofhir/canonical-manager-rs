@@ -194,7 +194,7 @@ pub use unified_storage::{UnifiedIntegrityReport, UnifiedStorageStats};
 #[cfg(feature = "sqlite")]
 pub use sqlite_storage::SqliteStorage;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use tokio::fs;
@@ -499,20 +499,29 @@ impl CanonicalManager {
             .await?,
         );
 
-        // Initialize registry client
+        // Initialize registry client. All registry clients (concrete
+        // `RegistryClient` and every sub-client in the federated chain)
+        // share a single `reqwest::Client` so they share a single hyper
+        // connection pool — TCP/TLS handshakes are amortised across
+        // requests to the same registry host.
         let expanded_storage = config.get_expanded_storage_config();
-        let registry_client =
-            registry::RegistryClient::new(&config.registry, expanded_storage.cache_dir.clone())
-                .await?;
+        let http = registry::build_default_http_client(config.registry.timeout)?;
+        let registry_client = registry::RegistryClient::new_with_client(
+            &config.registry,
+            expanded_storage.cache_dir.clone(),
+            http.clone(),
+        )
+        .await?;
 
         // When `extra` registries are configured (non-NPM protocols), build
         // a federated chain alongside the concrete client. The chain is
         // consulted first; the legacy client is the fall-through.
         let registry_chain = if !config.registry.extra.is_empty() {
             let chain_dir = expanded_storage.cache_dir.join("registry_chain");
-            match crate::registry_clients::RedundantRegistryClient::from_config(
+            match crate::registry_clients::RedundantRegistryClient::from_config_with_client(
                 &config.registry,
                 chain_dir,
+                http.clone(),
             )
             .await
             {
@@ -675,9 +684,13 @@ impl CanonicalManager {
 
         // Create a dummy concrete client for compatibility, but route calls to trait object helpers
         let expanded_storage = config.get_expanded_storage_config();
-        let registry_client =
-            registry::RegistryClient::new(&config.registry, expanded_storage.cache_dir.clone())
-                .await?;
+        let http = registry::build_default_http_client(config.registry.timeout)?;
+        let registry_client = registry::RegistryClient::new_with_client(
+            &config.registry,
+            expanded_storage.cache_dir.clone(),
+            http,
+        )
+        .await?;
 
         Ok(Self {
             config,
@@ -697,22 +710,49 @@ impl CanonicalManager {
     // Helper: registry download via federated chain, AsyncRegistry trait,
     // or the legacy concrete client — in that order.
     async fn registry_download(&self, spec: &PackageSpec) -> Result<registry::PackageDownload> {
-        if let Some(chain) = &self.registry_chain {
-            use crate::registry_clients::FhirRegistryClient;
-            return chain.download(spec, None).await;
-        }
-        if let Some(r) = &self.registry_dyn {
-            return r.download_package(spec).await;
-        }
-        self.registry_client.download_package(spec).await
+        self.registry_download_with_progress(spec, None).await
     }
 
-    // Helper: list packages via trait or unified storage
-    async fn list_packages_via_store(&self) -> Result<Vec<PackageInfo>> {
-        if let Some(s) = &self.pkg_store_dyn {
-            s.list_packages().await
+    async fn registry_download_with_progress(
+        &self,
+        spec: &PackageSpec,
+        progress: Option<&dyn registry::DownloadProgress>,
+    ) -> Result<registry::PackageDownload> {
+        if let Some(chain) = &self.registry_chain {
+            use crate::registry_clients::FhirRegistryClient;
+            return chain.download(spec, progress).await;
+        }
+        if let Some(r) = &self.registry_dyn {
+            // The `AsyncRegistry` trait predates the streaming-progress
+            // hook. Trait-based custom registries don't see progress
+            // callbacks; the concrete + chain paths still do.
+            return r.download_package(spec).await;
+        }
+        self.registry_client
+            .download_package_with_progress(spec, progress)
+            .await
+    }
+
+    /// Build a `PackageExtractor` honouring the
+    /// `storage.fhir_cache_compat` flag. When the compat shim is off,
+    /// the extractor skips writing resource JSON files to disk and
+    /// hands their bytes back via `ExtractedPackage.raw_bytes`.
+    fn build_extractor(&self, base_dir: std::path::PathBuf) -> crate::package::PackageExtractor {
+        if self.config.storage.fhir_cache_compat {
+            crate::package::PackageExtractor::new(base_dir)
         } else {
-            self.storage.list_packages().await
+            crate::package::PackageExtractor::new_in_memory(base_dir)
+        }
+    }
+
+    /// Point-existence check via the active store. O(1) on SQLite; default
+    /// falls back to `list_packages` for downstream `PackageStore` impls
+    /// that have not overridden `has_package`.
+    async fn has_package_via_store(&self, name: &str, version: &str) -> Result<bool> {
+        if let Some(s) = &self.pkg_store_dyn {
+            s.has_package(name, version).await
+        } else {
+            self.storage.has_package(name, version).await
         }
     }
 
@@ -779,7 +819,9 @@ impl CanonicalManager {
     ) {
         // Hash tarball bytes from the cached file. SHA-512 SRI and
         // blake3 are computed from the same in-memory buffer so the
-        // lockfile entry and the `tarballs` row stay in sync.
+        // lockfile entry and the `tarballs` row stay in sync. Hashing
+        // runs on a blocking worker so a multi-hundred-MB tarball
+        // doesn't park a tokio thread.
         let bytes = match tokio::fs::read(&download.file_path).await {
             Ok(b) => b,
             Err(e) => {
@@ -792,9 +834,23 @@ impl CanonicalManager {
                 return;
             }
         };
-        let integrity = store::Lockfile::compute_integrity(&bytes);
-        let blake3_hex = blake3::hash(&bytes).to_hex().to_string();
         let tarball_size = bytes.len() as u64;
+        let (integrity, blake3_hex) = match tokio::task::spawn_blocking(move || {
+            let integrity = store::Lockfile::compute_integrity(&bytes);
+            let blake3_hex = blake3::hash(&bytes).to_hex().to_string();
+            (integrity, blake3_hex)
+        })
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                debug!(
+                    "Skipping provenance for {}@{}: hash worker panicked: {e}",
+                    spec.name, spec.version
+                );
+                return;
+            }
+        };
 
         // Resolved URL: best-effort guess from the configured primary
         // registry. The orchestrator may have served the bytes from a
@@ -925,7 +981,24 @@ impl CanonicalManager {
             url: None,
         };
 
-        self.install_packages_batch(vec![spec]).await
+        // Parallel-workers path: resolve the full dep tree, download in
+        // parallel, extract in parallel, batch-insert. Locally-overridden
+        // specs are split out and installed sequentially from disk.
+        // `install_packages_parallel` now records provenance per-package
+        // and honours `find_local_package` overrides, so it's a drop-in
+        // replacement for the sequential batch path here.
+        self.install_packages_parallel(vec![spec]).await?;
+
+        // Refresh fcm.lock if a project root contains one. Mirrors the
+        // behaviour of `install_packages_batch_with_options`.
+        if let Some(root) = std::env::current_dir()
+            .ok()
+            .filter(|r| r.join(store::Lockfile::FILE_NAME).exists())
+            && let Err(e) = self.write_lockfile(&root).await
+        {
+            warn!("Failed to refresh fcm.lock: {e}");
+        }
+        Ok(())
     }
 
     /// Install a FHIR package with progress callback for real-time updates.
@@ -1039,22 +1112,42 @@ impl CanonicalManager {
             visited.insert(package_key.clone());
 
             // Check if already installed
-            let packages = self.list_packages_via_store().await?;
-            if packages
-                .iter()
-                .any(|p| p.name == name && p.version == version)
-            {
+            if self.has_package_via_store(name, version).await? {
                 return Ok(());
             }
 
-            // Get dependencies from registry
-            let metadata = self
-                .registry_client
-                .get_package_metadata(name, version)
-                .await?;
+            // Prefer local package manifest when one is configured for
+            // this (name, version): its dependency set may differ from
+            // the registry-published version, and the install path uses
+            // the local files anyway.
+            let deps: HashMap<String, String> =
+                if let Some(local_spec) = self.find_local_package(name, version) {
+                    let manifest_path = local_spec.path.join("package.json");
+                    let manifest_content = fs::read_to_string(&manifest_path).await.map_err(|e| {
+                    FcmError::Package(crate::error::PackageError::ExtractionFailed {
+                        message: format!(
+                            "Failed to read manifest for local package {name}@{version}: {e}"
+                        ),
+                    })
+                })?;
+                    let manifest: PackageManifest = serde_json::from_str(&manifest_content)
+                        .map_err(|e| {
+                            FcmError::Package(crate::error::PackageError::ExtractionFailed {
+                                message: format!(
+                                    "Invalid manifest for local package {name}@{version}: {e}"
+                                ),
+                            })
+                        })?;
+                    manifest.dependencies
+                } else {
+                    self.registry_client
+                        .get_package_metadata(name, version)
+                        .await?
+                        .dependencies
+                };
 
             // Recursively collect dependencies first
-            for (dep_name, dep_version) in &metadata.dependencies {
+            for (dep_name, dep_version) in &deps {
                 self.collect_packages_to_install(dep_name, dep_version, to_install, visited)
                     .await?;
             }
@@ -1081,11 +1174,7 @@ impl CanonicalManager {
         }
 
         // Check if already in storage
-        let packages = self.list_packages_via_store().await?;
-        if packages
-            .iter()
-            .any(|p| p.name == name && p.version == version)
-        {
+        if self.has_package_via_store(name, version).await? {
             ctx.skipped(name, version, "already installed");
             installed.insert(package_key);
             return Ok(());
@@ -1109,8 +1198,7 @@ impl CanonicalManager {
         };
 
         let download = self
-            .registry_client
-            .download_package_with_progress(&spec, Some(&progress_bridge))
+            .registry_download_with_progress(&spec, Some(&progress_bridge))
             .await
             .inspect_err(|e| {
                 ctx.error(Some(name), Some(version), &e.to_string());
@@ -1120,7 +1208,7 @@ impl CanonicalManager {
 
         // Extract
         ctx.extracting(name, version);
-        let extractor = package::PackageExtractor::new(self.config.storage.cache_dir.clone());
+        let extractor = self.build_extractor(self.config.storage.cache_dir.clone());
         let extracted = extractor.extract_package(download).await.inspect_err(|e| {
             ctx.error(Some(name), Some(version), &e.to_string());
         })?;
@@ -1149,6 +1237,15 @@ impl CanonicalManager {
                 resource.file_path = package_dir.join(relative_path);
             }
         }
+        let old_root = updated_extracted.extraction_path.clone();
+        updated_extracted.raw_bytes = updated_extracted
+            .raw_bytes
+            .into_iter()
+            .filter_map(|(p, b)| {
+                let rel = p.strip_prefix(&old_root).ok()?;
+                Some((package_dir.join(rel), b))
+            })
+            .collect();
         updated_extracted.extraction_path = package_dir;
 
         // Store in database
@@ -1346,6 +1443,16 @@ impl CanonicalManager {
         let mut visited = HashSet::new();
 
         for spec in &packages {
+            if spec.url.is_some() {
+                // URL-pinned package: no registry metadata to walk. Treat as
+                // a leaf and skip dependency resolution. Callers that need
+                // deps for a URL package must pass them explicitly.
+                let key = format!("{}@{}", spec.name, spec.version);
+                if visited.insert(key) {
+                    all_packages.push((spec.name.clone(), spec.version.clone()));
+                }
+                continue;
+            }
             self.collect_packages_to_install(
                 &spec.name,
                 &spec.version,
@@ -1393,51 +1500,131 @@ impl CanonicalManager {
             return Ok(());
         }
 
-        // Stage 1: Parallel Downloads
+        // Partition: locally-overridden specs install from disk
+        // (load_from_directory); the rest go through the parallel
+        // download → extract → batch-store pipeline.
+        let (local_specs, remote_specs): (Vec<PackageSpec>, Vec<PackageSpec>) = all_specs
+            .into_iter()
+            .partition(|s| self.find_local_package(&s.name, &s.version).is_some());
+
+        if !local_specs.is_empty() {
+            info!(
+                "Installing {} local package(s) from disk",
+                local_specs.len()
+            );
+            for spec in &local_specs {
+                let Some(local) = self.find_local_package(&spec.name, &spec.version) else {
+                    continue;
+                };
+                let key = format!("{}@{}", spec.name, spec.version);
+                self.load_from_directory(&local.path, Some(&key)).await?;
+            }
+        }
+
+        if remote_specs.is_empty() {
+            info!("All remaining work was local; nothing to download");
+            tracker.finish();
+            return Ok(());
+        }
+
+        // Stage 1+2: Streaming download → extract pipeline. Each task
+        // downloads, then extracts, in sequence — but many tasks run
+        // concurrently, so download N+1 happens while extract N is in
+        // flight. This is the pnpm-on-Rust trick: stages overlap
+        // instead of full-barrier between them.
+        //
+        // Concurrency bound: max(parallel_downloads, parallel_workers).
+        // Downloads are I/O-bound (network), extraction is CPU-bound
+        // (gzip + tar + JSON parse via spawn_blocking). We size to the
+        // larger of the two so neither stage starves.
+        let parallel = self
+            .config
+            .registry
+            .parallel_downloads
+            .max(self.config.optimization.parallel_workers)
+            .max(1);
         info!(
-            "Stage 1/3: Downloading {} packages in parallel",
-            all_specs.len()
+            "Pipeline (download → extract) over {} packages with concurrency {}",
+            remote_specs.len(),
+            parallel
         );
-        let download_start = std::time::Instant::now();
+        let pipeline_start = std::time::Instant::now();
 
-        let downloads = self
-            .registry_client
-            .download_packages_parallel(all_specs)
-            .await?;
+        // Resource JSON files only need to be on disk when
+        // `populate_fhir_cache` will mirror them into `~/.fhir/packages`.
+        // Without that compat shim the SQLite/Postgres backends ingest
+        // straight from the in-memory tar bytes — skip the per-file
+        // write syscall to save N×fs::write per package.
+        let cache_dir = self.config.storage.cache_dir.clone();
+        let extractor = Arc::new(if self.config.storage.fhir_cache_compat {
+            crate::package::PackageExtractor::new(cache_dir)
+        } else {
+            crate::package::PackageExtractor::new_in_memory(cache_dir)
+        });
 
-        let download_duration = download_start.elapsed();
+        use futures_util::stream::{self, StreamExt};
+        let results: Vec<(registry::PackageDownload, package::ExtractedPackage)> =
+            stream::iter(remote_specs.into_iter())
+                .map(|spec| {
+                    let extractor = Arc::clone(&extractor);
+                    async move {
+                        let download = self.registry_download(&spec).await?;
+                        let download_for_provenance = download.clone();
+                        let extracted = extractor.extract_package(download).await?;
+                        Ok::<_, FcmError>((download_for_provenance, extracted))
+                    }
+                })
+                .buffer_unordered(parallel)
+                .filter_map(|r| async move {
+                    match r {
+                        Ok(pair) => Some(pair),
+                        Err(e) => {
+                            warn!("Package pipeline task failed: {e}");
+                            None
+                        }
+                    }
+                })
+                .collect()
+                .await;
+
+        let pipeline_duration = pipeline_start.elapsed();
         info!(
-            "Stage 1/3 completed: Downloaded {} packages in {:?}",
-            downloads.len(),
-            download_duration
+            "Pipeline completed: {} packages downloaded+extracted in {:?}",
+            results.len(),
+            pipeline_duration
         );
 
-        // Stage 2: Parallel Extraction
-        info!(
-            "Stage 2/3: Extracting {} packages in parallel",
-            downloads.len()
-        );
-        let extract_start = std::time::Instant::now();
-
-        let extractor =
-            crate::package::PackageExtractor::new(self.config.storage.cache_dir.clone());
-        let extracted = extractor.extract_packages_parallel(downloads).await?;
-
-        let extracted_count = extracted.len();
-        let extract_duration = extract_start.elapsed();
-        info!(
-            "Stage 2/3 completed: Extracted {} packages in {:?}",
-            extracted_count, extract_duration
-        );
-
-        // Stage 3: Batch store in database
-        info!(
-            "Stage 3/3: Storing {} packages in database",
-            extracted_count
-        );
+        // Stage 3: Batch store in database.
+        info!("Stage 3: Storing {} packages in database", results.len());
         let store_start = std::time::Instant::now();
 
+        // Split tuples: extracted goes to the batch insert, downloads
+        // are kept for post-insert provenance.
+        let (downloads_for_provenance, extracted): (
+            Vec<registry::PackageDownload>,
+            Vec<package::ExtractedPackage>,
+        ) = results.into_iter().unzip();
+
+        let extracted_keys: HashSet<(String, String)> = extracted
+            .iter()
+            .map(|p| (p.name.clone(), p.version.clone()))
+            .collect();
+        let extracted_count = extracted.len();
+
         self.storage.add_packages_batch(extracted).await?;
+
+        // Record provenance per-package. Best-effort: a failed provenance
+        // write must not roll back a successful batch install. The sequential
+        // install path treats provenance the same way (see
+        // `record_provenance_after_install`).
+        for download in downloads_for_provenance {
+            let key = (download.spec.name.clone(), download.spec.version.clone());
+            if !extracted_keys.contains(&key) {
+                continue;
+            }
+            let spec = download.spec.clone();
+            self.record_provenance_after_install(&spec, &download).await;
+        }
 
         let store_duration = store_start.elapsed();
         info!(
@@ -1454,8 +1641,8 @@ impl CanonicalManager {
             .await;
 
         info!(
-            "Parallel installation completed successfully: {} packages in {:?} (download: {:?}, extract: {:?}, store: {:?})",
-            extracted_count, overall_duration, download_duration, extract_duration, store_duration
+            "Parallel installation completed: {} packages in {:?} (pipeline: {:?}, store: {:?})",
+            extracted_count, overall_duration, pipeline_duration, store_duration
         );
 
         Ok(())
@@ -1554,11 +1741,7 @@ impl CanonicalManager {
                 "Checking if package {} already exists in storage...",
                 package_key
             );
-            let packages = self.storage.list_packages().await?;
-            if packages
-                .iter()
-                .any(|p| p.name == name && p.version == version)
-            {
+            if self.storage.has_package(name, version).await? {
                 debug!("Package {} already installed in storage", package_key);
                 installed.insert(package_key);
                 return Ok(());
@@ -1619,11 +1802,7 @@ impl CanonicalManager {
 
             // Re-check storage under the cross-process lock — another
             // process may have completed this package while we waited.
-            let packages = self.storage.list_packages().await?;
-            if packages
-                .iter()
-                .any(|p| p.name == name && p.version == version)
-            {
+            if self.storage.has_package(name, version).await? {
                 debug!(
                     "Package installed by another process while waiting for install lock: {}",
                     package_key
@@ -1661,8 +1840,7 @@ impl CanonicalManager {
             }
 
             debug!("Extracting package {}...", package_key);
-            let extractor =
-                crate::package::PackageExtractor::new(self.config.storage.packages_dir.clone());
+            let extractor = self.build_extractor(self.config.storage.packages_dir.clone());
             // Hold a snapshot so provenance can re-read the tarball after
             // extract consumes the original `download`.
             let download_for_provenance = download.clone();
@@ -1811,11 +1989,7 @@ impl CanonicalManager {
             }
 
             // Check if package already exists in storage (trait-aware)
-            let packages = self.list_packages_via_store().await?;
-            if packages
-                .iter()
-                .any(|p| p.name == name && p.version == version)
-            {
+            if self.has_package_via_store(name, version).await? {
                 debug!("Package already installed in storage: {}", package_key);
                 installed.insert(package_key);
                 return Ok(());
@@ -1884,11 +2058,7 @@ impl CanonicalManager {
 
             // Re-check the trait store under the lock: another process
             // may have completed this package while we waited.
-            let packages = self.list_packages_via_store().await?;
-            if packages
-                .iter()
-                .any(|p| p.name == name && p.version == version)
-            {
+            if self.has_package_via_store(name, version).await? {
                 debug!(
                     "Package installed by another process while waiting for install lock: {}",
                     package_key
@@ -1911,7 +2081,7 @@ impl CanonicalManager {
             let download_for_provenance = download.clone();
 
             // Extract package
-            let extractor = package::PackageExtractor::new(self.config.storage.cache_dir.clone());
+            let extractor = self.build_extractor(self.config.storage.cache_dir.clone());
             let extracted = extractor.extract_package(download).await?;
 
             // Move extracted package to packages directory
@@ -1936,6 +2106,15 @@ impl CanonicalManager {
                     resource.file_path = package_dir.join(relative_path);
                 }
             }
+            let old_root = updated_extracted.extraction_path.clone();
+            updated_extracted.raw_bytes = updated_extracted
+                .raw_bytes
+                .into_iter()
+                .filter_map(|(p, b)| {
+                    let rel = p.strip_prefix(&old_root).ok()?;
+                    Some((package_dir.join(rel), b))
+                })
+                .collect();
             updated_extracted.extraction_path = package_dir.clone();
 
             // Add package to unified storage
@@ -1995,11 +2174,7 @@ impl CanonicalManager {
             }
 
             // Check if package already exists in storage
-            let packages = self.storage.list_packages().await?;
-            if packages
-                .iter()
-                .any(|p| p.name == name && p.version == version)
-            {
+            if self.storage.has_package(name, version).await? {
                 debug!("Package already installed in storage: {}", package_key);
                 #[cfg(feature = "cli")]
                 Progress::step(&format!("✓ Package already installed: {package_key}"));
@@ -2066,11 +2241,7 @@ impl CanonicalManager {
 
             let _install_lock = self.acquire_install_lock(name, version).await?;
 
-            let packages = self.storage.list_packages().await?;
-            if packages
-                .iter()
-                .any(|p| p.name == name && p.version == version)
-            {
+            if self.storage.has_package(name, version).await? {
                 debug!(
                     "Package installed by another process while waiting for install lock: {}",
                     package_key
@@ -2091,17 +2262,18 @@ impl CanonicalManager {
                 url: None,
             };
 
-            // Download package with streaming progress
+            // Download package with streaming progress (routed through
+            // `registry_download_with_progress` so federated chains and
+            // trait registries see the callback too).
             let download = self
-                .registry_client
-                .download_package_with_progress(&spec, Some(&stream_progress))
+                .registry_download_with_progress(&spec, Some(&stream_progress))
                 .await?;
             let dependencies = download.metadata.dependencies.clone();
 
             // Extract package
             #[cfg(feature = "cli")]
             Progress::step(&format!("Extracting {package_key}"));
-            let extractor = package::PackageExtractor::new(self.config.storage.cache_dir.clone());
+            let extractor = self.build_extractor(self.config.storage.cache_dir.clone());
             let extracted = extractor.extract_package(download).await?;
 
             // Move extracted package to packages directory
@@ -2126,6 +2298,20 @@ impl CanonicalManager {
                     resource.file_path = package_dir.join(relative_path);
                 }
             }
+            // Re-key the captured-bytes sidecar after the rename so
+            // `build_resource_rows_with_raw` can still look up bytes by
+            // the resource's new `file_path`. Without this, in-memory
+            // mode would miss the fast path (no disk file to fall back
+            // to) and ingest synthetic re-serialised bytes.
+            let old_root = updated_extracted.extraction_path.clone();
+            updated_extracted.raw_bytes = updated_extracted
+                .raw_bytes
+                .into_iter()
+                .filter_map(|(p, b)| {
+                    let rel = p.strip_prefix(&old_root).ok()?;
+                    Some((package_dir.join(rel), b))
+                })
+                .collect();
             updated_extracted.extraction_path = package_dir.clone();
 
             // Add package to unified storage
@@ -3177,6 +3363,7 @@ impl CanonicalManager {
             manifest,
             resources,
             extraction_path: path.to_path_buf(),
+            raw_bytes: HashMap::new(),
         };
 
         // Add to storage
@@ -3373,6 +3560,7 @@ impl CanonicalManager {
             manifest,
             resources,
             extraction_path: path.to_path_buf(),
+            raw_bytes: HashMap::new(),
         };
 
         // Add to storage

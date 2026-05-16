@@ -11,6 +11,15 @@ use tokio::fs;
 // use tokio::io::AsyncReadExt;
 use tracing::{debug, info, warn};
 
+/// Recommended fan-out for per-file CPU-bound work inside one package
+/// (JSON decode, hashing). Capped at 16 because the tokio blocking pool
+/// and the OS file-descriptor table are the real bottlenecks above that.
+fn num_cpus_hint() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get().min(16))
+        .unwrap_or(4)
+}
+
 /// Service for extracting and processing FHIR Implementation Guide packages.
 ///
 /// The `PackageExtractor` handles downloading, extracting, and parsing FHIR packages
@@ -36,6 +45,17 @@ use tracing::{debug, info, warn};
 pub struct PackageExtractor {
     cache_dir: PathBuf,
     temp_dir: PathBuf,
+    /// When `true`, skip writing FHIR resource JSON files
+    /// (`package/*.json`, excluding `package.json` and `.index.json`)
+    /// to disk during extraction. The bytes are still captured in
+    /// `ExtractedPackage.raw_bytes` so storage backends that don't
+    /// need an on-disk layout (Postgres, in-memory, etc.) can ingest
+    /// the package without the per-resource write syscall.
+    ///
+    /// Default `false` (write everything) preserves backwards
+    /// compatibility with the `populate_fhir_cache` shim and the
+    /// sequential install path which still reads files back from disk.
+    skip_resource_disk_write: bool,
 }
 
 /// Index of files contained in a FHIR package.
@@ -111,6 +131,12 @@ pub struct ExtractedPackage {
     pub manifest: PackageManifest,
     pub resources: Vec<FhirResource>,
     pub extraction_path: PathBuf,
+    /// Optional sidecar: original JSON bytes captured during the
+    /// streaming tar walk, keyed by absolute resource file path.
+    /// Downstream storage paths can hash these directly instead of
+    /// re-reading the just-written file. Empty when an `ExtractedPackage`
+    /// is constructed from disk-only inputs.
+    pub raw_bytes: HashMap<PathBuf, Vec<u8>>,
 }
 
 /// FHIR package manifest (package.json) structure.
@@ -220,6 +246,24 @@ impl PackageExtractor {
         Self {
             cache_dir,
             temp_dir,
+            skip_resource_disk_write: false,
+        }
+    }
+
+    /// Construct an extractor that skips writing FHIR resource JSON
+    /// files to disk. Resource bytes are still captured in
+    /// `ExtractedPackage.raw_bytes`. Use this with storage backends
+    /// (e.g. Postgres) that ingest from in-memory bytes directly and
+    /// never read the on-disk extraction tree.
+    ///
+    /// `package.json` and `.index.json` are still written so
+    /// `validate_package` and `parse_manifest` keep working.
+    pub fn new_in_memory(cache_dir: PathBuf) -> Self {
+        let temp_dir = cache_dir.join("temp");
+        Self {
+            cache_dir,
+            temp_dir,
+            skip_resource_disk_write: true,
         }
     }
 
@@ -284,14 +328,19 @@ impl PackageExtractor {
         // Ensure tmp dir exists
         fs::create_dir_all(&tmp_extraction_path).await?;
 
-        // Extract the .tgz file into tmp dir
-        if let Err(e) = self
+        // Extract the .tgz file into tmp dir. Captures JSON bytes from
+        // the tar stream so downstream code can hash + parse without
+        // re-reading the just-written files.
+        let raw_bytes_tmp = match self
             .extract_tgz_file(&download.file_path, &tmp_extraction_path)
             .await
         {
-            let _ = fs::remove_dir_all(&tmp_extraction_path).await;
-            return Err(e);
-        }
+            Ok(m) => m,
+            Err(e) => {
+                let _ = fs::remove_dir_all(&tmp_extraction_path).await;
+                return Err(e);
+            }
+        };
 
         // Move into final location atomically (replace if exists). On
         // rename failure (e.g. cross-device), drop the tmp dir so it does
@@ -304,14 +353,28 @@ impl PackageExtractor {
             return Err(e.into());
         }
 
+        // Rewrite the raw-bytes map keys from `tmp_extraction_path` →
+        // `final_extraction_path` since we renamed the parent dir.
+        let raw_bytes: HashMap<PathBuf, Vec<u8>> = raw_bytes_tmp
+            .into_iter()
+            .filter_map(|(p, b)| {
+                let rel = p.strip_prefix(&tmp_extraction_path).ok()?;
+                Some((final_extraction_path.join(rel), b))
+            })
+            .collect();
+
         // Validate package structure
         self.validate_package(&final_extraction_path).await?;
 
         // Parse manifest
         let manifest = self.parse_manifest(&final_extraction_path).await?;
 
-        // Extract resources
-        let resources = self.extract_resources(&final_extraction_path).await?;
+        // Extract resources. The raw-bytes sidecar lets
+        // `extract_resources` skip the disk re-read for JSON files we
+        // already captured during the tar walk.
+        let resources = self
+            .extract_resources_with_raw(&final_extraction_path, &raw_bytes)
+            .await?;
 
         info!(
             "Successfully extracted package: {}@{} with {} resources",
@@ -326,6 +389,7 @@ impl PackageExtractor {
             manifest,
             resources,
             extraction_path: final_extraction_path,
+            raw_bytes,
         };
 
         #[cfg(feature = "metrics")]
@@ -390,6 +454,7 @@ impl PackageExtractor {
             let extractor = PackageExtractor {
                 cache_dir: self.cache_dir.clone(),
                 temp_dir: self.temp_dir.clone(),
+                skip_resource_disk_write: self.skip_resource_disk_write,
             };
             tasks.push(async move { extractor.extract_package(download).await });
         }
@@ -562,7 +627,16 @@ impl PackageExtractor {
     /// `flate2` is a tight CPU loop and the per-entry context-switch
     /// cost in `async-tar` dwarfs any I/O parallelism win for the
     /// disk-local extraction we're doing here.
-    async fn extract_tgz_file(&self, tgz_path: &Path, output_dir: &Path) -> Result<()> {
+    ///
+    /// Returns a sidecar map of `(out_path -> raw_bytes)` for every
+    /// `package/*.json` regular file captured during the walk. Callers
+    /// that need the original JSON payload (CAS hashing, in-memory
+    /// parse) can avoid the post-extract disk re-read.
+    async fn extract_tgz_file(
+        &self,
+        tgz_path: &Path,
+        output_dir: &Path,
+    ) -> Result<HashMap<PathBuf, Vec<u8>>> {
         debug!(
             "Extracting .tgz file: {} to {}",
             tgz_path.display(),
@@ -571,75 +645,122 @@ impl PackageExtractor {
 
         let tgz_path = tgz_path.to_path_buf();
         let output_dir = output_dir.to_path_buf();
-        tokio::task::spawn_blocking(move || {
-            let file =
-                std::fs::File::open(&tgz_path).map_err(|e| PackageError::ExtractionFailed {
-                    message: format!("Failed to open archive: {e}"),
-                })?;
-            let reader = std::io::BufReader::new(file);
-            let tar = GzDecoder::new(reader);
-            let mut archive = Archive::new(tar);
-
-            for entry in archive
-                .entries()
-                .map_err(|e| PackageError::ExtractionFailed {
-                    message: format!("Failed to read archive entries: {e}"),
-                })?
-            {
-                let mut entry = entry.map_err(|e| PackageError::ExtractionFailed {
-                    message: format!("Invalid entry: {e}"),
-                })?;
-                let path = entry.path().map_err(|e| PackageError::ExtractionFailed {
-                    message: format!("Invalid entry path: {e}"),
-                })?;
-
-                // Skip non-regular entries: a tar with `Symlink`/`Link`
-                // entries pointing outside `base` would otherwise create
-                // links that escape the sandbox even though
-                // `sanitize_extract_path` cleared the entry path of `..`.
-                // FHIR packages contain only regular files + directories;
-                // symlinks/devices/fifos are never legitimate.
-                let entry_type = entry.header().entry_type();
-                if !(entry_type.is_file()
-                    || entry_type.is_dir()
-                    || entry_type.is_gnu_longname()
-                    || entry_type.is_gnu_longlink()
-                    || entry_type.is_pax_global_extensions()
-                    || entry_type.is_pax_local_extensions())
-                {
-                    warn!(
-                        "Skipping unsafe tar entry type {:?} for path {}",
-                        entry_type,
-                        path.display()
-                    );
-                    continue;
-                }
-
-                let out_path = Self::sanitize_extract_path(&output_dir, &path)?;
-
-                if let Some(parent) = out_path.parent() {
-                    std::fs::create_dir_all(parent).map_err(|e| {
-                        PackageError::ExtractionFailed {
-                            message: format!("Failed to create directories: {e}"),
-                        }
+        let skip_disk = self.skip_resource_disk_write;
+        let (_, raw_bytes) =
+            tokio::task::spawn_blocking(move || -> Result<((), HashMap<PathBuf, Vec<u8>>)> {
+                use std::io::Read as _;
+                let file =
+                    std::fs::File::open(&tgz_path).map_err(|e| PackageError::ExtractionFailed {
+                        message: format!("Failed to open archive: {e}"),
                     })?;
-                }
+                let reader = std::io::BufReader::new(file);
+                let tar = GzDecoder::new(reader);
+                let mut archive = Archive::new(tar);
+                let mut raw: HashMap<PathBuf, Vec<u8>> = HashMap::new();
 
-                entry
-                    .unpack(&out_path)
+                for entry in archive
+                    .entries()
                     .map_err(|e| PackageError::ExtractionFailed {
-                        message: format!("Failed to unpack entry: {e}"),
+                        message: format!("Failed to read archive entries: {e}"),
+                    })?
+                {
+                    let mut entry = entry.map_err(|e| PackageError::ExtractionFailed {
+                        message: format!("Invalid entry: {e}"),
                     })?;
-            }
+                    let entry_path = entry.path().map_err(|e| PackageError::ExtractionFailed {
+                        message: format!("Invalid entry path: {e}"),
+                    })?;
+                    let entry_path = entry_path.into_owned();
 
-            Ok::<(), crate::error::FcmError>(())
-        })
-        .await
-        .map_err(|e| PackageError::ExtractionFailed {
-            message: format!("Task join error: {e}"),
-        })??;
+                    let entry_type = entry.header().entry_type();
+                    if !(entry_type.is_file()
+                        || entry_type.is_dir()
+                        || entry_type.is_gnu_longname()
+                        || entry_type.is_gnu_longlink()
+                        || entry_type.is_pax_global_extensions()
+                        || entry_type.is_pax_local_extensions())
+                    {
+                        warn!(
+                            "Skipping unsafe tar entry type {:?} for path {}",
+                            entry_type,
+                            entry_path.display()
+                        );
+                        continue;
+                    }
 
-        Ok(())
+                    let out_path = Self::sanitize_extract_path(&output_dir, &entry_path)?;
+
+                    // For regular `.json` files under `package/` (the
+                    // FHIR resource tree), read the entry body once,
+                    // optionally write to disk, and keep the bytes for
+                    // the caller. Everything else falls through to the
+                    // generic `entry.unpack` which handles dirs and
+                    // metadata-only tar entries correctly.
+                    let is_capturable_json = entry_type.is_file()
+                        && entry_path.starts_with("package")
+                        && entry_path
+                            .extension()
+                            .and_then(|s| s.to_str())
+                            .is_some_and(|e| e.eq_ignore_ascii_case("json"));
+
+                    // `package.json` and `.index.json` are always
+                    // materialised: `parse_manifest`/`validate_package`
+                    // still read them from disk regardless of the
+                    // in-memory mode.
+                    let file_name = entry_path
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("");
+                    let is_essential_metadata =
+                        file_name == "package.json" || file_name == ".index.json";
+
+                    let need_disk_write = if is_capturable_json {
+                        is_essential_metadata || !skip_disk
+                    } else {
+                        true
+                    };
+
+                    if need_disk_write && let Some(parent) = out_path.parent() {
+                        std::fs::create_dir_all(parent).map_err(|e| {
+                            PackageError::ExtractionFailed {
+                                message: format!("Failed to create directories: {e}"),
+                            }
+                        })?;
+                    }
+
+                    if is_capturable_json {
+                        let size = entry.header().size().unwrap_or(0) as usize;
+                        let mut buf = Vec::with_capacity(size);
+                        entry.read_to_end(&mut buf).map_err(|e| {
+                            PackageError::ExtractionFailed {
+                                message: format!("Failed to read entry bytes: {e}"),
+                            }
+                        })?;
+                        if need_disk_write {
+                            std::fs::write(&out_path, &buf).map_err(|e| {
+                                PackageError::ExtractionFailed {
+                                    message: format!("Failed to write entry: {e}"),
+                                }
+                            })?;
+                        }
+                        raw.insert(out_path, buf);
+                    } else {
+                        entry
+                            .unpack(&out_path)
+                            .map_err(|e| PackageError::ExtractionFailed {
+                                message: format!("Failed to unpack entry: {e}"),
+                            })?;
+                    }
+                }
+
+                Ok(((), raw))
+            })
+            .await
+            .map_err(|e| PackageError::ExtractionFailed {
+                message: format!("Task join error: {e}"),
+            })??;
+
+        Ok(raw_bytes)
     }
 
     fn sanitize_extract_path(base: &Path, path: &std::path::Path) -> Result<PathBuf> {
@@ -660,9 +781,20 @@ impl PackageExtractor {
         Ok(out_path)
     }
 
-    /// Extract FHIR resources from package
-    async fn extract_resources(&self, path: &Path) -> Result<Vec<FhirResource>> {
-        debug!("Extracting FHIR resources");
+    /// Like `extract_resources` but uses pre-captured tar bytes from
+    /// `raw` instead of re-reading each JSON file from disk. Falls
+    /// through to the disk read when a candidate isn't in the map.
+    ///
+    /// In in-memory mode (`skip_resource_disk_write = true`) the
+    /// resource JSON files are not on disk, so candidates come from
+    /// the `raw` map's keyset. `package.json` and `.index.json` stay
+    /// on disk regardless.
+    async fn extract_resources_with_raw(
+        &self,
+        path: &Path,
+        raw: &HashMap<PathBuf, Vec<u8>>,
+    ) -> Result<Vec<FhirResource>> {
+        debug!("Extracting FHIR resources (in-memory fast path)");
 
         let package_dir = path.join("package");
         if !package_dir.exists() {
@@ -672,56 +804,97 @@ impl PackageExtractor {
             .into());
         }
 
-        // Parse .index.json if it exists
+        // .index.json may have come from disk OR from the raw map.
         let index_path = package_dir.join(".index.json");
-        let index = if index_path.exists() {
+        let index = if let Some(bytes) = raw.get(&index_path) {
+            serde_json::from_slice::<PackageIndex>(bytes).ok()
+        } else if index_path.exists() {
             let content = fs::read_to_string(&index_path).await?;
             serde_json::from_str::<PackageIndex>(&content).ok()
         } else {
             None
         };
 
-        let mut resources = Vec::new();
-
-        // Read all .json files in package directory.
-        // file_name()/to_str() can fail for files with non-UTF-8 names
-        // (legal on Linux). Skip those rather than panicking — FHIR
-        // packages should never contain such files, but a hostile tarball
-        // shouldn't take down the worker thread.
-        let mut dir_entries = fs::read_dir(&package_dir).await?;
-        while let Some(entry) = dir_entries.next_entry().await? {
-            let path = entry.path();
-            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-                debug!(
-                    "Skipping non-UTF-8 filename under {}",
-                    package_dir.display()
-                );
-                continue;
-            };
-            if path.extension().and_then(|s| s.to_str()) == Some("json")
-                && !name.starts_with('.')
-                && name != "package.json"
-            {
-                let resource = self.parse_fhir_resource(&path, &index).await?;
-                if let Some(resource) = resource {
-                    resources.push(resource);
+        let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+        if self.skip_resource_disk_write {
+            // No on-disk resource files: walk the captured-bytes map
+            // for everything under `package/` that isn't manifest /
+            // index metadata.
+            for p in raw.keys() {
+                let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                if p.extension().and_then(|s| s.to_str()) == Some("json")
+                    && !name.starts_with('.')
+                    && name != "package.json"
+                {
+                    candidates.push(p.clone());
+                }
+            }
+        } else {
+            let mut dir_entries = fs::read_dir(&package_dir).await?;
+            while let Some(entry) = dir_entries.next_entry().await? {
+                let p = entry.path();
+                let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
+                    debug!(
+                        "Skipping non-UTF-8 filename under {}",
+                        package_dir.display()
+                    );
+                    continue;
+                };
+                if p.extension().and_then(|s| s.to_str()) == Some("json")
+                    && !name.starts_with('.')
+                    && name != "package.json"
+                {
+                    candidates.push(p);
                 }
             }
         }
 
+        use futures_util::stream::{self, StreamExt};
+        let concurrency = num_cpus_hint();
+        let index_ref = &index;
+        let resources: Vec<FhirResource> = stream::iter(candidates.into_iter())
+            .map(|p| async move {
+                let bytes_owned: Option<Vec<u8>> = raw.get(&p).cloned();
+                self.parse_fhir_resource_with_bytes(&p, index_ref, bytes_owned)
+                    .await
+            })
+            .buffer_unordered(concurrency)
+            .filter_map(|r| async move {
+                match r {
+                    Ok(Some(res)) => Some(Ok(res)),
+                    Ok(None) => None,
+                    Err(e) => Some(Err(e)),
+                }
+            })
+            .collect::<Vec<Result<FhirResource>>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
+
         Ok(resources)
     }
 
-    /// Parse a single FHIR resource file
-    async fn parse_fhir_resource(
+    /// Like `parse_fhir_resource`, but if `bytes` is `Some` skip the
+    /// `fs::read` and parse from the in-memory buffer.
+    async fn parse_fhir_resource_with_bytes(
         &self,
         file_path: &Path,
         index: &Option<PackageIndex>,
+        bytes: Option<Vec<u8>>,
     ) -> Result<Option<FhirResource>> {
-        let content = fs::read_to_string(file_path).await?;
-        let json_value: serde_json::Value = serde_json::from_str(&content)?;
+        let bytes = match bytes {
+            Some(b) => b,
+            None => fs::read(file_path).await?,
+        };
+        let json_value: serde_json::Value =
+            tokio::task::spawn_blocking(move || serde_json::from_slice(&bytes))
+                .await
+                .map_err(|e| PackageError::ExtractionFailed {
+                    message: format!("JSON parse worker panicked: {e}"),
+                })??;
 
-        // Extract basic FHIR resource information
         let resource_type = json_value["resourceType"]
             .as_str()
             .unwrap_or("Unknown")
@@ -730,15 +903,10 @@ impl PackageExtractor {
         let url = json_value["url"].as_str().map(|s| s.to_string());
         let version = json_value["version"].as_str().map(|s| s.to_string());
 
-        // Skip if not a valid FHIR resource
         if resource_type == "Unknown" || resource_type.is_empty() {
             return Ok(None);
         }
 
-        // Try to get additional info from index. Same UTF-8 caveat as
-        // `extract_resources` above: skip the index lookup if the filename
-        // can't be re-rendered as UTF-8 (the JSON parse already succeeded
-        // so contents are fine; only the path stem is in question).
         let filename = match file_path.file_name().and_then(|n| n.to_str()) {
             Some(s) => s,
             None => return Ok(None),
@@ -746,19 +914,16 @@ impl PackageExtractor {
         if let Some(index) = index
             && let Some(index_entry) = index.files.get(filename)
         {
-            // Use index information if available
-            let resource = FhirResource {
+            return Ok(Some(FhirResource {
                 resource_type: index_entry.resource_type.clone().unwrap_or(resource_type),
                 id: index_entry.id.clone().unwrap_or(id),
                 url: index_entry.url.clone().or(url),
                 version: index_entry.version.clone().or(version),
                 content: json_value,
                 file_path: file_path.to_path_buf(),
-            };
-            return Ok(Some(resource));
+            }));
         }
 
-        // Fallback to parsed information
         Ok(Some(FhirResource {
             resource_type,
             id,
@@ -864,7 +1029,7 @@ mod tests {
         fs::write(&resource_path, resource_content.to_string()).unwrap();
 
         let resource = extractor
-            .parse_fhir_resource(&resource_path, &None)
+            .parse_fhir_resource_with_bytes(&resource_path, &None, None)
             .await
             .unwrap();
         assert!(resource.is_some());
@@ -894,7 +1059,7 @@ mod tests {
         fs::write(&resource_path, resource_content.to_string()).unwrap();
 
         let resource = extractor
-            .parse_fhir_resource(&resource_path, &None)
+            .parse_fhir_resource_with_bytes(&resource_path, &None, None)
             .await
             .unwrap();
         assert!(resource.is_none()); // Should be filtered out as invalid

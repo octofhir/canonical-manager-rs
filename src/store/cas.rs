@@ -135,6 +135,72 @@ impl FileCas {
         self.insert_bytes(&bytes).await
     }
 
+    /// Insert from an existing on-disk file, preferring a hardlink (or
+    /// reflink on COW filesystems) over a byte copy. The source file is
+    /// hashed via a streaming reader, then linked in-place into the CAS
+    /// fanout. Falls back to a full copy on cross-device or
+    /// hardlink-unsupported filesystems.
+    ///
+    /// Use this when the source file is already authoritative on disk
+    /// (e.g. a freshly-downloaded tarball cached at a known path) — it
+    /// avoids the read-into-RAM + write-to-CAS round trip that
+    /// `insert_file` pays.
+    pub async fn insert_file_linked(&self, src: &Path) -> Result<BlobHash> {
+        use tokio::io::AsyncReadExt;
+        // Stream-hash the source so multi-hundred-MB tarballs don't
+        // sit in RAM just to compute their digest. SHA-256 to match the
+        // rest of FileCas's addressing scheme.
+        let mut file = tokio::fs::File::open(src).await?;
+        let mut hasher = Sha256::new();
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            let n = file.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        drop(file);
+        let hash = BlobHash::from_hex(hex::encode(hasher.finalize()));
+        let dest = self.paths.blob_path(hash.as_hex());
+
+        if tokio::fs::metadata(&dest).await.is_ok() {
+            return Ok(hash);
+        }
+        if let Some(parent) = dest.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+
+        let src_owned = src.to_path_buf();
+        let dest_owned = dest.clone();
+        // Linking ladder (reflink → hardlink → copy). All three are
+        // sync syscalls so they run in `spawn_blocking`. Order matches
+        // the rest of the codebase (`linker.link_*`).
+        let link_result = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+            if reflink_copy::reflink(&src_owned, &dest_owned).is_ok() {
+                return Ok(());
+            }
+            if std::fs::hard_link(&src_owned, &dest_owned).is_ok() {
+                return Ok(());
+            }
+            std::fs::copy(&src_owned, &dest_owned).map(|_| ())
+        })
+        .await
+        .map_err(|e| {
+            FcmError::Storage(StorageError::IoError {
+                message: format!("CAS link worker panicked: {e}"),
+            })
+        })?;
+
+        match link_result {
+            Ok(()) => Ok(hash),
+            Err(_) if tokio::fs::metadata(&dest).await.is_ok() => Ok(hash),
+            Err(e) => Err(FcmError::Storage(StorageError::IoError {
+                message: format!("Failed to link blob {} to {}: {e}", hash, dest.display()),
+            })),
+        }
+    }
+
     /// Resolve a hex digest to its on-disk path. Does not check existence.
     pub fn path_for(&self, hash: &BlobHash) -> PathBuf {
         self.paths.blob_path(hash.as_hex())

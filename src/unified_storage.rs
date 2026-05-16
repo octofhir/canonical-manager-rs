@@ -168,6 +168,11 @@ impl UnifiedStorage {
         self.package_store.list_packages().await
     }
 
+    /// Point lookup: does `(name, version)` exist in the package store?
+    pub async fn has_package(&self, name: &str, version: &str) -> Result<bool> {
+        self.package_store.has_package(name, version).await
+    }
+
     /// Find a resource by canonical URL
     pub async fn find_resource(&self, canonical_url: &str) -> Result<Option<ResourceIndex>> {
         self.package_store.find_resource(canonical_url).await

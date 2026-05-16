@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 2b86467801a5e58bf226ec7014eece6afa2c8eebaff4956ca16e1f49bb106d1f # shrinks to s = "http://a.a/a"
+cc ff798b9b83ba36493bf06853fee91c012d5f171f55687679593e4c1ce244b01a # shrinks to s = "http://xn--.a/"

@@ -61,6 +61,18 @@ pub trait PackageStore {
     async fn remove_package(&self, name: &str, version: &str) -> Result<bool>;
     async fn find_resource(&self, canonical_url: &str) -> Result<Option<ResourceIndex>>;
     async fn list_packages(&self) -> Result<Vec<PackageInfo>>;
+
+    /// Point lookup for installed-package existence.
+    ///
+    /// Default implementation scans `list_packages()`; backends are
+    /// encouraged to override with an indexed `SELECT 1 ... LIMIT 1`.
+    /// Default keeps the trait source-compatible for downstream impls.
+    async fn has_package(&self, name: &str, version: &str) -> Result<bool> {
+        let packages = self.list_packages().await?;
+        Ok(packages
+            .iter()
+            .any(|p| p.name == name && p.version == version))
+    }
 }
 
 /// Trait for search storage operations.

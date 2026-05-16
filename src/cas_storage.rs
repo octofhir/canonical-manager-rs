@@ -87,6 +87,73 @@ impl CasStorage {
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// # });
     /// ```
+    /// Store an on-disk file in CAS by hardlinking (or reflinking) rather
+    /// than copying bytes through RAM.
+    ///
+    /// The source file is hashed via a streaming reader, then the kernel
+    /// is asked to share the same inode (hardlink) or COW extent
+    /// (reflink) into CAS. Falls back to a full copy on cross-device or
+    /// unsupported filesystems. Cost: one stat + one rename-class
+    /// syscall, regardless of file size.
+    pub async fn store_from_path(
+        &self,
+        src: &Path,
+        content_type: ContentType,
+    ) -> std::io::Result<(PathBuf, ContentHash)> {
+        use tokio::io::AsyncReadExt;
+
+        let mut file = fs::File::open(src).await?;
+        let mut hasher = blake3::Hasher::new();
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            let n = file.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        drop(file);
+        let digest = hasher.finalize();
+        let hex = digest.to_hex();
+        let hash = ContentHash::from_hex(hex.as_str())
+            .map_err(|e| std::io::Error::other(format!("ContentHash from blake3 failed: {e}")))?;
+
+        let subdir = match content_type {
+            ContentType::Package => "packages",
+            ContentType::Resource => "resources",
+        };
+        let extension = match content_type {
+            ContentType::Package => "tgz",
+            ContentType::Resource => "json",
+        };
+        let filename = format!("{}.{}", hash.to_hex(), extension);
+        let final_path = self.base_path.join(subdir).join(&filename);
+
+        if final_path.exists() {
+            return Ok((final_path, hash));
+        }
+
+        let src_owned = src.to_path_buf();
+        let dest_owned = final_path.clone();
+        let link_result = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+            if reflink_copy::reflink(&src_owned, &dest_owned).is_ok() {
+                return Ok(());
+            }
+            if std::fs::hard_link(&src_owned, &dest_owned).is_ok() {
+                return Ok(());
+            }
+            std::fs::copy(&src_owned, &dest_owned).map(|_| ())
+        })
+        .await
+        .map_err(|e| std::io::Error::other(format!("CAS link worker panicked: {e}")))?;
+
+        match link_result {
+            Ok(()) => Ok((final_path, hash)),
+            Err(_) if final_path.exists() => Ok((final_path, hash)),
+            Err(e) => Err(e),
+        }
+    }
+
     pub async fn store(
         &self,
         content: &[u8],

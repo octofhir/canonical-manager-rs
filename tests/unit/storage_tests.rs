@@ -404,6 +404,7 @@ fn create_test_extracted_package(temp_dir: &TempDir) -> ExtractedPackage {
         manifest,
         resources,
         extraction_path: temp_dir.path().to_path_buf(),
+        raw_bytes: std::collections::HashMap::new(),
     }
 }
 

@@ -54,7 +54,6 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 use tracing::{debug, info, warn};
 
 // =====================================================================
@@ -180,6 +179,22 @@ impl NpmRegistryClient {
         Ok(Self { inner, id })
     }
 
+    /// Like `new`, but reuses a shared `reqwest::Client`. See
+    /// [`crate::registry::build_default_http_client`] for the
+    /// canonical builder.
+    pub async fn new_with_client(
+        config: &RegistryConfig,
+        cache_dir: PathBuf,
+        http: reqwest::Client,
+    ) -> Result<Self> {
+        let id = url::Url::parse(&config.url)
+            .ok()
+            .and_then(|u| u.host_str().map(String::from))
+            .unwrap_or_else(|| config.url.clone());
+        let inner = RegistryClient::new_with_client(config, cache_dir, http).await?;
+        Ok(Self { inner, id })
+    }
+
     /// Borrow the inner concrete client. Use sparingly — anything new
     /// should go through the trait.
     pub fn inner(&self) -> &RegistryClient {
@@ -256,25 +271,23 @@ impl Packages2Client {
     /// Construct a client against the `packages2.fhir.org`-style endpoint
     /// at `base_url`. `cache_dir` receives downloaded tarballs.
     pub async fn new(base_url: &str, cache_dir: PathBuf, timeout_secs: u64) -> Result<Self> {
+        let http = crate::registry::build_default_http_client(timeout_secs)?;
+        Self::new_with_client(base_url, cache_dir, http).await
+    }
+
+    /// Like `new`, but reuses a shared `reqwest::Client`.
+    pub async fn new_with_client(
+        base_url: &str,
+        cache_dir: PathBuf,
+        http: reqwest::Client,
+    ) -> Result<Self> {
         let parsed = url::Url::parse(base_url).map_err(|e| RegistryError::InvalidMetadata {
             message: format!("Invalid Packages2 base URL '{base_url}': {e}"),
         })?;
         let id = parsed.host_str().unwrap_or(base_url).to_string();
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(timeout_secs))
-            .connect_timeout(Duration::from_secs(5))
-            .user_agent(concat!(
-                env!("CARGO_PKG_NAME"),
-                "/",
-                env!("CARGO_PKG_VERSION")
-            ))
-            .build()
-            .map_err(|e| RegistryError::InvalidMetadata {
-                message: format!("Failed to build HTTP client: {e}"),
-            })?;
         tokio::fs::create_dir_all(&cache_dir).await?;
         Ok(Self {
-            client,
+            client: http,
             base: base_url.trim_end_matches('/').to_string(),
             cache_dir,
             id,
@@ -364,6 +377,36 @@ impl FhirRegistryClient for Packages2Client {
         spec: &PackageSpec,
         progress: Option<&dyn DownloadProgress>,
     ) -> Result<PackageDownload> {
+        // Warm-cache fast path: cached tarball wins over an HTTP GET.
+        // packages2.fhir.org tarballs are immutable per (name, version);
+        // a cached file is authoritative.
+        let file_path = self
+            .cache_dir
+            .join(format!("{}-{}.tgz", spec.name, spec.version));
+        if tokio::fs::metadata(&file_path).await.is_ok() {
+            debug!(
+                "Packages2 cache hit for {}@{} — skipping HTTP GET",
+                spec.name, spec.version
+            );
+            if let Some(p) = progress {
+                let size = tokio::fs::metadata(&file_path).await.ok().map(|m| m.len());
+                p.on_start(size);
+                p.on_complete();
+            }
+            return Ok(PackageDownload {
+                spec: spec.clone(),
+                file_path,
+                metadata: crate::registry::PackageMetadata {
+                    name: spec.name.clone(),
+                    version: spec.version.clone(),
+                    fhir_version: "unknown".to_string(),
+                    description: None,
+                    dependencies: Default::default(),
+                    canonical_base: None,
+                },
+            });
+        }
+
         // Tarball-direct: GET {base}/{name}/{version} → octet-stream tarball.
         let url = format!("{}/{}/{}", self.base, spec.name, spec.version);
         info!(
@@ -397,9 +440,6 @@ impl FhirRegistryClient for Packages2Client {
             p.on_start(total);
         }
 
-        let file_path = self
-            .cache_dir
-            .join(format!("{}-{}.tgz", spec.name, spec.version));
         let part_path = file_path.with_extension("tgz.part");
         let mut file = tokio::fs::File::create(&part_path).await?;
         let mut downloaded: u64 = 0;
@@ -477,25 +517,23 @@ impl GetIgRegistryClient {
     /// Construct a client against the `fs.get-ig.org`-style S3 archive at
     /// `base_url`. `cache_dir` receives downloaded tarballs.
     pub async fn new(base_url: &str, cache_dir: PathBuf, timeout_secs: u64) -> Result<Self> {
+        let http = crate::registry::build_default_http_client(timeout_secs)?;
+        Self::new_with_client(base_url, cache_dir, http).await
+    }
+
+    /// Like `new`, but reuses a shared `reqwest::Client`.
+    pub async fn new_with_client(
+        base_url: &str,
+        cache_dir: PathBuf,
+        http: reqwest::Client,
+    ) -> Result<Self> {
         let parsed = url::Url::parse(base_url).map_err(|e| RegistryError::InvalidMetadata {
             message: format!("Invalid get-ig base URL '{base_url}': {e}"),
         })?;
         let id = parsed.host_str().unwrap_or(base_url).to_string();
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(timeout_secs))
-            .connect_timeout(Duration::from_secs(5))
-            .user_agent(concat!(
-                env!("CARGO_PKG_NAME"),
-                "/",
-                env!("CARGO_PKG_VERSION")
-            ))
-            .build()
-            .map_err(|e| RegistryError::InvalidMetadata {
-                message: format!("Failed to build HTTP client: {e}"),
-            })?;
         tokio::fs::create_dir_all(&cache_dir).await?;
         Ok(Self {
-            client,
+            client: http,
             base: base_url.trim_end_matches('/').to_string(),
             cache_dir,
             id,
@@ -544,6 +582,36 @@ impl FhirRegistryClient for GetIgRegistryClient {
             tarball: String,
         }
 
+        // Warm-cache fast path: if the tarball already lives on disk,
+        // skip both HTTP round trips entirely. get-ig publishes immutable
+        // tarballs per (name, version), so a cached file is authoritative.
+        let file_path = self
+            .cache_dir
+            .join(format!("{}-{}.tgz", spec.name, spec.version));
+        if tokio::fs::metadata(&file_path).await.is_ok() {
+            debug!(
+                "get-ig cache hit for {}@{} — skipping stub + tarball GETs",
+                spec.name, spec.version
+            );
+            if let Some(p) = progress {
+                let size = tokio::fs::metadata(&file_path).await.ok().map(|m| m.len());
+                p.on_start(size);
+                p.on_complete();
+            }
+            return Ok(PackageDownload {
+                spec: spec.clone(),
+                file_path,
+                metadata: crate::registry::PackageMetadata {
+                    name: spec.name.clone(),
+                    version: spec.version.clone(),
+                    fhir_version: "unknown".to_string(),
+                    description: None,
+                    dependencies: Default::default(),
+                    canonical_base: None,
+                },
+            });
+        }
+
         let stub_url = format!("{}/pkgs/{}/{}", self.base, spec.name, spec.version);
         debug!("get-ig stub GET {stub_url}");
         let stub_resp = self.client.get(&stub_url).send().await.map_err(|e| {
@@ -588,9 +656,6 @@ impl FhirRegistryClient for GetIgRegistryClient {
         if let Some(p) = progress {
             p.on_start(total);
         }
-        let file_path = self
-            .cache_dir
-            .join(format!("{}-{}.tgz", spec.name, spec.version));
         let part_path = file_path.with_extension("tgz.part");
         let mut file = tokio::fs::File::create(&part_path).await?;
         let mut downloaded: u64 = 0;
@@ -694,11 +759,24 @@ impl RedundantRegistryClient {
     /// [`RegistryClientType`]). The cache directory is shared — each client
     /// gets a per-host subdirectory so artefacts don't collide.
     pub async fn from_config(config: &RegistryConfig, cache_dir: PathBuf) -> Result<Self> {
+        let http = crate::registry::build_default_http_client(config.timeout)?;
+        Self::from_config_with_client(config, cache_dir, http).await
+    }
+
+    /// Build the default chain reusing a shared `reqwest::Client`. All
+    /// sub-clients use clones of the same client so they share a single
+    /// `hyper` connection pool — TCP/TLS handshakes are amortised across
+    /// requests to the same registry host.
+    pub async fn from_config_with_client(
+        config: &RegistryConfig,
+        cache_dir: PathBuf,
+        http: reqwest::Client,
+    ) -> Result<Self> {
         let mut clients: Vec<Arc<dyn FhirRegistryClient>> = Vec::new();
 
         // Primary: always NPM-spec.
         let primary_dir = cache_dir.join("primary");
-        let primary = NpmRegistryClient::new(config, primary_dir).await?;
+        let primary = NpmRegistryClient::new_with_client(config, primary_dir, http.clone()).await?;
         clients.push(Arc::new(primary));
 
         // NPM fallbacks.
@@ -709,7 +787,7 @@ impl RedundantRegistryClient {
             fb_config.fallbacks = Vec::new();
             fb_config.extra = Vec::new();
             let fb_dir = cache_dir.join(format!("fallback_{i}"));
-            match NpmRegistryClient::new(&fb_config, fb_dir).await {
+            match NpmRegistryClient::new_with_client(&fb_config, fb_dir, http.clone()).await {
                 Ok(c) => clients.push(Arc::new(c)),
                 Err(e) => warn!("Skipping fallback registry {fallback_url}: {e}"),
             }
@@ -718,7 +796,7 @@ impl RedundantRegistryClient {
         // Extra non-NPM backends.
         for (i, extra) in config.extra.iter().enumerate() {
             let extra_dir = cache_dir.join(format!("extra_{i}"));
-            match extra_client(extra, extra_dir, config.timeout).await {
+            match extra_client_with_http(extra, extra_dir, config.timeout, http.clone()).await {
                 Ok(c) => clients.push(c),
                 Err(e) => warn!(
                     "Skipping extra registry {} ({:?}): {e}",
@@ -731,10 +809,11 @@ impl RedundantRegistryClient {
     }
 }
 
-async fn extra_client(
+async fn extra_client_with_http(
     spec: &ExtraRegistry,
     cache_dir: PathBuf,
-    timeout_secs: u64,
+    _timeout_secs: u64,
+    http: reqwest::Client,
 ) -> Result<Arc<dyn FhirRegistryClient>> {
     Ok(match spec.client_type {
         RegistryClientType::Npm => {
@@ -743,15 +822,25 @@ async fn extra_client(
                 token_env: spec.token_env.clone(),
                 ..RegistryConfig::default()
             };
-            Arc::new(NpmRegistryClient::new(&cfg, cache_dir).await?)
+            Arc::new(NpmRegistryClient::new_with_client(&cfg, cache_dir, http).await?)
         }
         RegistryClientType::TarballDirect => {
-            Arc::new(Packages2Client::new(&spec.url, cache_dir, timeout_secs).await?)
+            Arc::new(Packages2Client::new_with_client(&spec.url, cache_dir, http).await?)
         }
         RegistryClientType::S3Flat => {
-            Arc::new(GetIgRegistryClient::new(&spec.url, cache_dir, timeout_secs).await?)
+            Arc::new(GetIgRegistryClient::new_with_client(&spec.url, cache_dir, http).await?)
         }
     })
+}
+
+#[allow(dead_code)]
+async fn extra_client(
+    spec: &ExtraRegistry,
+    cache_dir: PathBuf,
+    timeout_secs: u64,
+) -> Result<Arc<dyn FhirRegistryClient>> {
+    let http = crate::registry::build_default_http_client(timeout_secs)?;
+    extra_client_with_http(spec, cache_dir, timeout_secs, http).await
 }
 
 #[async_trait]

@@ -261,6 +261,7 @@ fn test_extracted_package_structure() {
         manifest,
         resources,
         extraction_path: temp_dir.path().to_path_buf(),
+        raw_bytes: std::collections::HashMap::new(),
     };
 
     assert_eq!(extracted.name, "test.package");

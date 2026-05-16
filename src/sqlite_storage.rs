@@ -14,6 +14,7 @@ use chrono::{DateTime, Utc};
 use deadpool_sqlite::rusqlite::{self, OptionalExtension};
 use deadpool_sqlite::{Config as DeadpoolConfig, Pool, Runtime};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -447,101 +448,112 @@ impl SqliteStorage {
     /// Serialise + hash + CAS-insert each resource and assemble the
     /// per-row insert payload. Single source of truth shared by
     /// `add_package` and `add_packages_batch`.
-    async fn build_resource_rows(
+    /// Build per-resource rows for the SQLite insert. When `raw` is
+    /// non-empty, hashes come from the captured tar bytes (no disk
+    /// re-read); otherwise falls back to reading each resource file.
+    async fn build_resource_rows_with_raw(
         &self,
         resources: &[FhirResource],
         extraction_path: &Path,
+        raw: &HashMap<PathBuf, Vec<u8>>,
     ) -> Result<Vec<ResourceRow>> {
-        let mut out: Vec<ResourceRow> = Vec::with_capacity(resources.len());
-        for resource in resources {
-            // Hash the on-disk file bytes directly. Re-serializing
-            // `resource.content` via `serde_json::to_string` produces a
-            // different byte stream than the original file (key order,
-            // whitespace) and was the dominant cost on N=1500 resources.
-            // Read once and hand the same bytes to both the blake3
-            // column key and the file CAS.
-            // Falls back to re-serializing only if the path can't be
-            // read (e.g. a synthetic/in-memory `FhirResource`).
-            let content_bytes: Vec<u8> = match tokio::fs::read(&resource.file_path).await {
-                Ok(b) => b,
-                Err(_) => serde_json::to_vec(&resource.content).map_err(|e| {
-                    FcmError::Storage(StorageError::IoError {
-                        message: format!("Failed to serialize resource: {e}"),
-                    })
-                })?,
-            };
+        // Fan out per-resource work concurrently: read file bytes, hash,
+        // insert into file CAS. Each resource is independent; FileCas
+        // dedupes by content hash so concurrent writes of identical
+        // bytes collapse to a single on-disk blob.
+        use futures_util::stream::{self, StreamExt};
+        let concurrency = std::thread::available_parallelism()
+            .map(|n| n.get().min(16))
+            .unwrap_or(4);
+        let file_cas = self.file_cas.clone();
+        let extraction_path = extraction_path.to_path_buf();
 
-            // Two hashes per resource: blake3 stays as the existing
-            // `content_hash` column key; sha256 is the file-level CAS
-            // handle. Both are stable for identical bytes.
-            let content_hash = ContentHash::from_bytes(&content_bytes);
-            let blob_hash = self.file_cas.insert_bytes(&content_bytes).await?;
+        // Pair each resource with its captured tar bytes (if any).
+        let work: Vec<(FhirResource, Option<Vec<u8>>)> = resources
+            .iter()
+            .map(|r| (r.clone(), raw.get(&r.file_path).cloned()))
+            .collect();
 
-            // `content_path` mirrors the FileCas blob path so rows
-            // remain self-describing on disk even without joining
-            // through `package_files` — and writes don't fan out to a
-            // second CAS tree. `get_resource` prefers `blob_hash` when
-            // set; the path here is a robust fallback.
-            let content_path = self
-                .file_cas
-                .path_for(&blob_hash)
-                .to_string_lossy()
-                .into_owned();
+        let rows: Vec<Result<ResourceRow>> = stream::iter(work.into_iter())
+            .map(|(resource, captured)| {
+                let file_cas = file_cas.clone();
+                let extraction_path = extraction_path.clone();
+                async move {
+                    let content_bytes: Vec<u8> = match captured {
+                        Some(b) => b,
+                        None => match tokio::fs::read(&resource.file_path).await {
+                            Ok(b) => b,
+                            Err(_) => serde_json::to_vec(&resource.content).map_err(|e| {
+                                FcmError::Storage(StorageError::IoError {
+                                    message: format!("Failed to serialize resource: {e}"),
+                                })
+                            })?,
+                        },
+                    };
 
-            let canonical_url = resource
-                .url
-                .clone()
-                .unwrap_or_else(|| format!("{}/{}", resource.resource_type, resource.id));
+                    let content_hash = ContentHash::from_bytes(&content_bytes);
+                    let blob_hash = file_cas.insert_bytes(&content_bytes).await?;
 
-            let name = resource
-                .content
-                .get("name")
-                .and_then(|v| v.as_str())
-                .map(String::from);
+                    let content_path = file_cas.path_for(&blob_hash).to_string_lossy().into_owned();
 
-            let sd_fields = extract_sd_fields(&resource.content);
+                    let canonical_url = resource
+                        .url
+                        .clone()
+                        .unwrap_or_else(|| format!("{}/{}", resource.resource_type, resource.id));
 
-            // Relative path inside the package tarball
-            // (e.g. `package/StructureDefinition-Patient.json`). Used
-            // by `package_files` for GC and by the `~/.fhir/packages/`
-            // shim. Falls back to the bare file name when stripping
-            // fails (some callers pass absolute paths).
-            let package_relpath = resource
-                .file_path
-                .strip_prefix(extraction_path)
-                .ok()
-                .and_then(|p| p.to_str())
-                .map(String::from)
-                .or_else(|| {
-                    resource
+                    let name = resource
+                        .content
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+
+                    let sd_fields = extract_sd_fields(&resource.content);
+
+                    let package_relpath = resource
                         .file_path
-                        .file_name()
-                        .and_then(|n| n.to_str())
+                        .strip_prefix(&extraction_path)
+                        .ok()
+                        .and_then(|p| p.to_str())
                         .map(String::from)
-                });
+                        .or_else(|| {
+                            resource
+                                .file_path
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .map(String::from)
+                        });
 
-            out.push(ResourceRow {
-                resource_type: resource.resource_type.clone(),
-                id: Some(resource.id.clone()),
-                url: Some(canonical_url),
-                name: name.clone(),
-                version: resource.version.clone(),
-                sd_kind: sd_fields.sd_kind,
-                sd_derivation: sd_fields.sd_derivation,
-                sd_type: sd_fields.sd_type,
-                sd_base_definition: sd_fields.sd_base_definition,
-                sd_abstract: sd_fields.sd_abstract,
-                sd_impose_profiles: sd_fields.sd_impose_profiles,
-                sd_characteristics: sd_fields.sd_characteristics,
-                sd_flavor: sd_fields.sd_flavor,
-                content_hash: content_hash.to_hex(),
-                content_path,
-                id_lower: Some(resource.id.to_lowercase()),
-                name_lower: name.map(|n| n.to_lowercase()),
-                blob_hash: Some(blob_hash.as_hex().to_string()),
-                package_relpath,
-                blob_size: content_bytes.len() as u64,
-            });
+                    Ok(ResourceRow {
+                        resource_type: resource.resource_type.clone(),
+                        id: Some(resource.id.clone()),
+                        url: Some(canonical_url),
+                        name: name.clone(),
+                        version: resource.version.clone(),
+                        sd_kind: sd_fields.sd_kind,
+                        sd_derivation: sd_fields.sd_derivation,
+                        sd_type: sd_fields.sd_type,
+                        sd_base_definition: sd_fields.sd_base_definition,
+                        sd_abstract: sd_fields.sd_abstract,
+                        sd_impose_profiles: sd_fields.sd_impose_profiles,
+                        sd_characteristics: sd_fields.sd_characteristics,
+                        sd_flavor: sd_fields.sd_flavor,
+                        content_hash: content_hash.to_hex(),
+                        content_path,
+                        id_lower: Some(resource.id.to_lowercase()),
+                        name_lower: name.map(|n| n.to_lowercase()),
+                        blob_hash: Some(blob_hash.as_hex().to_string()),
+                        package_relpath,
+                        blob_size: content_bytes.len() as u64,
+                    })
+                }
+            })
+            .buffer_unordered(concurrency)
+            .collect()
+            .await;
+
+        let mut out: Vec<ResourceRow> = Vec::with_capacity(rows.len());
+        for r in rows {
+            out.push(r?);
         }
         Ok(out)
     }
@@ -601,7 +613,11 @@ impl SqliteStorage {
             .unwrap_or_else(|| "4.0.1".to_string());
 
         let resource_data = self
-            .build_resource_rows(&package.resources, &package.extraction_path)
+            .build_resource_rows_with_raw(
+                &package.resources,
+                &package.extraction_path,
+                &package.raw_bytes,
+            )
             .await?;
 
         let manifest_json = serde_json::to_string(&package.manifest).map_err(|e| {
@@ -735,7 +751,11 @@ impl SqliteStorage {
             let manifest_hash = ContentHash::from_bytes(manifest_json.as_bytes());
 
             let resource_data = self
-                .build_resource_rows(&package.resources, &package.extraction_path)
+                .build_resource_rows_with_raw(
+                    &package.resources,
+                    &package.extraction_path,
+                    &package.raw_bytes,
+                )
                 .await?;
 
             batch_data.push(BatchPackage {
@@ -1198,6 +1218,24 @@ impl SqliteStorage {
                 .collect::<rusqlite::Result<Vec<_>>>()?;
 
             Ok(packages)
+        })
+        .await
+    }
+
+    /// Point lookup: does the (name, version) pair exist in `packages`?
+    ///
+    /// O(1) on the primary key index. Use this instead of `list_packages()`
+    /// when callers only need a presence check — a full table scan during
+    /// recursive dependency installation otherwise becomes O(N×depth).
+    pub async fn has_package(&self, name: &str, version: &str) -> Result<bool> {
+        let pkg_name = name.to_string();
+        let pkg_version = version.to_string();
+        self.with_connection(move |conn| {
+            let mut stmt = conn.prepare_cached(
+                "SELECT 1 FROM packages WHERE name = ?1 AND version = ?2 LIMIT 1",
+            )?;
+            let exists = stmt.exists([&pkg_name, &pkg_version])?;
+            Ok(exists)
         })
         .await
     }
@@ -2258,5 +2296,9 @@ impl crate::traits::PackageStore for SqliteStorage {
 
     async fn list_packages(&self) -> Result<Vec<PackageInfo>> {
         SqliteStorage::list_packages(self).await
+    }
+
+    async fn has_package(&self, name: &str, version: &str) -> Result<bool> {
+        SqliteStorage::has_package(self, name, version).await
     }
 }

@@ -44,8 +44,53 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::fs;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, info, warn};
+
+/// Build the default `reqwest::Client` used by all registry-client
+/// implementations in this crate.
+///
+/// The returned client is the canonical place to centralise HTTP defaults
+/// (timeouts, user-agent, future connect-pool / HTTP/2 knobs). Pass clones
+/// of this client into `RegistryClient::new_with_client`,
+/// `NpmRegistryClient::new_with_client`, etc. so every registry shares a
+/// single connection pool.
+pub fn build_default_http_client(timeout_secs: u64) -> Result<Client> {
+    Client::builder()
+        .timeout(std::time::Duration::from_secs(timeout_secs))
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .user_agent(concat!(
+            env!("CARGO_PKG_NAME"),
+            "/",
+            env!("CARGO_PKG_VERSION")
+        ))
+        .build()
+        .map_err(|e| {
+            RegistryError::InvalidMetadata {
+                message: format!("Failed to build HTTP client: {e}"),
+            }
+            .into()
+        })
+}
+
+/// Compute Blake3 of a file without loading the whole body into RAM.
+///
+/// Hashing is CPU-bound: we drive the read on the async runtime in 64 KiB
+/// chunks and feed each chunk into the hasher. For files of a few hundred
+/// MB this keeps peak RSS small and avoids the full-buffer alternative.
+async fn blake3_file_hex(path: &std::path::Path) -> std::io::Result<String> {
+    let mut file = fs::File::open(path).await?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf).await?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hasher.finalize().to_hex().to_string())
+}
 
 /// Hard cap on tarball size for streaming downloads (2 GiB).
 ///
@@ -212,7 +257,7 @@ struct CatalogEntry {
 }
 
 /// NPM-style package metadata response
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[allow(dead_code)]
 struct NpmPackageResponse {
     name: String,
@@ -229,7 +274,7 @@ struct NpmPackageResponse {
 }
 
 /// NPM version information
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[allow(dead_code)]
 struct NpmVersionInfo {
     name: String,
@@ -243,7 +288,7 @@ struct NpmVersionInfo {
 }
 
 /// NPM distribution information
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[allow(dead_code)]
 struct NpmDistInfo {
     tarball: Option<String>,
@@ -356,20 +401,20 @@ impl RegistryClient {
     /// # }
     /// ```
     pub async fn new(config: &RegistryConfig, cache_dir: PathBuf) -> Result<Self> {
-        // Use the configured timeout as the per-request total budget.
-        // Connection timeout is fixed (5s) since registries should always be
-        // reachable quickly; the configured value scales the body-read budget
-        // for large tarball downloads.
-        let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(config.timeout))
-            .connect_timeout(std::time::Duration::from_secs(5))
-            .user_agent(concat!(
-                env!("CARGO_PKG_NAME"),
-                "/",
-                env!("CARGO_PKG_VERSION")
-            ))
-            .build()?;
+        let client = build_default_http_client(config.timeout)?;
+        Self::new_with_client(config, cache_dir, client).await
+    }
 
+    /// Construct a `RegistryClient` reusing an externally-built
+    /// `reqwest::Client`. Use this when several registry clients share
+    /// a single HTTP connection pool — `reqwest::Client` already wraps
+    /// its connector in an `Arc` internally, so cloning is cheap and
+    /// pool entries are shared across all clones.
+    pub async fn new_with_client(
+        config: &RegistryConfig,
+        cache_dir: PathBuf,
+        client: Client,
+    ) -> Result<Self> {
         let base_url =
             url::Url::parse(&config.url).map_err(|_| RegistryError::RegistryUnavailable {
                 url: config.url.clone(),
@@ -771,22 +816,19 @@ impl RegistryClient {
         let sidecar_path = file_path.with_extension("tgz.blake3");
         if fs::metadata(&file_path).await.is_ok() {
             let sidecar_match = match fs::read_to_string(&sidecar_path).await {
-                Ok(stored_hex) => match fs::read(&file_path).await {
-                    Ok(bytes) => {
-                        let actual = blake3::hash(&bytes).to_hex().to_string();
-                        actual.eq_ignore_ascii_case(stored_hex.trim())
-                    }
+                Ok(stored_hex) => match blake3_file_hex(&file_path).await {
+                    Ok(actual) => actual.eq_ignore_ascii_case(stored_hex.trim()),
                     Err(_) => false,
                 },
                 Err(_) => {
                     // No sidecar — first run after upgrade. Compute and
                     // persist now (TOFU acquire).
-                    if let Ok(bytes) = fs::read(&file_path).await {
-                        let h = blake3::hash(&bytes).to_hex().to_string();
-                        let _ = fs::write(&sidecar_path, &h).await;
-                        true
-                    } else {
-                        false
+                    match blake3_file_hex(&file_path).await {
+                        Ok(h) => {
+                            let _ = fs::write(&sidecar_path, &h).await;
+                            true
+                        }
+                        Err(_) => false,
                     }
                 }
             };
@@ -941,8 +983,8 @@ impl RegistryClient {
                 )
                 .await
             {
-                Ok(()) => {
-                    let cas_path = self.store_in_cas(&file_path).await?;
+                Ok(bytes) => {
+                    let cas_path = self.store_in_cas_bytes(bytes).await?;
                     debug!(
                         "Using cached package {}@{} (CAS: {})",
                         spec.name,
@@ -1058,13 +1100,13 @@ impl RegistryClient {
                 .into());
             }
 
-            // Update progress more frequently and ensure visible updates
-            let now = std::time::Instant::now();
+            // Throttle progress updates to at most one per 100ms to avoid
+            // overwhelming the callback (UI/SSE) on small TCP chunks.
             if let Some(progress) = progress {
-                // Update progress every chunk and force update every 100ms
-                progress.on_progress(downloaded, content_length);
+                let now = std::time::Instant::now();
                 if now.duration_since(last_progress_update) >= std::time::Duration::from_millis(100)
                 {
+                    progress.on_progress(downloaded, content_length);
                     last_progress_update = now;
                 }
             }
@@ -1153,12 +1195,16 @@ impl RegistryClient {
         })
     }
 
+    /// Verify a cached tarball against optional SHA1 and SRI integrity.
+    ///
+    /// Returns the file bytes on success so callers can hand them to
+    /// `store_in_cas_bytes` without re-reading the file from disk.
     async fn verify_cached_package(
         &self,
         file_path: &PathBuf,
         expected_shasum: Option<&str>,
         expected_integrity: Option<&str>,
-    ) -> std::result::Result<(), RegistryError> {
+    ) -> std::result::Result<Vec<u8>, RegistryError> {
         let content = fs::read(file_path)
             .await
             .map_err(|e| RegistryError::InvalidMetadata {
@@ -1169,60 +1215,100 @@ impl RegistryClient {
                 ),
             })?;
 
-        if let Some(expected) = expected_shasum {
-            let mut sha1_hasher = sha1::Sha1::new();
-            sha1_hasher.update(&content);
-            let actual = hex::encode(sha1_hasher.finalize());
-            if !actual.eq_ignore_ascii_case(expected) {
-                return Err(RegistryError::InvalidMetadata {
-                    message: format!(
-                        "Cached package checksum mismatch: expected {}, got {}",
-                        expected, actual
-                    ),
-                });
-            }
-        }
-
-        if let Some(integrity) = expected_integrity
-            && let Some((algo_raw, encoded)) = integrity.split_once('-')
-        {
-            let algo = algo_raw.to_ascii_lowercase();
-            let expected_bytes = base64::engine::general_purpose::STANDARD
-                .decode(encoded.as_bytes())
-                .map_err(|e| RegistryError::InvalidMetadata {
-                    message: format!("Invalid integrity value '{}': {}", integrity, e),
-                })?;
-
-            let matches = match algo.as_str() {
-                "sha256" => expected_bytes == Sha256::digest(&content).to_vec(),
-                "sha384" => expected_bytes == Sha384::digest(&content).to_vec(),
-                "sha512" => expected_bytes == Sha512::digest(&content).to_vec(),
-                other => {
-                    warn!("Unsupported integrity algorithm: {}", other);
-                    true
+        let expected_shasum_owned = expected_shasum.map(|s| s.to_string());
+        let expected_integrity_owned = expected_integrity.map(|s| s.to_string());
+        let content =
+            tokio::task::spawn_blocking(move || -> std::result::Result<Vec<u8>, RegistryError> {
+                if let Some(expected) = &expected_shasum_owned {
+                    let mut sha1_hasher = sha1::Sha1::new();
+                    sha1_hasher.update(&content);
+                    let actual = hex::encode(sha1_hasher.finalize());
+                    if !actual.eq_ignore_ascii_case(expected) {
+                        return Err(RegistryError::InvalidMetadata {
+                            message: format!(
+                                "Cached package checksum mismatch: expected {}, got {}",
+                                expected, actual
+                            ),
+                        });
+                    }
                 }
-            };
 
-            if !matches {
-                return Err(RegistryError::InvalidMetadata {
-                    message: "Cached package integrity mismatch".to_string(),
-                });
-            }
-        }
+                if let Some(integrity) = &expected_integrity_owned
+                    && let Some((algo_raw, encoded)) = integrity.split_once('-')
+                {
+                    let algo = algo_raw.to_ascii_lowercase();
+                    let expected_bytes = base64::engine::general_purpose::STANDARD
+                        .decode(encoded.as_bytes())
+                        .map_err(|e| RegistryError::InvalidMetadata {
+                            message: format!("Invalid integrity value '{}': {}", integrity, e),
+                        })?;
 
-        Ok(())
+                    let matches = match algo.as_str() {
+                        "sha256" => expected_bytes == Sha256::digest(&content).to_vec(),
+                        "sha384" => expected_bytes == Sha384::digest(&content).to_vec(),
+                        "sha512" => expected_bytes == Sha512::digest(&content).to_vec(),
+                        other => {
+                            warn!("Unsupported integrity algorithm: {}", other);
+                            true
+                        }
+                    };
+
+                    if !matches {
+                        return Err(RegistryError::InvalidMetadata {
+                            message: "Cached package integrity mismatch".to_string(),
+                        });
+                    }
+                }
+
+                Ok(content)
+            })
+            .await
+            .map_err(|e| RegistryError::InvalidMetadata {
+                message: format!("Hash worker panicked: {e}"),
+            })??;
+
+        Ok(content)
     }
 
-    /// Store downloaded package file in content-addressable storage
+    /// Store downloaded package file in content-addressable storage.
     ///
-    /// Computes Blake3 hash of the file and stores it in CAS for future deduplication.
-    /// Returns the path in CAS.
+    /// Hardlinks (or reflinks) the existing on-disk cache file into the
+    /// CAS fanout. For a 500 MB tarball this is O(metadata) — one stat
+    /// + one rename-class syscall — instead of the O(N) read + write
+    /// of the byte-copying path.
+    ///
+    /// Falls back to byte-copy via `store_in_cas_bytes` only on
+    /// filesystems that reject both reflink and hardlink (e.g. across a
+    /// FUSE boundary).
     async fn store_in_cas(&self, file_path: &PathBuf) -> Result<PathBuf> {
-        // Read file and compute hash
-        let content = fs::read(file_path).await?;
-        let hash = ContentHash::from_bytes(&content);
+        match self
+            .cas
+            .store_from_path(file_path, ContentType::Package)
+            .await
+        {
+            Ok((path, _hash)) => Ok(path),
+            Err(e) => {
+                debug!(
+                    "CAS hardlink path failed for {}: {e}; falling back to byte copy",
+                    file_path.display()
+                );
+                let content = fs::read(file_path).await?;
+                self.store_in_cas_bytes(content).await
+            }
+        }
+    }
 
-        // Store in CAS (idempotent - if exists, returns existing path)
+    /// Store already-loaded tarball bytes in CAS.
+    async fn store_in_cas_bytes(&self, content: Vec<u8>) -> Result<PathBuf> {
+        let (content, hash) = tokio::task::spawn_blocking(move || {
+            let h = ContentHash::from_bytes(&content);
+            (content, h)
+        })
+        .await
+        .map_err(|e| RegistryError::InvalidMetadata {
+            message: format!("Hash worker panicked: {e}"),
+        })?;
+
         let cas_path = self
             .cas
             .store(&content, &hash, ContentType::Package)
@@ -1471,8 +1557,10 @@ impl RegistryClient {
 
                 self.metadata_cache
                     .insert(metadata_url.to_string(), cached.clone());
-                // Update persisted validators and save
+                // Update persisted validators and save the body so a cold
+                // start can answer a future 304 without a second GET.
                 self.update_and_save_validators(metadata_url, &cached);
+                self.persist_metadata_body(metadata_url, &npm);
                 Ok(npm)
             }
             reqwest::StatusCode::NOT_MODIFIED => {
@@ -1484,6 +1572,23 @@ impl RegistryClient {
                     // refresh persisted validators
                     self.update_and_save_validators(metadata_url, &cached);
                     Ok(cached.npm.clone())
+                } else if let Some(body) = self.load_persisted_metadata_body(metadata_url).await {
+                    // In-memory cache was empty (cold start after restart),
+                    // but the body is on disk and our If-None-Match validator
+                    // proved the server-side version still matches. Hydrate
+                    // the in-memory cache and return the persisted body —
+                    // saves a full unconditional GET on every cold start.
+                    debug!(
+                        "fetch_npm_metadata: 304 with empty in-memory cache; \
+                         hydrated body from disk for {metadata_url}"
+                    );
+                    let cached = CachedResponse {
+                        etag: None,
+                        last_modified: None,
+                        npm: body.clone(),
+                    };
+                    self.metadata_cache.insert(metadata_url.to_string(), cached);
+                    Ok(body)
                 } else {
                     // No cache to use; fallback to a fresh fetch
                     let npm: NpmPackageResponse =
@@ -1498,6 +1603,39 @@ impl RegistryClient {
             }
             .into()),
         }
+    }
+
+    /// Path for the on-disk copy of an NPM metadata response body. Keyed by
+    /// a Blake3 hash of the URL so the layout is stable across restarts.
+    fn metadata_body_path(&self, url: &str) -> PathBuf {
+        let hash = blake3::hash(url.as_bytes()).to_hex().to_string();
+        self.cache_dir.join("metadata-bodies").join(hash)
+    }
+
+    /// Best-effort: load a previously-persisted NPM metadata body for `url`.
+    async fn load_persisted_metadata_body(&self, url: &str) -> Option<NpmPackageResponse> {
+        let path = self.metadata_body_path(url);
+        let bytes = tokio::fs::read(&path).await.ok()?;
+        serde_json::from_slice::<NpmPackageResponse>(&bytes).ok()
+    }
+
+    /// Best-effort: persist the latest fetched body to disk so a future cold
+    /// start can answer a 304 without a second unconditional GET.
+    fn persist_metadata_body(&self, url: &str, npm: &NpmPackageResponse) {
+        let Ok(bytes) = serde_json::to_vec(npm) else {
+            return;
+        };
+        let path = self.metadata_body_path(url);
+        tokio::spawn(async move {
+            if let Some(parent) = path.parent()
+                && tokio::fs::create_dir_all(parent).await.is_err()
+            {
+                return;
+            }
+            if let Err(e) = tokio::fs::write(&path, bytes).await {
+                debug!("metadata body persist failed for {}: {e}", path.display());
+            }
+        });
     }
 
     fn update_and_save_validators(&self, url: &str, cached: &CachedResponse) {

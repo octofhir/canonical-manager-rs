@@ -696,8 +696,30 @@ impl PackageExtractor {
                     // the caller. Everything else falls through to the
                     // generic `entry.unpack` which handles dirs and
                     // metadata-only tar entries correctly.
+                    //
+                    // `package/openapi/` and `package/other/` are excluded:
+                    // they carry OpenAPI specs (e.g.
+                    // `us-core-{client,server}.openapi.json`) and IG build
+                    // metadata (`ig-r4.jsonX`, `spec.internals`), never
+                    // FHIR resources. `parse_fhir_resource_with_bytes`
+                    // would otherwise return `Ok(None)` for them because
+                    // they have no `resourceType`, but the US Core 6.1
+                    // OpenAPI specs ship with a UTF-8 BOM that
+                    // `serde_json::from_slice` rejects with
+                    // "expected value at line 1 column 1" before the
+                    // resourceType check runs — failing the whole
+                    // extract task and propagating up to
+                    // `install_packages_parallel`, which swallows the
+                    // error as a WARN and silently reports
+                    // "Stored 0 packages". Filter at capture time so
+                    // both inputs are dropped on the floor.
+                    let entry_is_openapi_or_other = entry_path.iter().any(|c| {
+                        c == std::ffi::OsStr::new("openapi")
+                            || c == std::ffi::OsStr::new("other")
+                    });
                     let is_capturable_json = entry_type.is_file()
                         && entry_path.starts_with("package")
+                        && !entry_is_openapi_or_other
                         && entry_path
                             .extension()
                             .and_then(|s| s.to_str())

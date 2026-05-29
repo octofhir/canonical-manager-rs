@@ -105,7 +105,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     println!("📈 Resource type distribution:");
     let mut sorted_types: Vec<_> = type_counts.into_iter().collect();
-    sorted_types.sort_by(|a, b| b.1.cmp(&a.1));
+    sorted_types.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     for (resource_type, count) in sorted_types.iter().take(5) {
         println!("  • {resource_type}: {count}");

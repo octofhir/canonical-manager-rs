@@ -74,9 +74,46 @@ pub struct PackageExtractor {
 ///     files: HashMap::new(),
 /// };
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct PackageIndex {
     pub files: HashMap<String, IndexEntry>,
+}
+
+impl<'de> Deserialize<'de> for PackageIndex {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawPackageIndex {
+            files: IndexFiles,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum IndexFiles {
+            Map(HashMap<String, IndexEntry>),
+            List(Vec<IndexedFile>),
+        }
+
+        #[derive(Deserialize)]
+        struct IndexedFile {
+            filename: String,
+            #[serde(flatten)]
+            entry: IndexEntry,
+        }
+
+        let raw = RawPackageIndex::deserialize(deserializer)?;
+        let files = match raw.files {
+            IndexFiles::Map(files) => files,
+            IndexFiles::List(files) => files
+                .into_iter()
+                .map(|file| (file.filename, file.entry))
+                .collect(),
+        };
+
+        Ok(Self { files })
+    }
 }
 
 /// Metadata for a single file in a FHIR package index.
@@ -816,15 +853,25 @@ impl PackageExtractor {
         };
 
         let mut candidates: Vec<std::path::PathBuf> = Vec::new();
-        if self.skip_resource_disk_write {
+        if let Some(index) = &index {
+            for filename in index.files.keys() {
+                let p = package_dir.join(filename);
+                if raw.contains_key(&p) || p.exists() {
+                    candidates.push(p);
+                } else {
+                    warn!("File listed in .index.json not found: {}", filename);
+                }
+            }
+        } else if self.skip_resource_disk_write {
             // No on-disk resource files: walk the captured-bytes map
-            // for everything under `package/` that isn't manifest /
-            // index metadata.
+            // for direct `package/*.json` resources, matching the
+            // non-recursive disk path below.
             for p in raw.keys() {
                 let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
                     continue;
                 };
-                if p.extension().and_then(|s| s.to_str()) == Some("json")
+                if p.parent() == Some(package_dir.as_path())
+                    && p.extension().and_then(|s| s.to_str()) == Some("json")
                     && !name.starts_with('.')
                     && name != "package.json"
                 {
@@ -854,7 +901,7 @@ impl PackageExtractor {
         use futures_util::stream::{self, StreamExt};
         let concurrency = num_cpus_hint();
         let index_ref = &index;
-        let resources: Vec<FhirResource> = stream::iter(candidates.into_iter())
+        let resources: Vec<FhirResource> = stream::iter(candidates)
             .map(|p| async move {
                 let bytes_owned: Option<Vec<u8>> = raw.get(&p).cloned();
                 self.parse_fhir_resource_with_bytes(&p, index_ref, bytes_owned)
@@ -938,8 +985,54 @@ impl PackageExtractor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::PackageSpec;
+    use crate::registry::PackageMetadata;
     use std::fs;
+    use std::io::Write;
     use tempfile::TempDir;
+
+    fn append_tgz_entry<W: Write>(tar: &mut tar::Builder<W>, path: &str, content: &[u8]) {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(content.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar.append_data(&mut header, path, content).unwrap();
+    }
+
+    fn create_package_tgz(path: &Path, entries: &[(&str, &[u8])]) {
+        let tgz = fs::File::create(path).unwrap();
+        let enc = flate2::write::GzEncoder::new(tgz, flate2::Compression::default());
+        let mut tar = tar::Builder::new(enc);
+
+        for (entry_path, content) in entries {
+            append_tgz_entry(&mut tar, entry_path, content);
+        }
+
+        tar.into_inner().unwrap().finish().unwrap();
+    }
+
+    fn package_download(file_path: PathBuf) -> PackageDownload {
+        let spec = PackageSpec {
+            name: "test.package".to_string(),
+            version: "1.0.0".to_string(),
+            priority: 1,
+            url: None,
+        };
+        let metadata = PackageMetadata {
+            name: spec.name.clone(),
+            version: spec.version.clone(),
+            description: None,
+            fhir_version: "4.0.1".to_string(),
+            dependencies: HashMap::new(),
+            canonical_base: None,
+        };
+
+        PackageDownload {
+            spec,
+            file_path,
+            metadata,
+        }
+    }
 
     #[test]
     fn test_package_extractor_creation() {
@@ -1063,5 +1156,59 @@ mod tests {
             .await
             .unwrap();
         assert!(resource.is_none()); // Should be filtered out as invalid
+    }
+
+    #[tokio::test]
+    async fn test_in_memory_extraction_ignores_nested_json_files() {
+        let temp_dir = TempDir::new().unwrap();
+        let extractor = PackageExtractor::new_in_memory(temp_dir.path().to_path_buf());
+        let tgz_path = temp_dir.path().join("test-package-1.0.0.tgz");
+
+        let manifest = br#"{
+            "name": "test.package",
+            "version": "1.0.0",
+            "fhirVersions": ["4.0.1"],
+            "dependencies": {}
+        }"#;
+        let resource = br#"{
+            "resourceType": "Patient",
+            "id": "example"
+        }"#;
+        let index = br#"{
+            "files": [
+                {
+                    "filename": "Patient-example.json",
+                    "resourceType": "Patient",
+                    "id": "example"
+                }
+            ]
+        }"#;
+        let nested_openapi = b"\xEF\xBB\xBF{\"openapi\":\"3.0.0\",\"info\":{\"title\":\"US Core\",\"version\":\"6.1.0\"}}";
+        create_package_tgz(
+            &tgz_path,
+            &[
+                ("package/package.json", manifest),
+                ("package/.index.json", index),
+                ("package/Patient-example.json", resource),
+                (
+                    "package/openapi/us-core-client.openapi.json",
+                    nested_openapi,
+                ),
+            ],
+        );
+
+        let extracted = extractor
+            .extract_package(package_download(tgz_path))
+            .await
+            .unwrap();
+
+        assert_eq!(extracted.resources.len(), 1);
+        assert_eq!(extracted.resources[0].resource_type, "Patient");
+        assert!(
+            extracted
+                .raw_bytes
+                .keys()
+                .any(|path| path.ends_with("package/openapi/us-core-client.openapi.json"))
+        );
     }
 }

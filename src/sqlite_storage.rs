@@ -474,7 +474,7 @@ impl SqliteStorage {
             .map(|r| (r.clone(), raw.get(&r.file_path).cloned()))
             .collect();
 
-        let rows: Vec<Result<ResourceRow>> = stream::iter(work.into_iter())
+        let rows: Vec<Result<ResourceRow>> = stream::iter(work)
             .map(|(resource, captured)| {
                 let file_cas = file_cas.clone();
                 let extraction_path = extraction_path.clone();

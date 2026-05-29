@@ -110,6 +110,7 @@ fn build_packages(temp: &Path) -> Vec<ExtractedPackage> {
             manifest,
             resources,
             extraction_path: pkg_dir,
+            raw_bytes: HashMap::new(),
         });
     }
     packages

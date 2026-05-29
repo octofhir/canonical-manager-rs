@@ -1274,7 +1274,7 @@ impl RegistryClient {
     ///
     /// Hardlinks (or reflinks) the existing on-disk cache file into the
     /// CAS fanout. For a 500 MB tarball this is O(metadata) — one stat
-    /// + one rename-class syscall — instead of the O(N) read + write
+    /// plus one rename-class syscall — instead of the O(N) read + write
     /// of the byte-copying path.
     ///
     /// Falls back to byte-copy via `store_in_cas_bytes` only on

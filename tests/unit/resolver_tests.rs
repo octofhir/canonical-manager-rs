@@ -136,8 +136,7 @@ async fn test_version_fallback_resolution() {
         .await;
 
     // The implementation should find the versioned resource as fallback
-    if result.is_ok() {
-        let resolved = result.unwrap();
+    if let Ok(resolved) = result {
         match resolved.resolution_path {
             ResolutionPath::VersionFallback {
                 requested,
@@ -186,8 +185,7 @@ async fn test_resolution_with_specific_version() {
         )
         .await;
 
-    if result.is_ok() {
-        let resolved = result.unwrap();
+    if let Ok(resolved) = result {
         assert_eq!(resolved.resource.id, "test-patient");
         // Verify we got the correct version
         assert_eq!(resolved.resource.version.as_deref(), Some("1.0.0"));
@@ -271,8 +269,7 @@ async fn test_fuzzy_matching() {
         .resolve("http://example.com/StructureDefinition/test-patien")
         .await; // Missing 't'
 
-    if result.is_ok() {
-        let resolved = result.unwrap();
+    if let Ok(resolved) = result {
         match resolved.resolution_path {
             ResolutionPath::FuzzyMatch { similarity } => {
                 assert!(similarity > 0.7);

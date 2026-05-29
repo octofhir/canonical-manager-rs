@@ -52,7 +52,7 @@ fn build_tarball(target_bytes: usize) -> Vec<u8> {
         // Pseudo-random body files. Use a simple LCG so different
         // payloads don't collapse under gzip but the bench is still
         // deterministic across runs.
-        let mut state: u64 = 0xc0ffee_d00d;
+        let mut state: u64 = 0x00c0_ffee_d00d;
         for i in 0..count {
             let mut body = vec![0u8; FILE_BYTES];
             for byte in body.iter_mut() {

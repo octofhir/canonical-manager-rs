@@ -72,6 +72,7 @@ pub async fn build_extracted_packages(
             manifest,
             resources,
             extraction_path: PathBuf::from(temp_root),
+            raw_bytes: HashMap::new(),
         });
     }
     batch
@@ -137,6 +138,7 @@ pub async fn build_fixture(resources_per_package: usize, packages: usize) -> Pop
             manifest,
             resources,
             extraction_path: PathBuf::from(temp.path()),
+            raw_bytes: HashMap::new(),
         });
     }
     storage.add_packages_batch(batch).await.unwrap();

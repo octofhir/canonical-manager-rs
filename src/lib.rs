@@ -1563,7 +1563,7 @@ impl CanonicalManager {
         });
 
         use futures_util::stream::{self, StreamExt};
-        let results: Vec<(registry::PackageDownload, package::ExtractedPackage)> =
+        let pipeline_results: Vec<Result<(registry::PackageDownload, package::ExtractedPackage)>> =
             stream::iter(remote_specs.into_iter())
                 .map(|spec| {
                     let extractor = Arc::clone(&extractor);
@@ -1575,17 +1575,28 @@ impl CanonicalManager {
                     }
                 })
                 .buffer_unordered(parallel)
-                .filter_map(|r| async move {
-                    match r {
-                        Ok(pair) => Some(pair),
-                        Err(e) => {
-                            warn!("Package pipeline task failed: {e}");
-                            None
-                        }
-                    }
-                })
                 .collect()
                 .await;
+
+        let mut results = Vec::new();
+        let mut errors = Vec::new();
+        for result in pipeline_results {
+            match result {
+                Ok(pair) => results.push(pair),
+                Err(e) => errors.push(e),
+            }
+        }
+
+        if !errors.is_empty() {
+            warn!(
+                "Package pipeline completed with {} failures out of {} packages",
+                errors.len(),
+                results.len() + errors.len()
+            );
+            if let Some(first) = errors.into_iter().next() {
+                return Err(first);
+            }
+        }
 
         let pipeline_duration = pipeline_start.elapsed();
         info!(

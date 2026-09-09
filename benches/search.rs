@@ -2,7 +2,8 @@
 //!
 //! Drives [`SearchEngine::search`] under three workloads: text-only,
 //! type-filter only, and combined text + type filter. Index build cost
-//! is measured separately (first call lazily builds it).
+//! is excluded from the warmed queries. Cache churn rotates 1100 queries
+//! through the bounded cache to measure sustained eviction of populated results.
 //!
 //! Run with `cargo bench --bench search`.
 
@@ -67,11 +68,38 @@ fn bench_search(c: &mut Criterion) {
 
     group.finish();
 
+    let churn_fixture = runtime.block_on(common::build_fixture(50, 1));
+    let churn_engine = SearchEngine::new(churn_fixture.storage.clone());
+    let queries: Vec<_> = (0..1100)
+        // All limits are capped at 1000 by search(), so every distinct cache
+        // key returns the same 50 resources. No empty-page or sample mix bias.
+        .map(|index| SearchQuery {
+            limit: Some(1000 + index),
+            ..Default::default()
+        })
+        .collect();
+    for query in &queries {
+        let result = runtime.block_on(churn_engine.search(query)).unwrap();
+        assert_eq!(result.resources.len(), 50);
+    }
+    let mut next = 0;
+    c.bench_function("search/cache_churn", |b| {
+        b.iter(|| {
+            let result = runtime
+                .block_on(churn_engine.search(&queries[next]))
+                .unwrap();
+            next = (next + 1) % queries.len();
+            black_box(result);
+        });
+    });
+    drop(churn_engine);
+
     // Same drop-order constraint as resolve.rs: deadpool needs the
     // reactor at drop time.
     drop(engine);
     runtime.block_on(async move {
         drop(fixture);
+        drop(churn_fixture);
     });
 }
 

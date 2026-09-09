@@ -1,10 +1,13 @@
 //! Search engine for FHIR resources
 
+mod cache;
+
 use crate::concurrency::ConcurrentMap;
 use crate::domain::ResourceIndex;
 use crate::error::Result;
 use crate::package::FhirResource;
 use crate::traits::SearchStorage;
+use cache::SearchCache;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -57,9 +60,8 @@ pub struct SearchEngine {
     /// cancelled build never leaves partial state visible to readers.
     text_index: parking_lot::RwLock<Arc<TextIndex>>,
     filters: FilterEngine,
-    // Simple LRU-style cache for search results
-    search_cache: ConcurrentMap<String, (SearchResult, Instant)>,
-    cache_ttl: Duration,
+    // Strictly bounded oldest-write-first cache with concurrent reads.
+    search_cache: SearchCache,
     // Lazily build the text index only when needed
     index_built: std::sync::atomic::AtomicBool,
     index_build_lock: tokio::sync::Mutex<()>,
@@ -665,8 +667,7 @@ impl SearchEngine {
             storage,
             text_index: parking_lot::RwLock::new(Arc::new(TextIndex::new())),
             filters: FilterEngine::new(),
-            search_cache: ConcurrentMap::new(),
-            cache_ttl: Duration::from_secs(300), // 5 minutes cache TTL
+            search_cache: SearchCache::new(Duration::from_secs(300)),
             index_built: std::sync::atomic::AtomicBool::new(false),
             index_build_lock: tokio::sync::Mutex::new(()),
         }
@@ -785,30 +786,12 @@ impl SearchEngine {
 
     /// Get cached search result if available and not expired
     fn get_cached_result(&self, cache_key: &str) -> Option<SearchResult> {
-        if let Some((result, timestamp)) = self.search_cache.get_cloned(&cache_key.to_string())
-            && timestamp.elapsed() < self.cache_ttl
-        {
-            return Some(result);
-        }
-        None
+        self.search_cache.get(cache_key)
     }
 
     /// Cache a search result
     fn cache_result(&self, cache_key: &str, result: &SearchResult) {
-        // Simple cache size management - remove oldest entries if cache gets too large
-        if self.search_cache.len() > 1000 {
-            let oldest_key = self
-                .search_cache
-                .iter_cloned()
-                .into_iter()
-                .min_by_key(|(_, (_, ts))| *ts)
-                .map(|(k, _)| k);
-            if let Some(k) = oldest_key {
-                self.search_cache.remove(&k);
-            }
-        }
-        self.search_cache
-            .insert(cache_key.to_string(), (result.clone(), Instant::now()));
+        self.search_cache.insert(cache_key, result);
     }
 
     /// Clear the search cache

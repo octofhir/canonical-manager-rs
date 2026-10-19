@@ -60,7 +60,6 @@ human-panic = "2.0.4"
 colored = { version = "3", optional = true }
 
 # File handling
-zip = "7"
 flate2 = "1"
 tar = "0.4.45"
 

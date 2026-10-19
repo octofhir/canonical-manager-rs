@@ -6,6 +6,12 @@ versioning follows [Semver](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.4] — 2026-10-19
+
+### Removed
+
+- Removed the unused `zip` dependency and its transitive dependencies.
+
 ## [0.2.0] — 2026-05-07
 
 Major P0+P1+P2 milestone bump. Registry rewrite, audit fixes, virtual

@@ -269,6 +269,10 @@ struct NpmPackageResponse {
     version: Option<String>,
     #[serde(rename = "fhirVersions")]
     fhir_versions: Option<Vec<String>>,
+    // Some registry entries (e.g. hl7.fhir.r4b.core) publish only the
+    // singular `fhirVersion` ("R4B") instead of `fhirVersions`.
+    #[serde(rename = "fhirVersion")]
+    fhir_version: Option<String>,
     description: Option<String>,
     canonical: Option<String>,
 }
@@ -282,9 +286,24 @@ struct NpmVersionInfo {
     description: Option<String>,
     #[serde(rename = "fhirVersions")]
     fhir_versions: Option<Vec<String>>,
+    #[serde(rename = "fhirVersion")]
+    fhir_version: Option<String>,
     dependencies: Option<HashMap<String, String>>,
     canonical: Option<String>,
     dist: NpmDistInfo,
+}
+
+/// Pick the package FHIR version from `fhirVersions`, falling back to the
+/// singular `fhirVersion`, then to R4 when the registry publishes neither.
+fn resolve_fhir_version(
+    fhir_versions: Option<&Vec<String>>,
+    fhir_version: Option<&String>,
+) -> String {
+    fhir_versions
+        .and_then(|versions| versions.first())
+        .or(fhir_version)
+        .cloned()
+        .unwrap_or_else(|| "4.0.1".to_string())
 }
 
 /// NPM distribution information
@@ -1385,12 +1404,10 @@ impl RegistryClient {
                     message: "No download URL in metadata".to_string(),
                 })?;
 
-            let fhir_version = npm_response
-                .fhir_versions
-                .as_ref()
-                .and_then(|versions| versions.first())
-                .unwrap_or(&"4.0.1".to_string())
-                .clone();
+            let fhir_version = resolve_fhir_version(
+                npm_response.fhir_versions.as_ref(),
+                npm_response.fhir_version.as_ref(),
+            );
 
             let metadata = PackageMetadata {
                 name: name.to_string(),
@@ -1457,12 +1474,10 @@ impl RegistryClient {
         let dependencies = version_info.dependencies.clone().unwrap_or_default();
 
         // Determine FHIR version
-        let fhir_version = version_info
-            .fhir_versions
-            .as_ref()
-            .and_then(|versions| versions.first())
-            .unwrap_or(&"4.0.1".to_string())
-            .clone();
+        let fhir_version = resolve_fhir_version(
+            version_info.fhir_versions.as_ref(),
+            version_info.fhir_version.as_ref(),
+        );
 
         let metadata = PackageMetadata {
             name: name.to_string(),
@@ -1958,6 +1973,33 @@ mod tests {
     use super::*;
     use crate::config::RegistryConfig;
     use tempfile::TempDir;
+
+    #[test]
+    fn version_info_reads_singular_fhir_version() {
+        // Shape published by packages.fhir.org for hl7.fhir.r4b.core@4.3.0
+        let info: NpmVersionInfo = serde_json::from_value(serde_json::json!({
+            "name": "hl7.fhir.r4b.core",
+            "version": "4.3.0",
+            "fhirVersion": "R4B",
+            "dist": {"tarball": "https://packages.fhir.org/hl7.fhir.r4b.core/4.3.0"}
+        }))
+        .unwrap();
+        assert_eq!(
+            resolve_fhir_version(info.fhir_versions.as_ref(), info.fhir_version.as_ref()),
+            "R4B"
+        );
+    }
+
+    #[test]
+    fn fhir_versions_take_precedence_and_r4_is_the_fallback() {
+        let versions = vec!["5.0.0".to_string()];
+        let singular = "R4B".to_string();
+        assert_eq!(
+            resolve_fhir_version(Some(&versions), Some(&singular)),
+            "5.0.0"
+        );
+        assert_eq!(resolve_fhir_version(None, None), "4.0.1");
+    }
 
     #[tokio::test]
     async fn test_registry_client_creation() {

@@ -6,6 +6,14 @@ versioning follows [Semver](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.5] — 2026-10-23
+
+### Fixed
+
+- Registry metadata that publishes only the singular `fhirVersion`
+  (e.g. `hl7.fhir.r4b.core` → `"R4B"`) no longer falls back to `4.0.1`,
+  which made R4B servers reject their own core package as R4.
+
 ## [0.2.4] — 2026-10-19
 
 ### Removed

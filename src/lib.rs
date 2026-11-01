@@ -938,18 +938,7 @@ impl CanonicalManager {
             return Ok(());
         };
         tokio::fs::create_dir_all(&target).await?;
-        let source = self
-            .config
-            .storage
-            .packages_dir
-            .join(format!("{name}-{version}"));
-        if !tokio::fs::try_exists(&source).await.unwrap_or(false) {
-            debug!(
-                "FHIR cache mirror skipped: source missing at {}",
-                source.display()
-            );
-            return Ok(());
-        }
+        let source = self.package_dir(name, version).await?;
         let linker = self.linker_for(&source, &target).await?;
         store::populate_fhir_cache(&target, name, version, &source, &linker).await?;
         Ok(())
@@ -1701,6 +1690,130 @@ impl CanonicalManager {
     /// on APFS, more on slow disks. Repeated `materialise_packages` /
     /// `populate_fhir_cache_all` invocations between the same root pair
     /// would otherwise re-pay that cost. Cache hit is sub-µs.
+    /// The folder of an installed package, `<packages_dir>/<name>-<version>`, with its
+    /// files under `package/` as in the published tarball (`package/package.json`, the
+    /// resources).
+    ///
+    /// Installs keep package contents in the content store, not as a folder; the folder is
+    /// laid out from the store on first use, linking files where the filesystem allows and
+    /// copying otherwise. The files are shared with the store: treat them as read-only.
+    ///
+    /// Fails when the package is not installed, or with a custom storage backend that keeps
+    /// no files.
+    pub async fn package_dir(&self, name: &str, version: &str) -> Result<std::path::PathBuf> {
+        let folder = self
+            .config
+            .storage
+            .packages_dir
+            .join(format!("{name}-{version}"));
+        if tokio::fs::try_exists(folder.join("package").join("package.json"))
+            .await
+            .unwrap_or(false)
+        {
+            return Ok(folder);
+        }
+        self.lay_out_package(name, version, &folder).await?;
+        Ok(folder)
+    }
+
+    /// Lays out the folder of an installed package from the file store.
+    #[cfg(feature = "sqlite")]
+    async fn lay_out_package(
+        &self,
+        name: &str,
+        version: &str,
+        folder: &std::path::Path,
+    ) -> Result<()> {
+        let storage = self.storage.sqlite_backend().ok_or_else(|| {
+            FcmError::Storage(crate::error::StorageError::IoError {
+                message: format!("{name}@{version}: the storage backend keeps no package files"),
+            })
+        })?;
+        let files = storage.package_files(name, version).await?.ok_or_else(|| {
+            FcmError::Registry(crate::error::RegistryError::PackageNotFound {
+                name: name.to_string(),
+                version: version.to_string(),
+            })
+        })?;
+        if files.is_empty() {
+            return Err(FcmError::Storage(crate::error::StorageError::IoError {
+                message: format!("{name}@{version}: no package files in the store"),
+            }));
+        }
+
+        // Lay the folder out next to its final place, then move it there, so a reader never
+        // sees half a package.
+        let staging = folder.with_extension(format!("tmp-{}", uuid::Uuid::new_v4()));
+        let blobs = storage.file_cas().paths().blobs();
+        let linker = self
+            .linker_for(&blobs, &self.config.storage.packages_dir)
+            .await?;
+        let laid_out = async {
+            for (relative, blob) in &files {
+                let relative = std::path::Path::new(relative);
+                if relative.is_absolute()
+                    || relative
+                        .components()
+                        .any(|c| !matches!(c, std::path::Component::Normal(_)))
+                {
+                    warn!(
+                        "{name}@{version}: skipping file outside the package: {}",
+                        relative.display()
+                    );
+                    continue;
+                }
+                linker.materialise(blob, &staging.join(relative)).await?;
+            }
+            // Installs made before the manifest was stored have resources only.
+            let manifest = staging.join("package").join("package.json");
+            if !tokio::fs::try_exists(&manifest).await.unwrap_or(false) {
+                tokio::fs::create_dir_all(staging.join("package")).await?;
+                let minimal = serde_json::json!({ "name": name, "version": version });
+                tokio::fs::write(&manifest, serde_json::to_vec_pretty(&minimal)?).await?;
+            }
+            Ok::<_, FcmError>(())
+        }
+        .await;
+        if let Err(e) = laid_out {
+            let _ = tokio::fs::remove_dir_all(&staging).await;
+            return Err(e);
+        }
+        if tokio::fs::try_exists(folder).await.unwrap_or(false) {
+            // An incomplete folder from an older install, or another process won the race.
+            if tokio::fs::try_exists(folder.join("package").join("package.json"))
+                .await
+                .unwrap_or(false)
+            {
+                let _ = tokio::fs::remove_dir_all(&staging).await;
+                return Ok(());
+            }
+            tokio::fs::remove_dir_all(folder).await?;
+        }
+        if let Err(e) = tokio::fs::rename(&staging, folder).await {
+            let _ = tokio::fs::remove_dir_all(&staging).await;
+            if tokio::fs::try_exists(folder.join("package").join("package.json"))
+                .await
+                .unwrap_or(false)
+            {
+                return Ok(());
+            }
+            return Err(e.into());
+        }
+        Ok(())
+    }
+
+    #[cfg(not(feature = "sqlite"))]
+    async fn lay_out_package(
+        &self,
+        name: &str,
+        version: &str,
+        _folder: &std::path::Path,
+    ) -> Result<()> {
+        Err(FcmError::Storage(crate::error::StorageError::IoError {
+            message: format!("{name}@{version}: the storage backend keeps no package files"),
+        }))
+    }
+
     async fn linker_for(
         &self,
         source: &std::path::Path,
@@ -2740,16 +2853,16 @@ impl CanonicalManager {
 
         let mut total = store::MaterialiseReport::default();
         for p in self.storage.list_packages().await? {
-            let source = store_root.join(format!("{}-{}", p.name, p.version));
-            if !tokio::fs::try_exists(&source).await.unwrap_or(false) {
-                debug!(
-                    "Skipping FHIR cache populate for {}@{}: source missing at {}",
-                    p.name,
-                    p.version,
-                    source.display()
-                );
-                continue;
-            }
+            let source = match self.package_dir(&p.name, &p.version).await {
+                Ok(source) => source,
+                Err(e) => {
+                    warn!(
+                        "Skipping FHIR cache populate for {}@{}: {e}",
+                        p.name, p.version
+                    );
+                    continue;
+                }
+            };
             let report =
                 store::populate_fhir_cache(&target, &p.name, &p.version, &source, &linker).await?;
             total.merge(&report);
@@ -2799,16 +2912,13 @@ impl CanonicalManager {
 
         let mut total = store::MaterialiseReport::default();
         for p in self.storage.list_packages().await? {
-            let source = store_root.join(format!("{}-{}", p.name, p.version));
-            if !tokio::fs::try_exists(&source).await.unwrap_or(false) {
-                debug!(
-                    "Skipping materialise for {}@{}: source dir missing at {}",
-                    p.name,
-                    p.version,
-                    source.display()
-                );
-                continue;
-            }
+            let source = match self.package_dir(&p.name, &p.version).await {
+                Ok(source) => source,
+                Err(e) => {
+                    warn!("Skipping materialise for {}@{}: {e}", p.name, p.version);
+                    continue;
+                }
+            };
             let report =
                 store::materialise_package(project_root, &p.name, &p.version, &source, &linker)
                     .await?;
@@ -2930,6 +3040,14 @@ impl CanonicalManager {
         info!("Removing package: {}@{}", name, version);
 
         let removed = self.storage.remove_package(name, version).await?;
+        let folder = self
+            .config
+            .storage
+            .packages_dir
+            .join(format!("{name}-{version}"));
+        if tokio::fs::try_exists(&folder).await.unwrap_or(false) {
+            tokio::fs::remove_dir_all(&folder).await?;
+        }
 
         if removed {
             info!("Package removed successfully: {}@{}", name, version);

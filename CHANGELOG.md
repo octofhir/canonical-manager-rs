@@ -6,6 +6,24 @@ versioning follows [Semver](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `CanonicalManager::package_dir(name, version)`: the folder of an installed
+  package, `<packages_dir>/<name>-<version>` with its files under `package/`.
+  It is laid out from the content store on first use, linking files where the
+  filesystem allows.
+
+### Fixed
+
+- Packages installed through the parallel pipeline (the default install path)
+  had no folder in `packages_dir`, so the `~/.fhir/packages` mirror and
+  `materialise_packages` skipped them silently. Both now lay the folder out
+  from the store and log a warning when a package cannot be laid out.
+- `package.json` is kept in the content store with the resources, so a laid
+  out package has its manifest. Packages installed before this get a minimal
+  `package.json` with the name and version.
+- `remove_package` removes the package's folder too.
+
 ## [0.2.6] — 2026-11-01
 
 ### Fixed

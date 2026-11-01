@@ -626,6 +626,7 @@ impl SqliteStorage {
             })
         })?;
         let manifest_hash = ContentHash::from_bytes(manifest_json.as_bytes());
+        let (manifest_blob, manifest_size) = self.store_manifest(&package).await?;
         let installed_at = Utc::now().to_rfc3339();
         let resource_count = resource_data.len();
 
@@ -704,6 +705,7 @@ impl SqliteStorage {
                     upsert_blob_and_file(&tx, package_id, blob, r.blob_size, relpath, "resource", &now)?;
                 }
             }
+            upsert_blob_and_file(&tx, package_id, &manifest_blob, manifest_size, MANIFEST_PATH, "manifest", &now)?;
 
             tx.commit()?;
             Ok(())
@@ -728,6 +730,8 @@ impl SqliteStorage {
             version: String,
             fhir_version: String,
             manifest_hash: String,
+            manifest_blob: String,
+            manifest_size: u64,
             resource_count: usize,
             resources: Vec<ResourceRow>,
         }
@@ -757,12 +761,15 @@ impl SqliteStorage {
                     &package.raw_bytes,
                 )
                 .await?;
+            let (manifest_blob, manifest_size) = self.store_manifest(&package).await?;
 
             batch_data.push(BatchPackage {
                 name: package.name,
                 version: package.version,
                 fhir_version,
                 manifest_hash: manifest_hash.to_hex(),
+                manifest_blob,
+                manifest_size,
                 resource_count: resource_data.len(),
                 resources: resource_data,
             });
@@ -850,6 +857,7 @@ impl SqliteStorage {
                         upsert_blob_and_file(&tx, package_id, blob, r.blob_size, relpath, "resource", &now)?;
                     }
                 }
+                upsert_blob_and_file(&tx, package_id, &pkg.manifest_blob, pkg.manifest_size, MANIFEST_PATH, "manifest", &now)?;
             }
 
             drop(resource_stmt);
@@ -1238,6 +1246,64 @@ impl SqliteStorage {
             Ok(exists)
         })
         .await
+    }
+
+    /// Stores the package's `package.json` in the file CAS, as published when the extraction
+    /// kept it, so the package folder can be laid out again from the store. Returns the blob
+    /// hash and size.
+    async fn store_manifest(&self, package: &ExtractedPackage) -> Result<(String, u64)> {
+        let published = package.extraction_path.join(MANIFEST_PATH);
+        let bytes = match tokio::fs::read(&published).await {
+            Ok(bytes) => bytes,
+            Err(_) => serde_json::to_vec_pretty(&package.manifest).map_err(|e| {
+                FcmError::Storage(StorageError::IoError {
+                    message: format!("Failed to serialize manifest: {e}"),
+                })
+            })?,
+        };
+        let blob = self.file_cas.insert_bytes(&bytes).await?;
+        Ok((blob.as_hex().to_string(), bytes.len() as u64))
+    }
+
+    /// The files of an installed package as stored in the file CAS: each file's path inside
+    /// the package folder (`package/Patient-example.json`) and the blob holding its bytes.
+    /// `None` when the package is not installed.
+    pub async fn package_files(
+        &self,
+        name: &str,
+        version: &str,
+    ) -> Result<Option<Vec<(String, PathBuf)>>> {
+        let pkg_name = name.to_string();
+        let pkg_version = version.to_string();
+        let rows = self
+            .with_connection(move |conn| {
+                let package_id: Option<i64> = conn
+                    .query_row(
+                        "SELECT rowid FROM packages WHERE name = ?1 AND version = ?2",
+                        rusqlite::params![pkg_name, pkg_version],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                let Some(package_id) = package_id else {
+                    return Ok(None);
+                };
+                let mut stmt = conn.prepare(
+                    "SELECT file_path, blob_hash FROM package_files WHERE package_id = ?1",
+                )?;
+                let files = stmt
+                    .query_map([package_id], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(Some(files))
+            })
+            .await?;
+        Ok(rows.map(|files| {
+            files
+                .into_iter()
+                .map(|(path, hex)| (path, self.file_cas.path_for(&BlobHash::from_hex(hex))))
+                .collect()
+        }))
     }
 
     pub async fn remove_package(&self, name: &str, version: &str) -> Result<bool> {
@@ -1922,6 +1988,9 @@ impl SqliteStorage {
         Ok(mismatches)
     }
 }
+
+/// Where a package keeps its manifest, relative to the package folder.
+const MANIFEST_PATH: &str = "package/package.json";
 
 /// Inserts (or refreshes) a `blobs` row plus the matching
 /// `package_files` row inside an open transaction. Uses

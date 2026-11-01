@@ -6,6 +6,21 @@ versioning follows [Semver](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.6] — 2026-11-01
+
+### Fixed
+
+- Registry URLs with a path but no trailing slash work: the package was
+  appended without a `/` (`…/packageshl7.fhir.r6.core`). This also broke the
+  default fallback, `https://packages2.fhir.org/packages`, for every package.
+- Package metadata comes from the fallback registries when the primary does
+  not have the package, as downloads already did. `hl7.fhir.r6.core` is only on
+  packages2.fhir.org, so installing it failed while resolving dependencies.
+- Metadata requests are retried on network errors, server errors and 429, with
+  the same backoff as downloads; they were sent once.
+- A package missing from a registry is reported as `name@version`, not as the
+  metadata URL with `latest`.
+
 ## [0.2.5] — 2026-10-23
 
 ### Fixed

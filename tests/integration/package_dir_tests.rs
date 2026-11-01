@@ -73,6 +73,11 @@ async fn installed_packages_have_a_folder() {
         )
         .expect("manifest is JSON");
         assert_eq!(manifest["name"], "test.package", "workers = {workers}");
+        // The published manifest, not the minimal one for packages stored without it.
+        assert!(
+            manifest.as_object().is_some_and(|m| m.len() > 2),
+            "published package.json (workers = {workers}): {manifest}"
+        );
         let resources: Vec<_> = std::fs::read_dir(folder.join("package"))
             .expect("package folder")
             .flatten()

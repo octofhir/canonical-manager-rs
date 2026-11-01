@@ -237,6 +237,8 @@ async fn redundant_client_download_falls_through_on_404() {
         url: a.uri(),
         timeout: 30,
         retry_attempts: 1,
+        // Only the two mock backends: the default fallback is the real packages2.fhir.org.
+        fallbacks: Vec::new(),
         ..RegistryConfig::default()
     };
     let npm = NpmRegistryClient::new(&cfg_a, temp.path().join("a"))

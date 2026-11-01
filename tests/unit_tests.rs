@@ -7,6 +7,7 @@ mod unit {
     mod local_loading_tests;
     mod package_tests;
     mod registry_clients_tests;
+    mod registry_metadata_tests;
     mod registry_tests;
     mod resolver_proptest;
     mod resolver_tests;

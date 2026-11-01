@@ -31,7 +31,7 @@
 use crate::cas_storage::{CasStorage, ContentType};
 use crate::config::{PackageSpec, RegistryConfig};
 use crate::content_hash::ContentHash;
-use crate::error::{RegistryError, Result};
+use crate::error::{FcmError, RegistryError, Result};
 use base64::Engine;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
@@ -1382,10 +1382,22 @@ impl RegistryClient {
             name, version, registry_url
         );
 
-        // Build metadata URL for specific registry
-        let metadata_url = format!("{registry_url}{name}");
+        let metadata_url = package_metadata_url(registry_url, name);
 
-        let npm_response = self.fetch_npm_metadata(&metadata_url).await?;
+        // A 404 names the URL; report the package that was asked for instead.
+        let npm_response =
+            self.fetch_npm_metadata(&metadata_url)
+                .await
+                .map_err(|error| match error {
+                    FcmError::Registry(RegistryError::PackageNotFound { .. }) => {
+                        RegistryError::PackageNotFound {
+                            name: name.to_string(),
+                            version: version.to_string(),
+                        }
+                        .into()
+                    }
+                    other => other,
+                })?;
 
         debug!(
             "Metadata response has {} versions",
@@ -1495,13 +1507,39 @@ impl RegistryClient {
     }
 
     /// Get package metadata and download URL
+    /// Package metadata and download URL from the primary registry, or failing that from the
+    /// fallback registries in order, as downloads do. A package missing from the primary
+    /// (`hl7.fhir.r6.core` is only on packages2.fhir.org) still resolves.
     async fn get_package_metadata_and_url(
         &self,
         name: &str,
         version: &str,
     ) -> Result<(PackageMetadata, String, Option<String>, Option<String>)> {
-        self.get_package_metadata_and_url_from_registry(self.base_url.as_ref(), name, version)
+        let primary = self.base_url.as_str().to_string();
+        let mut last_error = match self
+            .get_package_metadata_and_url_from_registry(&primary, name, version)
             .await
+        {
+            Ok(found) => return Ok(found),
+            Err(error) => error,
+        };
+        let primary_norm = primary.trim_end_matches('/');
+        for fallback in &self.fallback_registries {
+            if fallback.trim_end_matches('/') == primary_norm {
+                continue;
+            }
+            match self
+                .get_package_metadata_and_url_from_registry(fallback, name, version)
+                .await
+            {
+                Ok(found) => {
+                    debug!("Found {name}@{version} in fallback registry {fallback}");
+                    return Ok(found);
+                }
+                Err(error) => last_error = error,
+            }
+        }
+        Err(last_error)
     }
 
     /// Fetch NPM-style package metadata with simple ETag/Last-Modified caching (in-memory)
@@ -1549,7 +1587,7 @@ impl RegistryClient {
             }
         }
 
-        let resp = req.send().await?;
+        let resp = self.send_with_retries(req, metadata_url).await?;
 
         match resp.status() {
             s if s.is_success() => {
@@ -1719,7 +1757,9 @@ impl RegistryClient {
 
         let metadata_url = self.build_metadata_url(name);
 
-        let response = self.client.get(&metadata_url).send().await?;
+        let response = self
+            .send_with_retries(self.client.get(&metadata_url), &metadata_url)
+            .await?;
 
         if !response.status().is_success() {
             return Err(RegistryError::PackageNotFound {
@@ -1881,8 +1921,7 @@ impl RegistryClient {
     /// (e.g. `https://packages.fhir.org` and `https://packages.fhir.org/`)
     /// by always inserting exactly one `/` before the package name.
     fn build_metadata_url(&self, name: &str) -> String {
-        let base = self.base_url.as_str().trim_end_matches('/');
-        format!("{base}/{name}")
+        package_metadata_url(self.base_url.as_str(), name)
     }
 
     /// Build download URL for a package (npm-style).
@@ -1890,6 +1929,51 @@ impl RegistryClient {
     fn build_download_url(&self, name: &str, version: &str) -> String {
         let base = self.base_url.as_str().trim_end_matches('/');
         format!("{base}/{name}/-/{name}-{version}.tgz")
+    }
+
+    /// Sends `request`, retrying network errors, server errors and 429s with exponential backoff
+    /// up to `retry_attempts` times, as downloads do. Any other response, successful or not (a
+    /// 404, a 304), is returned for the caller to handle.
+    async fn send_with_retries(
+        &self,
+        request: reqwest::RequestBuilder,
+        url: &str,
+    ) -> Result<Response> {
+        let attempts = self.config.retry_attempts.max(1);
+        let mut last_error = None;
+        for attempt in 1..=attempts {
+            let Some(this_try) = request.try_clone() else {
+                // A body that cannot be cloned: send once.
+                return Ok(request.send().await?);
+            };
+            match this_try.send().await {
+                Ok(response)
+                    if !(response.status().is_server_error()
+                        || response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS) =>
+                {
+                    return Ok(response);
+                }
+                Ok(response) => {
+                    last_error = Some(RegistryError::RegistryUnavailable {
+                        url: format!("HTTP {} for {url}", response.status()),
+                    });
+                }
+                Err(error) => {
+                    last_error = Some(RegistryError::RegistryUnavailable {
+                        url: format!("Network error for {url}: {error}"),
+                    });
+                }
+            }
+            if attempt < attempts {
+                debug!("Retrying {url} (attempt {} of {attempts})", attempt + 1);
+                retry_backoff(attempt).await;
+            }
+        }
+        Err(last_error
+            .unwrap_or_else(|| RegistryError::RegistryUnavailable {
+                url: url.to_string(),
+            })
+            .into())
     }
 
     /// Download with retries
@@ -1931,11 +2015,7 @@ impl RegistryClient {
             }
 
             if attempt < self.config.retry_attempts {
-                // Exponential backoff with jitter
-                let base = 500u64 * (2_u64.pow(attempt - 1));
-                let jitter: u64 = rand::random::<u8>() as u64 % 250; // up to 250ms
-                let delay = std::time::Duration::from_millis(base + jitter);
-                tokio::time::sleep(delay).await;
+                retry_backoff(attempt).await;
             }
         }
 
@@ -1966,6 +2046,20 @@ impl crate::traits::AsyncRegistry for RegistryClient {
     ) -> crate::error::Result<PackageDownload> {
         self.download_package(spec).await
     }
+}
+
+/// Waits before retry number `attempt + 1`: exponential backoff from 500 ms, plus up to 250 ms of
+/// jitter.
+async fn retry_backoff(attempt: u32) {
+    let base = 500u64 * 2_u64.pow(attempt - 1);
+    let jitter = u64::from(rand::random::<u8>()) % 250;
+    tokio::time::sleep(std::time::Duration::from_millis(base + jitter)).await;
+}
+
+/// The NPM metadata URL of `name` in a registry: `{registry}/{name}`, with or without a trailing
+/// slash on the registry URL (`https://packages2.fhir.org/packages` is commonly written without).
+fn package_metadata_url(registry_url: &str, name: &str) -> String {
+    format!("{}/{name}", registry_url.trim_end_matches('/'))
 }
 
 #[cfg(test)]

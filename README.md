@@ -1,15 +1,20 @@
-# FHIR Canonical Manager
+<p align="center"><img src=".github/banner.png" alt="octo/canonical-manager — FHIR packages, resolved by canonical URL" width="100%"></p>
 
-[![Crates.io](https://img.shields.io/crates/v/octofhir-canonical-manager.svg)](https://crates.io/crates/octofhir-canonical-manager)
-[![Documentation](https://docs.rs/octofhir-canonical-manager/badge.svg)](https://docs.rs/octofhir-canonical-manager)
-[![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](#license)
+<p align="center"><b>Install FHIR Implementation Guide packages, then resolve and search their resources by canonical URL.</b></p>
+
+<p align="center">
+  <a href="https://github.com/octofhir/canonical-manager-rs/actions/workflows/ci.yml"><img src="https://github.com/octofhir/canonical-manager-rs/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://crates.io/crates/octofhir-canonical-manager"><img src="https://img.shields.io/crates/v/octofhir-canonical-manager.svg" alt="crates.io"></a>
+  <a href="https://docs.rs/octofhir-canonical-manager"><img src="https://docs.rs/octofhir-canonical-manager/badge.svg" alt="docs.rs"></a>
+  <a href="#license"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg" alt="License: MIT OR Apache-2.0"></a>
+</p>
 
 A library-first solution for managing FHIR Implementation Guide packages, providing fast canonical URL resolution and resource search capabilities.
 
 ## Features
 
 - 📦 **Package Management**: Install, update, and remove FHIR packages from registries
-- 🔍 **Fast Resolution**: Lightning-fast canonical URL resolution with SQLite B-tree indexes (~7ms average)
+- 🔍 **Fast Resolution**: canonical URL resolution backed by SQLite B-tree indexes
 - 🔎 **Advanced Search**: Query FHIR resources by type, package, and other criteria
 - 🔧 **Search Parameters**: Retrieve FHIR SearchParameter definitions by resource type
 - 🗄️ **Flexible Storage**: SQLite backend (optional) or bring your own storage implementation
@@ -24,7 +29,7 @@ A library-first solution for managing FHIR Implementation Guide packages, provid
 
 This crate supports several optional features:
 
-- **`sqlite`** (included in default): Enables SQLite storage backend
+- **`sqlite`** (enabled by default through `cli`): Enables SQLite storage backend
   - Provides `SqliteStorage` implementation
   - Required for `CanonicalManager::new()` and `UnifiedStorage::new()`
   - If disabled, you must provide your own storage via trait implementations
@@ -38,18 +43,18 @@ This crate supports several optional features:
 
 ### Default Features
 
-By default, both `sqlite` and `cli` features are enabled. To use the library without SQLite:
+The default feature set is `cli`, which also enables `sqlite`. To use the library without SQLite:
 
 ```toml
 [dependencies]
-octofhir-canonical-manager = { version = "0.1", default-features = false }
+octofhir-canonical-manager = { version = "0.2", default-features = false }
 ```
 
 To use with only the SQLite storage (no CLI):
 
 ```toml
 [dependencies]
-octofhir-canonical-manager = { version = "0.1", default-features = false, features = ["sqlite"] }
+octofhir-canonical-manager = { version = "0.2", default-features = false, features = ["sqlite"] }
 ```
 
 ## Quick Start
@@ -60,7 +65,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-octofhir-canonical-manager = "0.1"
+octofhir-canonical-manager = "0.2"
 tokio = { version = "1.0", features = ["full"] }
 ```
 
@@ -72,26 +77,31 @@ use octofhir_canonical_manager::{CanonicalManager, FcmConfig};
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load configuration
-    let config = FcmConfig::load()?;
+    let config = FcmConfig::load().await?;
     let manager = CanonicalManager::new(config).await?;
     
     // Install a FHIR package
     manager.install_package("hl7.fhir.us.core", "6.1.0").await?;
     
     // Resolve a canonical URL
-    let resource = manager.resolve(
+    let resolved = manager.resolve(
         "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
     ).await?;
     
-    println!("Found resource: {}", resource.id);
+    println!(
+        "Found {}/{} in {}",
+        resolved.resource.resource_type, resolved.resource.id, resolved.package_info.name
+    );
     
-    // Search for resources
+    // Search for resources (search() is async and returns a query builder)
     let results = manager.search()
+        .await
         .resource_type("StructureDefinition")
         .package("hl7.fhir.us.core")
-        .execute().await?;
+        .execute()
+        .await?;
         
-    println!("Found {} structure definitions", results.len());
+    println!("Found {} structure definitions", results.total_count);
     
     // Get search parameters for a resource type
     let search_params = manager.get_search_parameters("Patient").await?;
@@ -199,7 +209,7 @@ Create a `fcm.toml` configuration file:
 
 ```toml
 [registry]
-url = "https://fs.get-ig.org/pkgs/"
+url = "https://packages.fhir.org"
 timeout = 60
 retry_attempts = 5
 
@@ -232,7 +242,9 @@ metrics_interval = "30s"
 ### Configuration Options
 
 #### Registry Settings
-- `url`: FHIR package registry URL
+- `url`: FHIR package registry URL (NPM package spec; default `https://packages.fhir.org`)
+- `fallbacks`: Registries tried when the primary fails (default `["https://packages2.fhir.org/packages"]`)
+- `[[registry.extra]]`: Additional non-NPM registries (for example `fs.get-ig.org`) with `client_type = "tarball-direct"` or `"s3-flat"`
 - `timeout`: Network timeout in seconds
 - `retry_attempts`: Number of retry attempts for failed requests
 
@@ -268,10 +280,10 @@ metrics_interval = "30s"
 // Package management
 manager.install_package("package-name", "version").await?;
 manager.remove_package("package-name", "version").await?;
-manager.list_packages().await?;
+manager.list_packages().await?; // Vec<String> of "name@version"
 
 // Batch installation (optimized for multiple packages)
-manager.install_packages_batch(&packages).await?;
+manager.install_packages_batch(packages).await?; // Vec<PackageSpec>
 
 // Resource resolution
 let resource = manager.resolve("canonical-url").await?;
@@ -285,10 +297,15 @@ let resource = manager.resolve_with_fhir_version(
 
 // Search functionality
 let results = manager.search()
+    .await
     .resource_type("StructureDefinition")
     .package("hl7.fhir.us.core")
     .canonical_pattern("Patient")
-    .execute().await?;
+    .execute()
+    .await?;
+for found in &results.resources {
+    println!("{}", found.resource.id);
+}
 
 // Search parameter retrieval
 let search_params = manager.get_search_parameters("Patient").await?;
@@ -297,8 +314,8 @@ for param in search_params {
 }
 
 // Load local packages
-manager.load_from_directory("/path/to/package", Some("my.package@1.0.0")).await?;
-manager.load_resources_from_directory("/path/to/resources").await?;
+manager.load_from_directory(Path::new("/path/to/package"), Some("my.package@1.0.0")).await?;
+manager.load_resources_from_directory(Path::new("/path/to/resources"), "my.namespace").await?;
 ```
 
 ## CLI Commands
@@ -313,13 +330,17 @@ manager.load_resources_from_directory("/path/to/resources").await?;
 | `search-params <resource-type>` | Get search parameters for a resource type |
 | `resolve <url>` | Resolve canonical URL |
 | `update` | Update package indexes |
+| `config` | Manage configuration |
+| `store` | Inspect, verify, and clean the content-addressable store (`path`, `verify`, `gc`, `prune`) |
+| `materialize` | Materialise installed packages into `<cwd>/.fcm/modules/` |
+| `lock` | Write or refresh `fcm.lock` in the current directory |
 
 ## Performance
 
 The canonical manager is optimized for speed and reliability:
 
 ### SQLite Backend Benefits
-- **B-tree Indexes**: O(1) canonical URL lookups without manual index management (~7ms average query time)
+- **B-tree Indexes**: indexed canonical URL lookups without manual index management
 - **WAL Mode**: Write-Ahead Logging for better concurrency and crash recovery
 - **Single-Query Joins**: Eliminates separate package lookups for faster resolution
 - **Atomic Transactions**: Ensures data consistency across operations
@@ -333,11 +354,9 @@ The canonical manager is optimized for speed and reliability:
 - **Dependency Resolution**: Automatic handling of package dependencies
 - **Smart Caching**: Minimizes network requests and disk I/O
 
-### Benchmark Results
-- Canonical URL resolution: ~7ms average
-- Package installation: Optimized with batch operations
-- Search queries: Fast text indexing with SQLite FTS5
-- Multi-version support: Efficient storage with deduplication
+### Benchmarks
+Criterion benchmarks live in [`benches/`](benches/) (resolve, search, install, lockfile,
+CAS, tar extraction and more); run them with `cargo bench`.
 
 ## Architecture
 
@@ -351,7 +370,7 @@ The canonical manager is optimized for speed and reliability:
 ### Resolution Strategies
 1. **Exact Match**: Direct B-tree index lookup (fastest)
 2. **Version Fallback**: Find latest version of base URL
-3. **Fuzzy Matching**: Levenshtein distance for typo tolerance
+3. **Fuzzy Matching**: trigram index over canonical URLs for typo tolerance (`fuzzy-search` feature)
 
 ### Search Capabilities
 - Full-text search with inverted text index
@@ -386,6 +405,8 @@ cargo run --example configuration
 
 See the [examples](examples/) directory for more usage examples:
 - `basic_usage.rs`: Basic package management and resolution
+- `package_management.rs`: Installing, listing and removing packages
+- `advanced_search.rs`: Search queries and filters
 - `search_parameters.rs`: Working with FHIR SearchParameters
 - `configuration.rs`: Configuration management
 

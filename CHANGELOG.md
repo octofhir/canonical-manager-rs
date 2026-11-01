@@ -6,6 +6,8 @@ versioning follows [Semver](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.7] — 2026-11-01
+
 ### Added
 
 - `CanonicalManager::package_dir(name, version)`: the folder of an installed

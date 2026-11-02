@@ -6,6 +6,19 @@ versioning follows [Semver](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.8] — 2026-11-02
+
+### Fixed
+
+- `resolve("url|version")` returned the resource stored under `url` whatever
+  its version; a pinned version now resolves to that version (or the most
+  recent completion of a partial one, `1.2` → `1.2.3`) or fails, and never
+  goes through fuzzy matching or version fallback.
+- Version candidates (`resolve` with a version, `resolve_with_version`) no
+  longer include resources whose URL only shares the prefix
+  (`…/ValueSet/codes-extra` for `…/ValueSet/codes`); a version path segment
+  (`…/codes/1.0.0`) still counts.
+
 ## [0.2.7] — 2026-11-01
 
 ### Added

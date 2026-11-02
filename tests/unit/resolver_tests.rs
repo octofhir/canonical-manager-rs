@@ -517,3 +517,98 @@ fn create_versioned_extracted_package(temp_dir: &TempDir) -> ExtractedPackage {
         raw_bytes: std::collections::HashMap::new(),
     }
 }
+
+/// A package with one ValueSet `url` at `version`.
+fn value_set_package(
+    temp_dir: &TempDir,
+    package: &str,
+    url: &str,
+    version: &str,
+) -> ExtractedPackage {
+    let id = format!("{package}-vs");
+    let content = json!({
+        "resourceType": "ValueSet", "id": id, "url": url, "version": version, "status": "active"
+    });
+    let file = temp_dir.path().join(format!("ValueSet-{id}.json"));
+    std::fs::write(&file, serde_json::to_string_pretty(&content).unwrap()).unwrap();
+    let manifest = PackageManifest {
+        name: package.to_string(),
+        version: "1.0.0".to_string(),
+        description: None,
+        fhir_versions: Some(vec!["4.0.1".to_string()]),
+        dependencies: HashMap::new(),
+        canonical: None,
+        jurisdiction: None,
+        package_type: None,
+        title: None,
+    };
+    ExtractedPackage {
+        name: package.to_string(),
+        version: "1.0.0".to_string(),
+        manifest,
+        resources: vec![FhirResource {
+            resource_type: "ValueSet".to_string(),
+            id,
+            url: Some(url.to_string()),
+            version: Some(version.to_string()),
+            content,
+            file_path: file,
+        }],
+        extraction_path: temp_dir.path().to_path_buf(),
+        raw_bytes: HashMap::new(),
+    }
+}
+
+/// `url|version` resolves to that version of that URL, or fails: never to
+/// another installed version, nor to a URL that only shares the prefix.
+#[tokio::test]
+async fn test_pinned_version_is_honored() {
+    let temp_dir = setup_test_env();
+    let config = StorageConfig {
+        cache_dir: temp_dir.path().join("cache"),
+        packages_dir: temp_dir.path().join("packages"),
+        max_cache_size: "100MB".to_string(),
+        connection_pool_size: 8,
+        fhir_cache_compat: false,
+    };
+    let storage = SqliteStorage::new(config).await.unwrap();
+    let url = "http://example.com/ValueSet/codes";
+    for (package, package_url, version) in [
+        ("first.package", url, "1.0.0"),
+        ("second.package", url, "2.0.0"),
+        (
+            "sibling.package",
+            "http://example.com/ValueSet/codes-extra",
+            "3.0.0",
+        ),
+    ] {
+        storage
+            .add_package(value_set_package(&temp_dir, package, package_url, version))
+            .await
+            .unwrap();
+    }
+    let resolver = CanonicalResolver::new(Arc::new(storage)).await;
+
+    for version in ["1.0.0", "2.0.0"] {
+        let resolved = resolver.resolve(&format!("{url}|{version}")).await.unwrap();
+        assert_eq!(resolved.resource.version.as_deref(), Some(version));
+        assert_eq!(resolved.resource.content["url"], url);
+    }
+    // A partial version matches its most recent completion.
+    let resolved = resolver.resolve(&format!("{url}|2")).await.unwrap();
+    assert_eq!(resolved.resource.version.as_deref(), Some("2.0.0"));
+    // Neither a missing version nor the sibling's version resolves.
+    assert!(resolver.resolve(&format!("{url}|9.9.9")).await.is_err());
+    assert!(resolver.resolve(&format!("{url}|3.0.0")).await.is_err());
+    assert!(resolver.resolve_with_version(url, "3.0.0").await.is_err());
+    assert_eq!(
+        resolver
+            .resolve_with_version(url, "1.0.0")
+            .await
+            .unwrap()
+            .resource
+            .version
+            .as_deref(),
+        Some("1.0.0")
+    );
+}

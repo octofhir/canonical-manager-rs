@@ -307,19 +307,25 @@ impl CanonicalResolver {
         let parsed = CanonicalWithVersion::parse(canonical_url);
         let base = parsed.canonical.clone();
 
+        // A pinned version (`url|version`) resolves to that version or to
+        // nothing: never to another version of the same URL, nor through the
+        // fuzzy or fallback steps below.
+        if let Some(ver) = parsed.version.clone() {
+            if let Some(resource_index) = self.resolve_with_version_candidates(&base, &ver).await? {
+                debug!("Resolved via version-specific selection");
+                return self
+                    .build_resolved_resource(&base, resource_index, ResolutionPath::ExactMatch)
+                    .await;
+            }
+            return Err(ResolutionError::CanonicalUrlNotFound {
+                url: format!("{base}|{}", ver.original),
+            }
+            .into());
+        }
+
         // Step 1: Try exact match
         if let Some(resource_index) = self.storage.find_resource(&base).await? {
             debug!("Found exact match for canonical URL");
-            return self
-                .build_resolved_resource(&base, resource_index, ResolutionPath::ExactMatch)
-                .await;
-        }
-
-        // Step 2: If a version is specified, try to resolve exact or compatible version
-        if let Some(ver) = parsed.version.clone()
-            && let Some(resource_index) = self.resolve_with_version_candidates(&base, &ver).await?
-        {
-            debug!("Resolved via version-specific selection");
             return self
                 .build_resolved_resource(&base, resource_index, ResolutionPath::ExactMatch)
                 .await;
@@ -389,8 +395,19 @@ impl CanonicalResolver {
         base_canonical: &str,
         desired: &PackageVersion,
     ) -> Result<Option<crate::domain::ResourceIndex>> {
-        // Collect candidates under the same base
-        let mut candidates = self.storage.find_by_base_url(base_canonical).await?;
+        // Candidates: the URL itself, or the URL with a version path segment
+        // (`…/Foo/1.0.0`); never a sibling that merely shares the prefix
+        // (`…/Foo-bar`).
+        let nested = format!("{}/", base_canonical.trim_end_matches('/'));
+        let mut candidates: Vec<_> = self
+            .storage
+            .find_by_base_url(base_canonical)
+            .await?
+            .into_iter()
+            .filter(|ri| {
+                ri.canonical_url == base_canonical || ri.canonical_url.starts_with(&nested)
+            })
+            .collect();
         if candidates.is_empty() {
             return Ok(None);
         }
@@ -403,6 +420,22 @@ impl CanonicalResolver {
                 .unwrap_or(false)
         }) {
             return Ok(Some(exact.clone()));
+        }
+
+        // A partial version (`1.2`) matches its most recent completion
+        // (`1.2.0`, `1.2.3`), as FHIR canonical references allow.
+        let prefix = format!("{}.", desired.original);
+        let mut partial: Vec<_> = candidates
+            .iter()
+            .filter(|ri| {
+                ri.version
+                    .as_deref()
+                    .is_some_and(|v| v.starts_with(&prefix))
+            })
+            .collect();
+        partial.sort_by(|a, b| compare_versions(a.version.as_deref(), b.version.as_deref()));
+        if let Some(latest) = partial.last() {
+            return Ok(Some((*latest).clone()));
         }
 
         // If compatibility policy is enabled, select highest compatible version (same major via caret)
@@ -490,9 +523,13 @@ impl CanonicalResolver {
         }
 
         // Try to find resource with specific version
+        let nested = format!("{}/", canonical_url.trim_end_matches('/'));
         let resources_by_type = self.get_resources_by_base_url(canonical_url).await?;
         for resource_index in resources_by_type {
-            if let Some(resource_version) = &resource_index.version
+            let same_resource = resource_index.canonical_url == canonical_url
+                || resource_index.canonical_url.starts_with(&nested);
+            if same_resource
+                && let Some(resource_version) = &resource_index.version
                 && resource_version == version
             {
                 debug!("Found resource with matching version");
@@ -928,6 +965,24 @@ impl CanonicalResolver {
             metadata,
         })
     }
+}
+
+/// Order two versions: as semver when both parse, else segment by segment
+/// (numbers numerically).
+fn compare_versions(a: Option<&str>, b: Option<&str>) -> std::cmp::Ordering {
+    let (a, b) = (a.unwrap_or(""), b.unwrap_or(""));
+    if let (Ok(va), Ok(vb)) = (
+        semver::Version::parse(a.trim_start_matches('v')),
+        semver::Version::parse(b.trim_start_matches('v')),
+    ) {
+        return va.cmp(&vb);
+    }
+    let segments = |v: &str| -> Vec<(u64, String)> {
+        v.split(['.', '-'])
+            .map(|part| (part.parse::<u64>().unwrap_or(0), part.to_owned()))
+            .collect()
+    };
+    segments(a).cmp(&segments(b))
 }
 
 #[cfg(test)]

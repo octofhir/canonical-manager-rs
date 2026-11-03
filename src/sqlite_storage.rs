@@ -1348,6 +1348,41 @@ impl SqliteStorage {
         }
     }
 
+    /// The cache entries of the given resource types (all when empty), filtered in SQL.
+    pub async fn get_cache_entries_of_types(
+        &self,
+        resource_types: &[String],
+    ) -> Vec<ResourceIndex> {
+        if resource_types.is_empty() {
+            return self.get_cache_entries().await;
+        }
+        let types = resource_types.to_vec();
+        match self
+            .with_connection(move |conn| {
+                let placeholders = vec!["?"; types.len()].join(", ");
+                let query = format!(
+                    "{} WHERE r.resource_type IN ({placeholders})",
+                    Self::RESOURCE_SELECT
+                );
+                let mut stmt = conn.prepare(&query)?;
+                let rows = stmt
+                    .query_map(
+                        rusqlite::params_from_iter(types.iter()),
+                        extract_resource_index,
+                    )?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(rows)
+            })
+            .await
+        {
+            Ok(rows) => rows,
+            Err(e) => {
+                warn!("Failed to read cache entries by type: {}", e);
+                Vec::new()
+            }
+        }
+    }
+
     /// Find resource by key (matches id, name, or url - case-insensitive for id/name)
     /// Following fhir-package-loader pattern for type filtering and priority ordering.
     ///
@@ -2324,6 +2359,10 @@ impl crate::traits::SearchStorage for SqliteStorage {
 
     async fn get_cache_entries(&self) -> Vec<ResourceIndex> {
         SqliteStorage::get_cache_entries(self).await
+    }
+
+    async fn get_cache_entries_of_types(&self, resource_types: &[String]) -> Vec<ResourceIndex> {
+        SqliteStorage::get_cache_entries_of_types(self, resource_types).await
     }
 
     async fn find_by_type_and_package(

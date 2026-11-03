@@ -150,6 +150,20 @@ pub trait SearchStorage: Send + Sync {
     /// Returns Vec to avoid deduplication when same URL exists in multiple packages
     async fn get_cache_entries(&self) -> Vec<ResourceIndex>;
 
+    /// The cache entries of the given resource types, all of them when `resource_types` is
+    /// empty. Searches that name a type use this, so a storage that can filter by type itself
+    /// (an indexed column) should: the default reads every entry and filters in memory.
+    async fn get_cache_entries_of_types(&self, resource_types: &[String]) -> Vec<ResourceIndex> {
+        let entries = self.get_cache_entries().await;
+        if resource_types.is_empty() {
+            return entries;
+        }
+        entries
+            .into_iter()
+            .filter(|entry| resource_types.contains(&entry.resource_type))
+            .collect()
+    }
+
     /// List all installed packages
     async fn list_packages(&self) -> Result<Vec<PackageInfo>>;
 

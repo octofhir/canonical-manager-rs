@@ -178,6 +178,8 @@ pub struct SearchFacets {
 /// ```
 pub struct SearchQueryBuilder {
     storage: Arc<dyn SearchStorage + Send + Sync>,
+    /// The engine to run on, so its result cache is shared; a fresh one when absent.
+    engine: Option<Arc<SearchEngine>>,
     query: SearchQuery,
 }
 
@@ -794,6 +796,15 @@ impl SearchEngine {
         self.search_cache.insert(cache_key, result);
     }
 
+    /// Forgets everything derived from the storage: cached results and the text index. Call it
+    /// after packages are added or removed.
+    pub fn invalidate(&self) {
+        self.search_cache.clear();
+        self.index_built
+            .store(false, std::sync::atomic::Ordering::Release);
+        debug!("Search results and text index invalidated");
+    }
+
     /// Clear the search cache
     pub fn clear_cache(&self) {
         self.search_cache.clear();
@@ -905,16 +916,11 @@ impl SearchEngine {
                 .filter(|ri| matching_urls.contains(&ri.canonical_url))
                 .collect())
         } else {
-            // No text search - prefilter by cheap criteria to reduce work
-            let cache_entries = self.storage.get_cache_entries().await;
-            if !query.resource_types.is_empty() {
-                Ok(cache_entries
-                    .into_iter()
-                    .filter(|ri| query.resource_types.contains(&ri.resource_type))
-                    .collect())
-            } else {
-                Ok(cache_entries)
-            }
+            // No text search: let the storage narrow by type, which it can do with an index.
+            Ok(self
+                .storage
+                .get_cache_entries_of_types(&query.resource_types)
+                .await)
         }
     }
 
@@ -1262,6 +1268,17 @@ impl SearchQueryBuilder {
     pub fn new(storage: Arc<dyn SearchStorage + Send + Sync>) -> Self {
         Self {
             storage,
+            engine: None,
+            query: SearchQuery::default(),
+        }
+    }
+
+    /// A builder that runs on `engine`, sharing its result cache and text index with every
+    /// other search on it.
+    pub fn with_engine(engine: Arc<SearchEngine>) -> Self {
+        Self {
+            storage: Arc::clone(&engine.storage),
+            engine: Some(engine),
             query: SearchQuery::default(),
         }
     }
@@ -1456,8 +1473,10 @@ impl SearchQueryBuilder {
     /// ```
     #[tracing::instrument(name = "search.builder.execute", skip(self))]
     pub async fn execute(self) -> Result<SearchResult> {
-        let engine = SearchEngine::new(self.storage);
-        engine.search(&self.query).await
+        match self.engine {
+            Some(engine) => engine.search(&self.query).await,
+            None => SearchEngine::new(self.storage).search(&self.query).await,
+        }
     }
 }
 

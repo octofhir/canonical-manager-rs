@@ -406,7 +406,7 @@ pub struct CanonicalManager {
     registry_dyn: Option<Arc<dyn crate::traits::AsyncRegistry + Send + Sync>>,
     pkg_store_dyn: Option<Arc<dyn crate::traits::PackageStore + Send + Sync>>,
     resolver: CanonicalResolver,
-    search_engine: SearchEngine,
+    search_engine: Arc<SearchEngine>,
     // Optimization components
     change_detector: Arc<PackageChangeDetector>,
     // Performance tracking
@@ -541,7 +541,7 @@ impl CanonicalManager {
         let resolver = CanonicalResolver::new(storage.search_storage()).await;
 
         // Initialize search engine with unified storage (using trait object)
-        let search_engine = SearchEngine::new(storage.search_storage());
+        let search_engine = Arc::new(SearchEngine::new(storage.search_storage()));
 
         // Initialize optimization components based on config
         let change_detector = Arc::new(PackageChangeDetector::new());
@@ -669,7 +669,7 @@ impl CanonicalManager {
 
         // Resolver/Search backed by provided search_storage (SqliteStorage)
         let resolver = CanonicalResolver::new(Arc::clone(&search_storage)).await;
-        let search_engine = SearchEngine::new(Arc::clone(&search_storage));
+        let search_engine = Arc::new(SearchEngine::new(Arc::clone(&search_storage)));
 
         // Optimization components
         let change_detector = Arc::new(PackageChangeDetector::new());
@@ -758,11 +758,13 @@ impl CanonicalManager {
 
     // Helper: add package via trait or unified storage
     async fn add_package_via_store(&self, pkg: &package::ExtractedPackage) -> Result<()> {
-        if let Some(s) = &self.pkg_store_dyn {
+        let added = if let Some(s) = &self.pkg_store_dyn {
             s.add_package(pkg).await
         } else {
             self.storage.add_package(pkg).await
-        }
+        };
+        self.search_engine.invalidate();
+        added
     }
 
     /// Record install provenance — registry source, integrity hash,
@@ -1611,7 +1613,9 @@ impl CanonicalManager {
             .collect();
         let extracted_count = extracted.len();
 
-        self.storage.add_packages_batch(extracted).await?;
+        let added = self.storage.add_packages_batch(extracted).await;
+        self.search_engine.invalidate();
+        added?;
 
         // Record provenance per-package. Best-effort: a failed provenance
         // write must not roll back a successful batch install. The sequential
@@ -1973,7 +1977,9 @@ impl CanonicalManager {
 
             // Add to storage (simplified - no complex indexing)
             debug!("Adding package {} to storage...", package_key);
-            self.storage.add_package(&extracted).await?;
+            let added = self.storage.add_package(&extracted).await;
+            self.search_engine.invalidate();
+            added?;
             #[cfg(feature = "metrics")]
             {
                 metrics::increment_counter!("packages_installed");
@@ -2439,7 +2445,9 @@ impl CanonicalManager {
             updated_extracted.extraction_path = package_dir.clone();
 
             // Add package to unified storage
-            if let Err(e) = self.storage.add_package(&updated_extracted).await {
+            let added = self.storage.add_package(&updated_extracted).await;
+            self.search_engine.invalidate();
+            if let Err(e) = added {
                 match &e {
                     crate::error::FcmError::Storage(
                         crate::error::StorageError::PackageAlreadyExists { .. },
@@ -2561,7 +2569,7 @@ impl CanonicalManager {
 
     /// Search for FHIR resources
     pub async fn search(&self) -> search::SearchQueryBuilder {
-        search::SearchQueryBuilder::new(self.storage.search_storage())
+        search::SearchQueryBuilder::with_engine(Arc::clone(&self.search_engine))
     }
 
     /// Find resource by exact resource type and ID match (fast path, no text search)
@@ -3039,7 +3047,9 @@ impl CanonicalManager {
     pub async fn remove_package(&self, name: &str, version: &str) -> Result<()> {
         info!("Removing package: {}@{}", name, version);
 
-        let removed = self.storage.remove_package(name, version).await?;
+        let removed = self.storage.remove_package(name, version).await;
+        self.search_engine.invalidate();
+        let removed = removed?;
         let folder = self
             .config
             .storage

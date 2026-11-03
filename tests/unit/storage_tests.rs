@@ -569,3 +569,48 @@ async fn verify_blobs_detects_tampering() {
     let issues = storage.verify_blobs().await.unwrap();
     assert_eq!(issues.len(), 1, "exactly one mismatch expected");
 }
+
+/// Searches that name a type read only that type, and a shared engine sees a package added
+/// after its first search once it is invalidated.
+#[tokio::test]
+async fn typed_entries_and_shared_engine_invalidation() {
+    use octofhir_canonical_manager::search::{SearchEngine, SearchQueryBuilder};
+    use octofhir_canonical_manager::traits::SearchStorage;
+    use std::sync::Arc;
+
+    let temp_dir = setup_test_env();
+    let config = StorageConfig {
+        cache_dir: temp_dir.path().join("cache"),
+        packages_dir: temp_dir.path().join("packages"),
+        max_cache_size: "100MB".to_string(),
+        connection_pool_size: 8,
+        fhir_cache_compat: false,
+    };
+    let storage = Arc::new(SqliteStorage::new(config).await.unwrap());
+
+    let engine = Arc::new(SearchEngine::new(storage.clone()));
+    let value_sets = || async {
+        SearchQueryBuilder::with_engine(engine.clone())
+            .resource_type("ValueSet")
+            .execute()
+            .await
+            .unwrap()
+            .resources
+            .len()
+    };
+    assert_eq!(value_sets().await, 0);
+
+    storage
+        .add_package(create_test_extracted_package(&temp_dir))
+        .await
+        .unwrap();
+    let typed =
+        SearchStorage::get_cache_entries_of_types(storage.as_ref(), &["ValueSet".into()]).await;
+    assert_eq!(typed.len(), 1);
+    assert_eq!(typed[0].resource_type, "ValueSet");
+
+    // The engine's cached answer stands until it is told the storage changed.
+    assert_eq!(value_sets().await, 0);
+    engine.invalidate();
+    assert_eq!(value_sets().await, 1);
+}

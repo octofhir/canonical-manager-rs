@@ -36,7 +36,7 @@ This crate supports several optional features:
 
 - **`cli`** (included in default): Enables the command-line interface
   - Automatically enables the `sqlite` feature
-  - Provides the `octofhir-fcm` binary
+  - Provides the `octofhir-fcm` binary and its panic reporting and tracing setup
 
 - **`fuzzy-search`**: Enables fuzzy matching for canonical URL resolution
 - **`metrics`**: Enables performance metrics collection

@@ -875,8 +875,9 @@ impl SqliteStorage {
 
         #[cfg(feature = "metrics")]
         {
-            metrics::histogram!("batch_indexing_latency_ms", duration.as_secs_f64() * 1000.0);
-            metrics::counter!("batch_indexed_packages", package_count as u64);
+            metrics::histogram!("batch_indexing_latency_ms")
+                .record(duration.as_secs_f64() * 1000.0);
+            metrics::counter!("batch_indexed_packages").increment(package_count as u64);
         }
 
         Ok(())

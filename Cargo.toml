@@ -1,6 +1,6 @@
 [package]
 name = "octofhir-canonical-manager"
-version = "0.2.9"
+version = "0.2.10"
 edition = "2024"
 description = "FHIR Canonical Manager - Library-first FHIR package management"
 license = "MIT OR Apache-2.0"
@@ -17,7 +17,7 @@ path = "src/lib.rs"
 [[bin]]
 name = "octofhir-fcm"
 path = "src/bin/main.rs"
-required-features = ["sqlite"]
+required-features = ["cli"]
 
 [[example]]
 name = "search_parameters"
@@ -25,7 +25,7 @@ path = "examples/search_parameters.rs"
 
 [dependencies]
 # Async runtime
-tokio = { version = "1.0", features = ["full"] }
+tokio = { version = "1.0", features = ["fs", "io-util", "rt", "sync", "time"] }
 
 # HTTP client
 reqwest = { version = "0.12", default-features = false, features = [
@@ -40,21 +40,20 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "0.9"
 semver = "1"
-sha1 = "0.10"
+sha1 = "0.11"
 hex = "0.4"
-rand = "0.9.3"
-sha2 = "0.10"
-base64 = "0.22"
+rand = "0.10.3"
+sha2 = "0.11"
+base64 = "0.23"
 async-trait = "0.1"
 parking_lot = "0.12"
 
 # Error handling
 thiserror = "2"
-anyhow = "1.0.103"
 
 # CLI framework
 clap = { version = "4.0", features = ["derive"], optional = true }
-human-panic = "2.0.4"
+human-panic = { version = "2.0.8", optional = true }
 
 # Terminal UI
 colored = { version = "3", optional = true }
@@ -71,22 +70,21 @@ url = { version = "2.5", features = ["serde"] }
 urlencoding = "2.1"
 
 # Path utilities
-dirs = "6"
+dirs = "7"
 
 # Logging
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 
 # SQLite database - async-first for tokio runtime (optional)
-deadpool-sqlite = { version = "0.12.1", features = ["rt_tokio_1"], optional = true }
-rusqlite = { version = "0.37", features = ["bundled"], optional = true }
+deadpool-sqlite = { version = "0.14", features = ["rt_tokio_1"], optional = true }
+rusqlite = { version = "0.40", features = ["bundled", "fallible_uint"], optional = true }
 
 # Performance optimization dependencies
 blake3 = "1.5"
 dashmap = "6.1"
-lru = "0.18.2"
+lru = "0.19"
 rayon = "1.10"
-crossbeam-channel = "0.5"
 walkdir = "2.5"
 
 # Virtual-store dependencies (P2 milestone).
@@ -109,15 +107,17 @@ regex = "1.0"
 num_cpus = "1.0"
 
 # Optional metrics
-metrics = { version = "0.21", optional = true }
+metrics = { version = "0.24.6", optional = true }
 
 [dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio-test = "0.4"
 tempfile = "3.0"
 wiremock = "0.6"
 assert_cmd = "2.0"
 predicates = "3.0"
-criterion = { version = "0.7", features = ["async_tokio"] }
+criterion = { version = "0.8.2", features = ["async_tokio"] }
 proptest = "1.5"
 
 [[bench]]
@@ -163,7 +163,7 @@ harness = false
 [features]
 default = ["cli"]
 sqlite = ["deadpool-sqlite", "rusqlite"]
-cli = ["sqlite", "clap", "colored"]
+cli = ["sqlite", "clap", "colored", "dep:human-panic", "dep:tracing-subscriber", "tokio/macros", "tokio/rt-multi-thread"]
 fuzzy-search = []
 metrics = ["dep:metrics"]
 test-utils = []

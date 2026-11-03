@@ -431,7 +431,8 @@ impl PackageExtractor {
 
         #[cfg(feature = "metrics")]
         {
-            metrics::histogram!("extract_latency_ms", start.elapsed().as_secs_f64() * 1000.0);
+            metrics::histogram!("extract_latency_ms")
+                .record(start.elapsed().as_secs_f64() * 1000.0);
         }
 
         Ok(result)
@@ -534,11 +535,9 @@ impl PackageExtractor {
 
         #[cfg(feature = "metrics")]
         {
-            metrics::histogram!(
-                "extract_parallel_latency_ms",
-                duration.as_secs_f64() * 1000.0
-            );
-            metrics::counter!("extract_parallel_packages", extracted.len() as u64);
+            metrics::histogram!("extract_parallel_latency_ms")
+                .record(duration.as_secs_f64() * 1000.0);
+            metrics::counter!("extract_parallel_packages").increment(extracted.len() as u64);
         }
 
         Ok(extracted)

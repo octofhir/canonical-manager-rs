@@ -1982,7 +1982,7 @@ impl CanonicalManager {
             added?;
             #[cfg(feature = "metrics")]
             {
-                metrics::increment_counter!("packages_installed");
+                metrics::counter!("packages_installed").increment(1);
             }
             debug!("Package {} added to storage successfully", package_key);
 
@@ -2260,7 +2260,7 @@ impl CanonicalManager {
             }
             #[cfg(feature = "metrics")]
             {
-                metrics::increment_counter!("packages_installed");
+                metrics::counter!("packages_installed").increment(1);
             }
 
             self.record_provenance_after_install(&spec, &download_for_provenance)

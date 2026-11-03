@@ -384,7 +384,8 @@ impl CanonicalResolver {
 
         #[cfg(feature = "metrics")]
         {
-            metrics::histogram!("resolve_latency_ms", start.elapsed().as_secs_f64() * 1000.0);
+            metrics::histogram!("resolve_latency_ms")
+                .record(start.elapsed().as_secs_f64() * 1000.0);
         }
 
         result

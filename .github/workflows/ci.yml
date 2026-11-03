@@ -105,3 +105,21 @@ jobs:
 
       - name: Check documentation
         run: cargo doc --no-deps --all-features
+  library-features:
+    name: Library feature boundaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check minimal and SQLite-only modes
+        run: |
+          cargo check --locked --lib --no-default-features
+          cargo check --locked --no-default-features --features sqlite
+      - name: Reject CLI support in library dependencies
+        shell: bash
+        run: |
+          cargo tree --locked --no-default-features --features sqlite --edges normal,build --prefix none > library-deps.txt
+          if grep -E '^(clap|human-panic|tracing-subscriber|colored) v' library-deps.txt; then
+            echo "CLI dependencies leaked into the library"
+            exit 1
+          fi

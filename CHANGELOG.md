@@ -6,6 +6,21 @@ versioning follows [Semver](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.10] — 2026-11-04
+
+### Changed
+
+- Keep panic-reporting and tracing-subscriber dependencies inside the CLI feature;
+  SQLite-only and custom-storage consumers no longer build the CLI support stack.
+- Enable only the Tokio capabilities used by the library, with CLI and test runtime
+  features declared separately. Remove unused anyhow and crossbeam-channel edges.
+- Update private hashing, base64, random, directory, cache and SQLite dependencies;
+  use the current metrics recorder API when the metrics feature is enabled.
+
+### Fixed
+
+- Require the CLI feature for the CLI binary, so SQLite-only builds remain usable.
+
 ## [0.2.9] — 2026-11-03
 
 ### Fixed

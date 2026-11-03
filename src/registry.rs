@@ -539,14 +539,12 @@ impl RegistryClient {
         {
             match &result {
                 Ok(_) => {
-                    metrics::increment_counter!("downloads_succeeded");
-                    metrics::histogram!(
-                        "download_latency_ms",
-                        start.elapsed().as_secs_f64() * 1000.0
-                    );
+                    metrics::counter!("downloads_succeeded").increment(1);
+                    metrics::histogram!("download_latency_ms")
+                        .record(start.elapsed().as_secs_f64() * 1000.0);
                 }
                 Err(_) => {
-                    metrics::increment_counter!("downloads_failed");
+                    metrics::counter!("downloads_failed").increment(1);
                 }
             }
         }

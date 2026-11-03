@@ -6,6 +6,22 @@ versioning follows [Semver](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.9] — 2026-11-03
+
+### Fixed
+
+- `CanonicalManager::search()` built a new `SearchEngine` for every query, so its 5-minute
+  result cache never served a second search: every lookup went to storage. Searches now run on
+  the manager's engine, whose cache and text index are dropped whenever a package is added or
+  removed (`SearchEngine::invalidate`).
+- A search that names a resource type read the whole package index and filtered it in memory.
+  Storages now filter by type themselves: `SearchStorage::get_cache_entries_of_types` (the default
+  keeps the old behaviour; `SqliteStorage` filters in SQL).
+
+### Added
+
+- `SearchQueryBuilder::with_engine`, to run searches on a shared engine.
+
 ## [0.2.8] — 2026-11-02
 
 ### Fixed

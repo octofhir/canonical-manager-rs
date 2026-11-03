@@ -20,6 +20,7 @@ versioning follows [Semver](https://semver.org/).
 ### Fixed
 
 - Require the CLI feature for the CLI binary, so SQLite-only builds remain usable.
+- Report the Cargo package version from the CLI instead of a hard-coded 0.1.0.
 
 ## [0.2.9] — 2026-11-03
 

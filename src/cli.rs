@@ -111,7 +111,7 @@ impl ProgressContext {
 #[derive(Parser, Debug)]
 #[command(name = "fcm")]
 #[command(about = "FHIR Canonical Manager - Library-first FHIR package management")]
-#[command(version = "0.1.0")]
+#[command(version)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,

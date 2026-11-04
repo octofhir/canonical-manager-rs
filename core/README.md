@@ -6,7 +6,7 @@ implementation. Tokio supports asynchronous filesystem and storage operations.
 
 ```toml
 [dependencies]
-octofhir-canonical-core = { version = "0.2.12", default-features = false }
+octofhir-canonical-core = { version = "0.2.13", default-features = false }
 ```
 
 Implement `PackageStore` and `SearchStorage`, then construct a local manager with

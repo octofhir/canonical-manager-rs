@@ -1412,7 +1412,7 @@ dependencies = [
 
 [[package]]
 name = "octofhir-canonical-core"
-version = "0.2.12"
+version = "0.2.13"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -1458,7 +1458,7 @@ dependencies = [
 
 [[package]]
 name = "octofhir-canonical-manager"
-version = "0.2.12"
+version = "0.2.13"
 dependencies = [
  "base64 0.23.1",
  "criterion",

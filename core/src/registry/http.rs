@@ -1702,8 +1702,15 @@ impl RegistryClient {
         // `{base}/catalog` works for both `packages.fhir.org` (where base has
         // no path) and `packages2.fhir.org/packages` (where base is the
         // `/packages` prefix). Each accepts `?name=` as a substring filter.
+        // `?name=` matches one substring, so words are wildcards: ask for the longest word and
+        // keep the names that hold every word ("us core" finds `hl7.fhir.us.core`).
+        let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+        let needle = words
+            .iter()
+            .max_by_key(|word| word.len())
+            .map_or(query.trim(), String::as_str);
         let base = self.base_url.as_str().trim_end_matches('/');
-        let search_url = format!("{base}/catalog?name={}", urlencoding::encode(query));
+        let search_url = format!("{base}/catalog?name={}", urlencoding::encode(needle));
         debug!("Search URL: {}", search_url);
 
         let response = self.client.get(&search_url).send().await?;
@@ -1735,6 +1742,10 @@ impl RegistryClient {
         // Group by name; aggregate versions when present.
         let mut by_name: HashMap<String, PackageInfo> = HashMap::new();
         for entry in entries {
+            let name = entry.name.to_lowercase();
+            if !words.iter().all(|word| name.contains(word.as_str())) {
+                continue;
+            }
             let pkg = by_name
                 .entry(entry.name.clone())
                 .or_insert_with(|| PackageInfo {

@@ -6,6 +6,14 @@ versioning follows [Semver](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.13] — 2026-11-04
+
+### Fixed
+
+- Registry search treats words as wildcards again: "us core" finds `hl7.fhir.us.core`. The
+  catalog's `?name=` matches one substring, so the longest word is asked for and the names
+  holding every word are kept.
+
 ## [0.2.12] — 2026-11-04
 
 ### Fixed

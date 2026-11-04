@@ -322,6 +322,36 @@ async fn test_search_packages() {
     );
 }
 
+/// Words of a search are wildcards: "us core" finds `hl7.fhir.us.core` and not `hl7.fhir.r4.core`
+/// (the catalog's `?name=` matches one substring only).
+#[tokio::test]
+async fn test_search_words_are_wildcards() {
+    if crate::common::test_helpers::should_skip_net() {
+        eprintln!("skipping net-bound test");
+        return;
+    }
+    let registry = create_test_registry_with_packages().await;
+    let config = RegistryConfig {
+        url: registry.url(),
+        timeout: 30,
+        retry_attempts: 3,
+        ..RegistryConfig::default()
+    };
+    let temp_dir = TempDir::new().unwrap();
+    let client = RegistryClient::new(&config, temp_dir.path().to_path_buf())
+        .await
+        .unwrap();
+
+    let names: Vec<String> = client
+        .search_packages("US core")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|p| p.name)
+        .collect();
+    assert_eq!(names, ["hl7.fhir.us.core"]);
+}
+
 /// Test persistent metadata cache writes validators and uses them on a new client
 #[tokio::test]
 async fn test_persistent_metadata_cache_etag_and_304() {

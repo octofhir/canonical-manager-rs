@@ -53,6 +53,23 @@ pub trait AsyncRegistry {
         &self,
         spec: &crate::config::PackageSpec,
     ) -> crate::error::Result<crate::registry::PackageDownload>;
+
+    /// Versions of `name` the registry publishes, newest first. A registry that cannot list
+    /// versions keeps this default, an error.
+    async fn list_versions(&self, name: &str) -> crate::error::Result<Vec<String>> {
+        let _ = name;
+        Err(crate::CanonicalManager::registry_unavailable())
+    }
+
+    /// Packages whose name matches `query`. A registry that cannot search keeps this default,
+    /// an error.
+    async fn search_packages(
+        &self,
+        query: &str,
+    ) -> crate::error::Result<Vec<crate::registry::PackageInfo>> {
+        let _ = query;
+        Err(crate::CanonicalManager::registry_unavailable())
+    }
 }
 
 #[async_trait::async_trait]

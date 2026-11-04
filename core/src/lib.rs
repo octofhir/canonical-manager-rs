@@ -3007,6 +3007,9 @@ impl CanonicalManager {
             use crate::registry_clients::FhirRegistryClient;
             return chain.list_versions(name).await;
         }
+        if let Some(registry) = &self.registry_dyn {
+            return registry.list_versions(name).await;
+        }
         #[cfg(feature = "http")]
         if let Some(client) = &self.registry_client {
             return client.list_versions(name).await;
@@ -3090,6 +3093,9 @@ impl CanonicalManager {
                 .collect();
             out.sort_by(|a, b| a.name.cmp(&b.name));
             return Ok(out);
+        }
+        if let Some(registry) = &self.registry_dyn {
+            return registry.search_packages(query).await;
         }
         #[cfg(feature = "http")]
         if let Some(client) = &self.registry_client {

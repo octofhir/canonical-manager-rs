@@ -6,6 +6,20 @@ versioning follows [Semver](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.12] — 2026-11-04
+
+### Fixed
+
+- A registry adapter supplied with `CanonicalManager::new_with_components` answers
+  `list_registry_versions` and `search_registry` too. Since 0.2.11 such a manager no longer
+  builds its own HTTP client, and both failed with "No registry adapter configured"; a server
+  passing its `RegistryClient` lost package lookup and search.
+
+### Added
+
+- `AsyncRegistry::list_versions` and `AsyncRegistry::search_packages`, with defaults that
+  report the registry cannot list or search; `RegistryClient` implements both.
+
 ## [0.2.11] — 2026-11-04
 
 ### Added

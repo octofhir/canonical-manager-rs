@@ -1910,6 +1910,14 @@ impl crate::traits::AsyncRegistry for RegistryClient {
     ) -> crate::error::Result<PackageDownload> {
         self.download_package(spec).await
     }
+
+    async fn list_versions(&self, name: &str) -> crate::error::Result<Vec<String>> {
+        self.list_versions(name).await
+    }
+
+    async fn search_packages(&self, query: &str) -> crate::error::Result<Vec<PackageInfo>> {
+        self.search_packages(query).await
+    }
 }
 
 /// Waits before retry number `attempt + 1`: exponential backoff from 500 ms, plus up to 250 ms of

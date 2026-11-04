@@ -1,6 +1,6 @@
 [package]
 name = "octofhir-canonical-core"
-version = "0.2.11"
+version = "0.2.12"
 edition = "2024"
 description = "Offline FHIR package storage, canonical resolution and optional HTTP adapters"
 license = "MIT OR Apache-2.0"

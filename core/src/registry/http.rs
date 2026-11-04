@@ -28,6 +28,7 @@
 //! non-NPM backends (e.g. `fs.get-ig.org` S3-flat layout) use a different
 //! client implementation — see [`crate::registry_clients`].
 
+use super::{DownloadProgress, PackageDownload, PackageInfo, PackageMetadata};
 use crate::cas_storage::{CasStorage, ContentType};
 use crate::config::{PackageSpec, RegistryConfig};
 use crate::content_hash::ContentHash;
@@ -60,7 +61,7 @@ pub fn build_default_http_client(timeout_secs: u64) -> Result<Client> {
         .timeout(std::time::Duration::from_secs(timeout_secs))
         .connect_timeout(std::time::Duration::from_secs(5))
         .user_agent(concat!(
-            env!("CARGO_PKG_NAME"),
+            "octofhir-canonical-manager",
             "/",
             env!("CARGO_PKG_VERSION")
         ))
@@ -100,43 +101,6 @@ async fn blake3_file_hex(path: &std::path::Path) -> std::io::Result<String> {
 /// conservative ceiling that won't trip on legitimate content.
 const MAX_TARBALL_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
-/// Trait for receiving progress updates during package downloads.
-///
-/// Implement this trait to provide user feedback during long-running download operations.
-/// All methods are called from async contexts and should be non-blocking.
-///
-/// # Example
-///
-/// ```rust
-/// use octofhir_canonical_manager::registry::DownloadProgress;
-///
-/// struct ConsoleProgress;
-///
-/// impl DownloadProgress for ConsoleProgress {
-///     fn on_progress(&self, downloaded: u64, total: Option<u64>) {
-///         if let Some(total) = total {
-///             let percent = (downloaded * 100) / total;
-///             println!("Progress: {}% ({}/{})", percent, downloaded, total);
-///         } else {
-///             println!("Downloaded: {} bytes", downloaded);
-///         }
-///     }
-///
-///     fn on_start(&self, total: Option<u64>) {
-///         println!("Starting download...");
-///     }
-///
-///     fn on_complete(&self) {
-///         println!("Download complete!");
-///     }
-/// }
-/// ```
-pub trait DownloadProgress: Send + Sync {
-    fn on_progress(&self, downloaded: u64, total: Option<u64>);
-    fn on_start(&self, total: Option<u64>);
-    fn on_complete(&self);
-}
-
 /// Client for interacting with FHIR package registries.
 ///
 /// Provides functionality to download packages, query package metadata,
@@ -146,8 +110,8 @@ pub trait DownloadProgress: Send + Sync {
 /// # Example
 ///
 /// ```rust,no_run
-/// use octofhir_canonical_manager::registry::RegistryClient;
-/// use octofhir_canonical_manager::config::{RegistryConfig, PackageSpec};
+/// use octofhir_canonical_core::registry::RegistryClient;
+/// use octofhir_canonical_core::config::{RegistryConfig, PackageSpec};
 /// use std::path::PathBuf;
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -195,31 +159,6 @@ struct PersistedValidators {
     etag: Option<String>,
     last_modified: Option<String>,
     updated_at: DateTime<Utc>,
-}
-
-/// Information about a package available in a registry.
-///
-/// Contains metadata about a package including all available versions
-/// and descriptive information.
-///
-/// # Example
-///
-/// ```rust
-/// use octofhir_canonical_manager::registry::PackageInfo;
-///
-/// let info = PackageInfo {
-///     name: "hl7.fhir.us.core".to_string(),
-///     versions: vec!["6.1.0".to_string(), "5.0.1".to_string()],
-///     description: Some("US Core Implementation Guide".to_string()),
-///     latest_version: "6.1.0".to_string(),
-/// };
-/// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PackageInfo {
-    pub name: String,
-    pub versions: Vec<String>,
-    pub description: Option<String>,
-    pub latest_version: String,
 }
 
 /// Single entry returned by the FHIR `/catalog` search endpoint.
@@ -315,79 +254,6 @@ struct NpmDistInfo {
     integrity: Option<String>,
 }
 
-/// Result of a successful package download operation.
-///
-/// Contains the downloaded file path along with package metadata
-/// retrieved from the registry.
-///
-/// # Example
-///
-/// ```rust,no_run
-/// # use octofhir_canonical_manager::registry::PackageDownload;
-/// # fn example(download: PackageDownload) {
-/// println!("Downloaded: {}@{}", download.spec.name, download.spec.version);
-/// println!("File: {}", download.file_path.display());
-/// println!("Description: {:?}", download.metadata.description);
-/// # }
-/// ```
-#[derive(Debug, Clone)]
-pub struct PackageDownload {
-    pub spec: PackageSpec,
-    pub file_path: PathBuf,
-    pub metadata: PackageMetadata,
-}
-
-/// Metadata about a package retrieved from a registry.
-///
-/// Contains detailed information about a specific version of a package,
-/// including its dependencies and FHIR version compatibility.
-///
-/// # Example
-///
-/// ```rust
-/// use octofhir_canonical_manager::registry::PackageMetadata;
-/// use std::collections::HashMap;
-///
-/// let metadata = PackageMetadata {
-///     name: "hl7.fhir.us.core".to_string(),
-///     version: "6.1.0".to_string(),
-///     description: Some("US Core Implementation Guide".to_string()),
-///     fhir_version: "4.0.1".to_string(),
-///     dependencies: HashMap::new(),
-///     canonical_base: Some("http://hl7.org/fhir/us/core".to_string()),
-/// };
-/// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PackageMetadata {
-    pub name: String,
-    pub version: String,
-    pub description: Option<String>,
-    pub fhir_version: String,
-    pub dependencies: HashMap<String, String>,
-    pub canonical_base: Option<String>,
-}
-
-/// Information about a package dependency.
-///
-/// Represents a dependency relationship between packages,
-/// specifying the required package name and version.
-///
-/// # Example
-///
-/// ```rust
-/// use octofhir_canonical_manager::registry::PackageDependency;
-///
-/// let dependency = PackageDependency {
-///     name: "hl7.fhir.r4.core".to_string(),
-///     version: "4.0.1".to_string(),
-/// };
-/// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PackageDependency {
-    pub name: String,
-    pub version: String,
-}
-
 impl RegistryClient {
     /// Creates a new registry client with the specified configuration.
     ///
@@ -407,8 +273,8 @@ impl RegistryClient {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use octofhir_canonical_manager::registry::RegistryClient;
-    /// use octofhir_canonical_manager::config::RegistryConfig;
+    /// use octofhir_canonical_core::registry::RegistryClient;
+    /// use octofhir_canonical_core::config::RegistryConfig;
     /// use std::path::PathBuf;
     ///
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -515,8 +381,8 @@ impl RegistryClient {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use octofhir_canonical_manager::registry::RegistryClient;
-    /// # use octofhir_canonical_manager::config::PackageSpec;
+    /// # use octofhir_canonical_core::registry::RegistryClient;
+    /// # use octofhir_canonical_core::config::PackageSpec;
     /// # async fn example(client: RegistryClient) -> Result<(), Box<dyn std::error::Error>> {
     /// let spec = PackageSpec {
     ///     name: "hl7.fhir.us.core".to_string(),
@@ -569,8 +435,8 @@ impl RegistryClient {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use octofhir_canonical_manager::registry::{RegistryClient, DownloadProgress};
-    /// # use octofhir_canonical_manager::config::PackageSpec;
+    /// # use octofhir_canonical_core::registry::{RegistryClient, DownloadProgress};
+    /// # use octofhir_canonical_core::config::PackageSpec;
     ///
     /// struct MyProgress;
     /// impl DownloadProgress for MyProgress {
@@ -696,8 +562,8 @@ impl RegistryClient {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use octofhir_canonical_manager::registry::RegistryClient;
-    /// # use octofhir_canonical_manager::config::PackageSpec;
+    /// # use octofhir_canonical_core::registry::RegistryClient;
+    /// # use octofhir_canonical_core::config::PackageSpec;
     /// # async fn example(client: RegistryClient) -> Result<(), Box<dyn std::error::Error>> {
     /// let specs = vec![
     ///     PackageSpec {
@@ -788,8 +654,8 @@ impl RegistryClient {
     /// To download from a direct URL, use `download_package` with a PackageSpec that has the `url` field set:
     ///
     /// ```rust,no_run
-    /// # use octofhir_canonical_manager::registry::RegistryClient;
-    /// # use octofhir_canonical_manager::config::{PackageSpec, RegistryConfig};
+    /// # use octofhir_canonical_core::registry::RegistryClient;
+    /// # use octofhir_canonical_core::config::{PackageSpec, RegistryConfig};
     /// # use std::path::PathBuf;
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let config = RegistryConfig::default();
@@ -1352,7 +1218,7 @@ impl RegistryClient {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use octofhir_canonical_manager::registry::RegistryClient;
+    /// # use octofhir_canonical_core::registry::RegistryClient;
     /// # async fn example(client: RegistryClient) -> Result<(), Box<dyn std::error::Error>> {
     /// let metadata = client.get_package_metadata("hl7.fhir.us.core", "6.1.0").await?;
     ///
@@ -1738,7 +1604,7 @@ impl RegistryClient {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use octofhir_canonical_manager::registry::RegistryClient;
+    /// # use octofhir_canonical_core::registry::RegistryClient;
     /// # async fn example(client: RegistryClient) -> Result<(), Box<dyn std::error::Error>> {
     /// let versions = client.list_versions("hl7.fhir.us.core").await?;
     ///
@@ -1819,7 +1685,7 @@ impl RegistryClient {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use octofhir_canonical_manager::registry::RegistryClient;
+    /// # use octofhir_canonical_core::registry::RegistryClient;
     /// # async fn example(client: RegistryClient) -> Result<(), Box<dyn std::error::Error>> {
     /// let results = client.search_packages("us core").await?;
     /// println!("Found {} packages", results.len());

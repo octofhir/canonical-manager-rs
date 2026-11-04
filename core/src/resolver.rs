@@ -19,9 +19,9 @@ use url::Url;
 /// # Example
 ///
 /// ```rust,no_run
-/// use octofhir_canonical_manager::resolver::CanonicalResolver;
-/// use octofhir_canonical_manager::sqlite_storage::SqliteStorage;
-/// use octofhir_canonical_manager::config::StorageConfig;
+/// use octofhir_canonical_core::resolver::CanonicalResolver;
+/// use octofhir_canonical_core::sqlite_storage::SqliteStorage;
+/// use octofhir_canonical_core::config::StorageConfig;
 /// use std::sync::Arc;
 /// use std::path::PathBuf;
 ///
@@ -63,7 +63,7 @@ pub struct CanonicalResolver {
 /// # Example
 ///
 /// ```rust
-/// use octofhir_canonical_manager::resolver::{ResolutionConfig, VersionPreference};
+/// use octofhir_canonical_core::resolver::{ResolutionConfig, VersionPreference};
 ///
 /// let config = ResolutionConfig {
 ///     package_priorities: vec!["hl7.fhir.us.core".to_string()],
@@ -125,7 +125,7 @@ impl Default for ResolutionConfig {
 /// # Example
 ///
 /// ```rust,no_run
-/// # use octofhir_canonical_manager::resolver::ResolvedResource;
+/// # use octofhir_canonical_core::resolver::ResolvedResource;
 /// # fn example(resolved: ResolvedResource) {
 /// println!("Resolved URL: {}", resolved.canonical_url);
 /// println!("Resource type: {}", resolved.resource.resource_type);
@@ -173,9 +173,9 @@ impl CanonicalResolver {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use octofhir_canonical_manager::resolver::CanonicalResolver;
-    /// use octofhir_canonical_manager::sqlite_storage::SqliteStorage;
-    /// use octofhir_canonical_manager::config::StorageConfig;
+    /// use octofhir_canonical_core::resolver::CanonicalResolver;
+    /// use octofhir_canonical_core::sqlite_storage::SqliteStorage;
+    /// use octofhir_canonical_core::config::StorageConfig;
     /// use std::sync::Arc;
     /// use std::path::PathBuf;
     ///
@@ -222,9 +222,9 @@ impl CanonicalResolver {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use octofhir_canonical_manager::resolver::{CanonicalResolver, ResolutionConfig, VersionPreference};
-    /// use octofhir_canonical_manager::sqlite_storage::SqliteStorage;
-    /// use octofhir_canonical_manager::config::StorageConfig;
+    /// use octofhir_canonical_core::resolver::{CanonicalResolver, ResolutionConfig, VersionPreference};
+    /// use octofhir_canonical_core::sqlite_storage::SqliteStorage;
+    /// use octofhir_canonical_core::config::StorageConfig;
     /// use std::sync::Arc;
     /// use std::path::PathBuf;
     ///
@@ -289,7 +289,7 @@ impl CanonicalResolver {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use octofhir_canonical_manager::resolver::CanonicalResolver;
+    /// # use octofhir_canonical_core::resolver::CanonicalResolver;
     /// # async fn example(resolver: CanonicalResolver) -> Result<(), Box<dyn std::error::Error>> {
     /// let resolved = resolver.resolve("http://hl7.org/fhir/Patient").await?;
     /// println!("Resource type: {}", resolved.resource.resource_type);
@@ -488,7 +488,7 @@ impl CanonicalResolver {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use octofhir_canonical_manager::resolver::CanonicalResolver;
+    /// # use octofhir_canonical_core::resolver::CanonicalResolver;
     /// # async fn example(resolver: CanonicalResolver) -> Result<(), Box<dyn std::error::Error>> {
     /// let resolved = resolver.resolve_with_version(
     ///     "http://hl7.org/fhir/Patient",
@@ -641,7 +641,7 @@ impl CanonicalResolver {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use octofhir_canonical_manager::resolver::CanonicalResolver;
+    /// # use octofhir_canonical_core::resolver::CanonicalResolver;
     /// # async fn example(resolver: CanonicalResolver) -> Result<(), Box<dyn std::error::Error>> {
     /// let urls = vec![
     ///     "http://hl7.org/fhir/Patient".to_string(),
@@ -703,7 +703,7 @@ impl CanonicalResolver {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use octofhir_canonical_manager::resolver::CanonicalResolver;
+    /// # use octofhir_canonical_core::resolver::CanonicalResolver;
     /// # async fn example(resolver: CanonicalResolver) -> Result<(), Box<dyn std::error::Error>> {
     /// // Find US Core Patient profile by its name field
     /// let resolved = resolver.resolve_by_name("USCorePatientProfile").await?;
@@ -740,8 +740,8 @@ impl CanonicalResolver {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use octofhir_canonical_manager::resolver::CanonicalResolver;
-    /// # async fn example(resolver: CanonicalResolver) -> Result<(), octofhir_canonical_manager::FcmError> {
+    /// # use octofhir_canonical_core::resolver::CanonicalResolver;
+    /// # async fn example(resolver: CanonicalResolver) -> Result<(), octofhir_canonical_core::FcmError> {
     /// let urls = resolver.list_canonical_urls().await;
     /// println!("Total resources available: {}", urls.len());
     /// for url in urls.iter().take(5) {
@@ -986,7 +986,7 @@ fn compare_versions(a: Option<&str>, b: Option<&str>) -> std::cmp::Ordering {
     segments(a).cmp(&segments(b))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use super::*;
     use crate::config::StorageConfig;

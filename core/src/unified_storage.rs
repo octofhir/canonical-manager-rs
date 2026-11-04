@@ -68,8 +68,8 @@ impl UnifiedStorage {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use octofhir_canonical_manager::unified_storage::UnifiedStorage;
-    /// # use octofhir_canonical_manager::config::StorageConfig;
+    /// # use octofhir_canonical_core::unified_storage::UnifiedStorage;
+    /// # use octofhir_canonical_core::config::StorageConfig;
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let config = StorageConfig::default();
     /// let storage = UnifiedStorage::new(config).await?;
@@ -82,7 +82,7 @@ impl UnifiedStorage {
     }
 
     /// Like [`Self::new`] but threads a `durable` flag through to the
-    /// underlying [`SqliteStorage`]. See
+    /// underlying `SqliteStorage`. See
     /// [`crate::config::OptimizationConfig::durable_writes`].
     #[cfg(feature = "sqlite")]
     pub async fn new_with_durability(config: StorageConfig, durable: bool) -> Result<Self> {
@@ -116,7 +116,7 @@ impl UnifiedStorage {
     /// # Example
     ///
     /// ```rust,ignore
-    /// # use octofhir_canonical_manager::unified_storage::UnifiedStorage;
+    /// # use octofhir_canonical_core::unified_storage::UnifiedStorage;
     /// # use std::sync::Arc;
     /// // Assuming you have custom storage implementations
     /// let package_store = Arc::new(MyCustomPackageStore::new());

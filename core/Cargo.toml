@@ -1,0 +1,110 @@
+[package]
+name = "octofhir-canonical-core"
+version = "0.2.11"
+edition = "2024"
+description = "Offline FHIR package storage, canonical resolution and optional HTTP adapters"
+license = "MIT OR Apache-2.0"
+authors = ["OctoFHIR Team <funyloony@gmail.com"]
+repository = "https://github.com/octofhir/canonical-manager-rs"
+keywords = ["fhir", "healthcare", "canonical", "package-manager"]
+categories = ["science", "web-programming", "command-line-utilities"]
+exclude = ["CLAUDE.md", ".github/", "rust-toolchain.toml"]
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.0", features = ["fs", "io-util", "rt", "sync", "time"] }
+
+# HTTP client
+reqwest = { version = "0.12", optional = true, default-features = false, features = [
+    "json",
+    "stream",
+    "rustls-tls",
+] }
+futures-util = "0.3"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.9"
+semver = "1"
+sha1 = "0.11"
+hex = "0.4"
+rand = "0.10.3"
+sha2 = "0.11"
+base64 = "0.23"
+async-trait = "0.1"
+parking_lot = "0.12"
+
+# Error handling
+thiserror = "2"
+
+# CLI framework
+clap = { version = "4.0", features = ["derive"], optional = true }
+
+# Terminal UI
+colored = { version = "3", optional = true }
+
+# File handling
+flate2 = "1"
+tar = "0.4.45"
+
+# UUID generation
+uuid = { version = "1.18", features = ["v4", "serde"] }
+
+# URL handling
+url = { version = "2.5", features = ["serde"] }
+urlencoding = "2.1"
+
+# Path utilities
+dirs = "7"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+
+# SQLite database - async-first for tokio runtime (optional)
+deadpool-sqlite = { version = "0.14", features = ["rt_tokio_1"], optional = true }
+rusqlite = { version = "0.40", features = ["bundled", "fallible_uint"], optional = true }
+
+# Performance optimization dependencies
+blake3 = "1.5"
+dashmap = "6.1"
+lru = "0.19"
+rayon = "1.10"
+walkdir = "2.5"
+
+# Virtual-store dependencies (P2 milestone).
+# `reflink-copy` is used by Cargo and ripgrep; provides the
+# clone-or-fall-back-to-copy primitive across APFS clonefile,
+# Linux FICLONE on btrfs/xfs/bcachefs, and Windows ReFS Dev Drives.
+# `fs4` is the maintained successor to `fs2` (which has been unmaintained
+# since 2020); used for cross-process file locks during install.
+reflink-copy = "0.1"
+fs4 = { version = "1", features = ["tokio"] }
+bitflags = "2"
+
+# Date/time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Regular expressions
+regex = "1.0"
+
+# System information for config optimization
+num_cpus = "1.0"
+
+# Optional metrics
+metrics = { version = "0.24.6", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tempfile = "3.0"
+
+[features]
+default = []
+http = ["dep:reqwest"]
+sqlite = ["deadpool-sqlite", "rusqlite"]
+cli = ["http","sqlite", "clap", "colored", "dep:tracing-subscriber", "tokio/macros", "tokio/rt-multi-thread"]
+fuzzy-search = []
+metrics = ["dep:metrics"]
+test-utils = []

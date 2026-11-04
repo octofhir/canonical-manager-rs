@@ -23,7 +23,7 @@ impl ContentHash {
     ///
     /// # Example
     /// ```
-    /// use octofhir_canonical_manager::content_hash::ContentHash;
+    /// use octofhir_canonical_core::content_hash::ContentHash;
     ///
     /// let content = b"Hello, FHIR!";
     /// let hash = ContentHash::from_bytes(content);
@@ -41,7 +41,7 @@ impl ContentHash {
     ///
     /// # Example
     /// ```no_run
-    /// use octofhir_canonical_manager::content_hash::ContentHash;
+    /// use octofhir_canonical_core::content_hash::ContentHash;
     /// use std::fs::File;
     ///
     /// let mut file = File::open("package.tgz")?;
@@ -70,7 +70,7 @@ impl ContentHash {
     ///
     /// # Example
     /// ```
-    /// use octofhir_canonical_manager::content_hash::ContentHash;
+    /// use octofhir_canonical_core::content_hash::ContentHash;
     ///
     /// let hash = ContentHash::from_bytes(b"test");
     /// assert_eq!(hash.to_hex().len(), 64);

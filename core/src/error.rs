@@ -18,7 +18,7 @@ use thiserror::Error;
 /// # Example
 ///
 /// ```rust,no_run
-/// use octofhir_canonical_manager::error::Result;
+/// use octofhir_canonical_core::error::Result;
 ///
 /// fn example_operation() -> Result<String> {
 ///     Ok("Success".to_string())
@@ -35,8 +35,8 @@ pub type Result<T> = std::result::Result<T, FcmError>;
 /// # Example
 ///
 /// ```rust,no_run
-/// use octofhir_canonical_manager::error::FcmError;
-/// use octofhir_canonical_manager::error::ConfigError;
+/// use octofhir_canonical_core::error::FcmError;
+/// use octofhir_canonical_core::error::ConfigError;
 ///
 /// // Errors automatically convert to FcmError
 /// let config_error = ConfigError::ValidationFailed {
@@ -69,6 +69,7 @@ pub enum FcmError {
     Io(#[from] std::io::Error),
 
     #[error("Network error: {0}")]
+    #[cfg(feature = "http")]
     Network(#[from] reqwest::Error),
 
     #[error("JSON error: {0}")]
@@ -104,6 +105,7 @@ impl Clone for FcmError {
             Self::Generic(msg) => Self::Generic(msg.clone()),
             // For non-cloneable types, convert to generic error
             Self::Io(e) => Self::Generic(format!("IO error: {e}")),
+            #[cfg(feature = "http")]
             Self::Network(e) => Self::Generic(format!("Network error: {e}")),
             Self::Json(e) => Self::Generic(format!("JSON error: {e}")),
             Self::TomlDe(e) => Self::Generic(format!("TOML deserialize error: {e}")),
@@ -121,7 +123,7 @@ impl Clone for FcmError {
 /// # Example
 ///
 /// ```rust
-/// use octofhir_canonical_manager::error::ConfigError;
+/// use octofhir_canonical_core::error::ConfigError;
 ///
 /// let error = ConfigError::InvalidRegistryUrl {
 ///     url: "not-a-url".to_string()
@@ -158,7 +160,7 @@ pub enum ConfigError {
 /// # Example
 ///
 /// ```rust
-/// use octofhir_canonical_manager::error::RegistryError;
+/// use octofhir_canonical_core::error::RegistryError;
 ///
 /// let error = RegistryError::PackageNotFound {
 ///     name: "example.package".to_string(),
@@ -203,7 +205,7 @@ pub enum RegistryError {
 /// # Example
 ///
 /// ```rust
-/// use octofhir_canonical_manager::error::PackageError;
+/// use octofhir_canonical_core::error::PackageError;
 ///
 /// let error = PackageError::ValidationFailed {
 ///     message: "Invalid package structure".to_string()
@@ -237,7 +239,7 @@ pub enum PackageError {
 /// # Example
 ///
 /// ```rust
-/// use octofhir_canonical_manager::error::StorageError;
+/// use octofhir_canonical_core::error::StorageError;
 ///
 /// let error = StorageError::ResourceNotFound {
 ///     canonical_url: "http://example.com/Patient/1".to_string()
@@ -294,7 +296,7 @@ pub enum StorageError {
 /// # Example
 ///
 /// ```rust
-/// use octofhir_canonical_manager::error::ResolutionError;
+/// use octofhir_canonical_core::error::ResolutionError;
 ///
 /// let error = ResolutionError::CanonicalUrlNotFound {
 ///     url: "http://example.com/missing".to_string()
@@ -325,7 +327,7 @@ pub enum ResolutionError {
 /// # Example
 ///
 /// ```rust
-/// use octofhir_canonical_manager::error::SearchError;
+/// use octofhir_canonical_core::error::SearchError;
 ///
 /// let error = SearchError::InvalidQuery {
 ///     message: "Invalid regex pattern".to_string()
@@ -356,8 +358,8 @@ pub enum SearchError {
 /// # Example
 ///
 /// ```rust
-/// use octofhir_canonical_manager::error::Validate;
-/// use octofhir_canonical_manager::error::ConfigError;
+/// use octofhir_canonical_core::error::Validate;
+/// use octofhir_canonical_core::error::ConfigError;
 ///
 /// struct MyConfig {
 ///     url: String,
@@ -390,7 +392,7 @@ pub trait Validate {
 /// # Example
 ///
 /// ```rust,no_run
-/// use octofhir_canonical_manager::error::{ErrorContext, Result};
+/// use octofhir_canonical_core::error::{ErrorContext, Result};
 ///
 /// fn example_operation() -> Result<String> {
 ///     std::fs::read_to_string("config.toml")

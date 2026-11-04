@@ -12,7 +12,7 @@
 //! (Postgres etc.) are free to ignore CAS entirely.
 //!
 //! New features here go through [`crate::CanonicalManager`] or
-//! [`crate::sqlite_storage::SqliteStorage`], never through new methods
+//! `crate::sqlite_storage::SqliteStorage`, never through new methods
 //! on the frozen trait surface.
 //!
 //! # Where to look

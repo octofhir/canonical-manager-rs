@@ -2,15 +2,15 @@
 
 # Run all tests
 test:
-    cargo test --features test-utils
+    cargo test --workspace --all-features
 
 # Run tests with output
 test-verbose:
-    cargo test --features test-utils -- --nocapture
+    cargo test --workspace --all-features -- --nocapture
 
 # Run linting
 lint:
-    cargo clippy
+    cargo clippy --workspace --all-features --all-targets -- -D warnings
 
 # Fix all clippy issues (allows dirty working directory)
 clippy-fix:

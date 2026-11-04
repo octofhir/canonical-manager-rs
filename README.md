@@ -433,3 +433,10 @@ Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for gui
 ---
 
 Made with ❤️ by OctoFHIR Team 🐙🦀
+
+## Offline core
+
+For local storage, package extraction, search and canonical URL resolution without
+HTTP/TLS, use `octofhir-canonical-core` with default features disabled. See
+[offline core usage and feature contracts](docs/offline-core.md). Existing
+`octofhir-canonical-manager` imports and feature behavior remain compatible.

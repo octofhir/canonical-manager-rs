@@ -39,7 +39,7 @@ use std::path::{Path, PathBuf};
 /// # Example
 ///
 /// ```rust,no_run
-/// use octofhir_canonical_manager::config::FcmConfig;
+/// use octofhir_canonical_core::config::FcmConfig;
 ///
 /// # #[tokio::main]
 /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -78,7 +78,7 @@ pub struct FcmConfig {
 /// # Example
 ///
 /// ```rust
-/// use octofhir_canonical_manager::config::{RegistryConfig, ExtraRegistry, RegistryClientType};
+/// use octofhir_canonical_core::config::{RegistryConfig, ExtraRegistry, RegistryClientType};
 ///
 /// let config = RegistryConfig {
 ///     url: "https://packages.fhir.org".to_string(),
@@ -166,7 +166,7 @@ pub enum RegistryClientType {
 /// # Example
 ///
 /// ```rust
-/// use octofhir_canonical_manager::config::PackageSpec;
+/// use octofhir_canonical_core::config::PackageSpec;
 ///
 /// let spec = PackageSpec {
 ///     name: "hl7.fhir.us.core".to_string(),
@@ -198,7 +198,7 @@ pub struct PackageSpec {
 /// # Example
 ///
 /// ```rust
-/// use octofhir_canonical_manager::config::LocalPackageSpec;
+/// use octofhir_canonical_core::config::LocalPackageSpec;
 /// use std::path::PathBuf;
 ///
 /// let spec = LocalPackageSpec {
@@ -229,7 +229,7 @@ pub struct LocalPackageSpec {
 /// # Example
 ///
 /// ```rust
-/// use octofhir_canonical_manager::config::ResourceDirectorySpec;
+/// use octofhir_canonical_core::config::ResourceDirectorySpec;
 /// use std::path::PathBuf;
 ///
 /// let spec = ResourceDirectorySpec {
@@ -253,7 +253,7 @@ pub struct ResourceDirectorySpec {
 /// # Example
 ///
 /// ```rust
-/// use octofhir_canonical_manager::config::StorageConfig;
+/// use octofhir_canonical_core::config::StorageConfig;
 /// use std::path::PathBuf;
 ///
 /// let config = StorageConfig {
@@ -290,7 +290,7 @@ pub struct StorageConfig {
 /// # Example
 ///
 /// ```rust
-/// use octofhir_canonical_manager::config::OptimizationConfig;
+/// use octofhir_canonical_core::config::OptimizationConfig;
 ///
 /// let mut config = OptimizationConfig::default();
 /// config.parallel_workers = 8;
@@ -396,7 +396,7 @@ impl FcmConfig {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use octofhir_canonical_manager::config::FcmConfig;
+    /// use octofhir_canonical_core::config::FcmConfig;
     ///
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -435,7 +435,7 @@ impl FcmConfig {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use octofhir_canonical_manager::config::FcmConfig;
+    /// use octofhir_canonical_core::config::FcmConfig;
     /// use std::path::Path;
     ///
     /// # #[tokio::main]
@@ -466,7 +466,7 @@ impl FcmConfig {
     /// # Example
     ///
     /// ```rust
-    /// use octofhir_canonical_manager::config::FcmConfig;
+    /// use octofhir_canonical_core::config::FcmConfig;
     ///
     /// let path = FcmConfig::default_config_path();
     /// println!("Config path: {}", path.display());
@@ -490,7 +490,7 @@ impl FcmConfig {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use octofhir_canonical_manager::config::FcmConfig;
+    /// use octofhir_canonical_core::config::FcmConfig;
     ///
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -515,7 +515,7 @@ impl FcmConfig {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use octofhir_canonical_manager::config::FcmConfig;
+    /// use octofhir_canonical_core::config::FcmConfig;
     ///
     /// let mut config = FcmConfig::default();
     /// config.apply_env_overrides();
@@ -562,7 +562,7 @@ impl FcmConfig {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use octofhir_canonical_manager::config::FcmConfig;
+    /// use octofhir_canonical_core::config::FcmConfig;
     ///
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -597,7 +597,7 @@ impl FcmConfig {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use octofhir_canonical_manager::config::FcmConfig;
+    /// use octofhir_canonical_core::config::FcmConfig;
     ///
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -637,7 +637,7 @@ impl FcmConfig {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use octofhir_canonical_manager::config::FcmConfig;
+    /// use octofhir_canonical_core::config::FcmConfig;
     ///
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -673,7 +673,7 @@ impl FcmConfig {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use octofhir_canonical_manager::config::FcmConfig;
+    /// use octofhir_canonical_core::config::FcmConfig;
     ///
     /// let mut config = FcmConfig::default();
     /// config.add_package("hl7.fhir.us.core", "6.1.0", Some(1));
@@ -710,7 +710,7 @@ impl FcmConfig {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use octofhir_canonical_manager::config::FcmConfig;
+    /// use octofhir_canonical_core::config::FcmConfig;
     ///
     /// let mut config = FcmConfig::default();
     /// config.add_package("test.package", "1.0.0", None);
@@ -741,7 +741,7 @@ impl FcmConfig {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use octofhir_canonical_manager::config::FcmConfig;
+    /// use octofhir_canonical_core::config::FcmConfig;
     ///
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -765,7 +765,7 @@ impl FcmConfig {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use octofhir_canonical_manager::config::FcmConfig;
+    /// use octofhir_canonical_core::config::FcmConfig;
     ///
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -1110,7 +1110,7 @@ impl FcmConfig {
     /// # Example
     ///
     /// ```rust
-    /// use octofhir_canonical_manager::FcmConfig;
+    /// use octofhir_canonical_core::FcmConfig;
     /// use tempfile::TempDir;
     ///
     /// let temp_dir = TempDir::new().unwrap();

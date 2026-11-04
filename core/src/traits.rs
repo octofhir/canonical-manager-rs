@@ -8,7 +8,7 @@
 //! Adding methods is a breaking change for those consumers.
 //!
 //! Schema-level changes inside the bundled SQLite backend
-//! ([`crate::sqlite_storage`]) — including the new P2 virtual-store
+//! (`crate::sqlite_storage`) — including the new P2 virtual-store
 //! tables (`blobs`, `package_files`, `tarballs`, `package_provenance`) —
 //! are intentionally *not* surfaced on these traits. The new tables are
 //! SQLite-implementation detail; backends are free to use whatever

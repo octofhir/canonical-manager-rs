@@ -1,6 +1,6 @@
 [package]
 name = "octofhir-canonical-manager"
-version = "0.2.10"
+version = "0.2.11"
 edition = "2024"
 description = "FHIR Canonical Manager - Library-first FHIR package management"
 license = "MIT OR Apache-2.0"
@@ -24,102 +24,35 @@ name = "search_parameters"
 path = "examples/search_parameters.rs"
 
 [dependencies]
-# Async runtime
-tokio = { version = "1.0", features = ["fs", "io-util", "rt", "sync", "time"] }
+octofhir-canonical-core = { path = "core", version = "=0.2.11", default-features = false, features = ["http"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"], optional = true }
+human-panic = { version = "2.0.8", optional = true }
 
-# HTTP client
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tempfile = "3.0"
+wiremock = "0.6"
+criterion = { version = "0.8.2", features = ["async_tokio"] }
+proptest = "1.5"
+
+
 reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "stream",
     "rustls-tls",
 ] }
 futures-util = "0.3"
-
-# Serialization
-serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "0.9"
-semver = "1"
 sha1 = "0.11"
 hex = "0.4"
-rand = "0.10.3"
 sha2 = "0.11"
 base64 = "0.23"
-async-trait = "0.1"
-parking_lot = "0.12"
-
-# Error handling
-thiserror = "2"
-
-# CLI framework
-clap = { version = "4.0", features = ["derive"], optional = true }
-human-panic = { version = "2.0.8", optional = true }
-
-# Terminal UI
-colored = { version = "3", optional = true }
-
-# File handling
 flate2 = "1"
 tar = "0.4.45"
-
-# UUID generation
-uuid = { version = "1.18", features = ["v4", "serde"] }
-
-# URL handling
 url = { version = "2.5", features = ["serde"] }
-urlencoding = "2.1"
-
-# Path utilities
-dirs = "7"
-
-# Logging
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
-
-# SQLite database - async-first for tokio runtime (optional)
-deadpool-sqlite = { version = "0.14", features = ["rt_tokio_1"], optional = true }
-rusqlite = { version = "0.40", features = ["bundled", "fallible_uint"], optional = true }
-
-# Performance optimization dependencies
-blake3 = "1.5"
-dashmap = "6.1"
-lru = "0.19"
-rayon = "1.10"
 walkdir = "2.5"
-
-# Virtual-store dependencies (P2 milestone).
-# `reflink-copy` is used by Cargo and ripgrep; provides the
-# clone-or-fall-back-to-copy primitive across APFS clonefile,
-# Linux FICLONE on btrfs/xfs/bcachefs, and Windows ReFS Dev Drives.
-# `fs4` is the maintained successor to `fs2` (which has been unmaintained
-# since 2020); used for cross-process file locks during install.
-reflink-copy = "0.1"
-fs4 = { version = "1", features = ["tokio"] }
-bitflags = "2"
-
-# Date/time handling
-chrono = { version = "0.4", features = ["serde"] }
-
-# Regular expressions
-regex = "1.0"
-
-# System information for config optimization
-num_cpus = "1.0"
-
-# Optional metrics
-metrics = { version = "0.24.6", optional = true }
-
-[dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tokio-test = "0.4"
-tempfile = "3.0"
-wiremock = "0.6"
-assert_cmd = "2.0"
-predicates = "3.0"
-criterion = { version = "0.8.2", features = ["async_tokio"] }
-proptest = "1.5"
-
 [[bench]]
 name = "cas"
 harness = false
@@ -162,8 +95,12 @@ harness = false
 
 [features]
 default = ["cli"]
-sqlite = ["deadpool-sqlite", "rusqlite"]
-cli = ["sqlite", "clap", "colored", "dep:human-panic", "dep:tracing-subscriber", "tokio/macros", "tokio/rt-multi-thread"]
-fuzzy-search = []
-metrics = ["dep:metrics"]
-test-utils = []
+sqlite = ["octofhir-canonical-core/sqlite"]
+cli = ["sqlite", "octofhir-canonical-core/cli", "dep:tokio", "dep:human-panic"]
+fuzzy-search = ["octofhir-canonical-core/fuzzy-search"]
+metrics = ["octofhir-canonical-core/metrics"]
+test-utils = ["octofhir-canonical-core/test-utils"]
+
+[workspace]
+resolver = "3"
+members = ["core"]

@@ -10,7 +10,7 @@ use colored::Colorize;
 /// # Example
 ///
 /// ```rust
-/// use octofhir_canonical_manager::output::Output;
+/// use octofhir_canonical_core::output::Output;
 ///
 /// Output::success("Package installed successfully");
 /// Output::error("Failed to download package");
@@ -28,7 +28,7 @@ impl Output {
     /// # Example
     ///
     /// ```rust
-    /// use octofhir_canonical_manager::output::Output;
+    /// use octofhir_canonical_core::output::Output;
     ///
     /// Output::success("Package downloaded successfully");
     /// // Output: ✅ Package downloaded successfully
@@ -46,7 +46,7 @@ impl Output {
     /// # Example
     ///
     /// ```rust
-    /// use octofhir_canonical_manager::output::Output;
+    /// use octofhir_canonical_core::output::Output;
     ///
     /// Output::error("Failed to connect to registry");
     /// // Output: ❌ Failed to connect to registry
@@ -64,7 +64,7 @@ impl Output {
     /// # Example
     ///
     /// ```rust
-    /// use octofhir_canonical_manager::output::Output;
+    /// use octofhir_canonical_core::output::Output;
     ///
     /// Output::warning("Package version not found, using latest");
     /// // Output: ⚠️  Package version not found, using latest
@@ -82,7 +82,7 @@ impl Output {
     /// # Example
     ///
     /// ```rust
-    /// use octofhir_canonical_manager::output::Output;
+    /// use octofhir_canonical_core::output::Output;
     ///
     /// Output::info("Using registry: https://packages.fhir.org");
     /// // Output: ℹ️  Using registry: https://packages.fhir.org
@@ -103,7 +103,7 @@ impl Output {
     /// # Example
     ///
     /// ```rust
-    /// use octofhir_canonical_manager::output::Output;
+    /// use octofhir_canonical_core::output::Output;
     ///
     /// Output::result("http://hl7.org/fhir/Patient");
     /// // Output: http://hl7.org/fhir/Patient
@@ -123,7 +123,7 @@ impl Output {
     /// # Example
     ///
     /// ```rust
-    /// use octofhir_canonical_manager::output::Output;
+    /// use octofhir_canonical_core::output::Output;
     ///
     /// Output::section("Installed Packages");
     /// // Output: (blank line)
@@ -144,7 +144,7 @@ impl Output {
     /// # Example
     ///
     /// ```rust
-    /// use octofhir_canonical_manager::output::Output;
+    /// use octofhir_canonical_core::output::Output;
     ///
     /// Output::list_item("hl7.fhir.us.core@6.1.0");
     /// // Output:   • hl7.fhir.us.core@6.1.0
@@ -162,7 +162,7 @@ impl Output {
 /// # Example
 ///
 /// ```rust
-/// use octofhir_canonical_manager::output::Progress;
+/// use octofhir_canonical_core::output::Progress;
 ///
 /// Progress::start("Downloading package");
 /// Progress::step("Extracting archive");
@@ -181,7 +181,7 @@ impl Progress {
     /// # Example
     ///
     /// ```rust
-    /// use octofhir_canonical_manager::output::Progress;
+    /// use octofhir_canonical_core::output::Progress;
     ///
     /// Progress::start("Downloading package");
     /// // Output: 🔄 Downloading package... (to stderr)
@@ -199,7 +199,7 @@ impl Progress {
     /// # Example
     ///
     /// ```rust
-    /// use octofhir_canonical_manager::output::Progress;
+    /// use octofhir_canonical_core::output::Progress;
     ///
     /// Progress::step("Extracting files from archive");
     /// // Output:   Extracting files from archive (dimmed, to stderr)
@@ -217,7 +217,7 @@ impl Progress {
     /// # Example
     ///
     /// ```rust
-    /// use octofhir_canonical_manager::output::Progress;
+    /// use octofhir_canonical_core::output::Progress;
     ///
     /// Progress::complete("Package extraction finished");
     /// // Output: ✅ Package extraction finished (to stderr)
@@ -235,7 +235,7 @@ impl Progress {
     /// # Example
     ///
     /// ```rust
-    /// use octofhir_canonical_manager::output::Progress;
+    /// use octofhir_canonical_core::output::Progress;
     ///
     /// Progress::status("Found 150 FHIR resources");
     /// // Output: 📝 Found 150 FHIR resources (to stderr)
@@ -262,7 +262,7 @@ impl Progress {
 /// # Example
 ///
 /// ```rust
-/// use octofhir_canonical_manager::output::format_package;
+/// use octofhir_canonical_core::output::format_package;
 ///
 /// let formatted = format_package("hl7.fhir.us.core", "6.1.0");
 /// println!("{}", formatted);
@@ -288,7 +288,7 @@ pub fn format_package(name: &str, version: &str) -> String {
 /// # Example
 ///
 /// ```rust
-/// use octofhir_canonical_manager::output::format_url;
+/// use octofhir_canonical_core::output::format_url;
 ///
 /// let formatted = format_url("http://hl7.org/fhir/Patient");
 /// println!("{}", formatted);
@@ -314,7 +314,7 @@ pub fn format_url(url: &str) -> String {
 /// # Example
 ///
 /// ```rust
-/// use octofhir_canonical_manager::output::format_resource_type;
+/// use octofhir_canonical_core::output::format_resource_type;
 ///
 /// let formatted = format_resource_type("Patient");
 /// println!("{}", formatted);

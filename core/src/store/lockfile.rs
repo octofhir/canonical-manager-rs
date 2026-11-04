@@ -97,7 +97,11 @@ impl Lockfile {
     pub fn empty() -> Self {
         Self {
             version: Self::CURRENT_VERSION,
-            generated_by: format!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")),
+            generated_by: format!(
+                "{} {}",
+                "octofhir-canonical-manager",
+                env!("CARGO_PKG_VERSION")
+            ),
             meta: LockfileMeta::default(),
             packages: Vec::new(),
         }

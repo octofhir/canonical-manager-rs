@@ -36,10 +36,10 @@ impl CasStorage {
     ///
     /// # Example
     /// ```no_run
-    /// use octofhir_canonical_manager::cas_storage::CasStorage;
+    /// use octofhir_canonical_core::cas_storage::CasStorage;
     /// use std::path::PathBuf;
     ///
-    /// # tokio_test::block_on(async {
+    /// # tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
     /// let cas = CasStorage::new(PathBuf::from("~/.maki/cache")).await?;
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// # });
@@ -73,11 +73,11 @@ impl CasStorage {
     ///
     /// # Example
     /// ```no_run
-    /// use octofhir_canonical_manager::cas_storage::{CasStorage, ContentType};
-    /// use octofhir_canonical_manager::content_hash::ContentHash;
+    /// use octofhir_canonical_core::cas_storage::{CasStorage, ContentType};
+    /// use octofhir_canonical_core::content_hash::ContentHash;
     /// use std::path::PathBuf;
     ///
-    /// # tokio_test::block_on(async {
+    /// # tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
     /// let cas = CasStorage::new(PathBuf::from("~/.maki/cache")).await?;
     /// let content = b"{\"resourceType\": \"Patient\"}";
     /// let hash = ContentHash::from_bytes(content);
@@ -207,10 +207,10 @@ impl CasStorage {
     ///
     /// # Example
     /// ```no_run
-    /// # use octofhir_canonical_manager::cas_storage::{CasStorage, ContentType};
-    /// # use octofhir_canonical_manager::content_hash::ContentHash;
+    /// # use octofhir_canonical_core::cas_storage::{CasStorage, ContentType};
+    /// # use octofhir_canonical_core::content_hash::ContentHash;
     /// # use std::path::PathBuf;
-    /// # tokio_test::block_on(async {
+    /// # tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
     /// # let cas = CasStorage::new(PathBuf::from("~/.maki/cache")).await?;
     /// # let hash = ContentHash::from_bytes(b"test");
     /// let content = cas.retrieve(&hash, ContentType::Resource).await?;
@@ -233,10 +233,10 @@ impl CasStorage {
     ///
     /// # Example
     /// ```no_run
-    /// # use octofhir_canonical_manager::cas_storage::{CasStorage, ContentType};
-    /// # use octofhir_canonical_manager::content_hash::ContentHash;
+    /// # use octofhir_canonical_core::cas_storage::{CasStorage, ContentType};
+    /// # use octofhir_canonical_core::content_hash::ContentHash;
     /// # use std::path::PathBuf;
-    /// # tokio_test::block_on(async {
+    /// # tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
     /// # let cas = CasStorage::new(PathBuf::from("~/.maki/cache")).await?;
     /// # let hash = ContentHash::from_bytes(b"test");
     /// if cas.exists(&hash, ContentType::Resource).await {

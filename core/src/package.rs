@@ -29,8 +29,8 @@ fn num_cpus_hint() -> usize {
 /// # Example
 ///
 /// ```rust,no_run
-/// use octofhir_canonical_manager::package::PackageExtractor;
-/// use octofhir_canonical_manager::registry::PackageDownload;
+/// use octofhir_canonical_core::package::PackageExtractor;
+/// use octofhir_canonical_core::registry::PackageDownload;
 /// use std::path::PathBuf;
 ///
 /// # async fn example(download: PackageDownload) -> Result<(), Box<dyn std::error::Error>> {
@@ -66,7 +66,7 @@ pub struct PackageExtractor {
 /// # Example
 ///
 /// ```rust
-/// use octofhir_canonical_manager::package::PackageIndex;
+/// use octofhir_canonical_core::package::PackageIndex;
 /// use std::collections::HashMap;
 ///
 /// // Typically loaded from .index.json
@@ -124,7 +124,7 @@ impl<'de> Deserialize<'de> for PackageIndex {
 /// # Example
 ///
 /// ```rust
-/// use octofhir_canonical_manager::package::IndexEntry;
+/// use octofhir_canonical_core::package::IndexEntry;
 ///
 /// let entry = IndexEntry {
 ///     resource_type: Some("Patient".to_string()),
@@ -154,7 +154,7 @@ pub struct IndexEntry {
 /// # Example
 ///
 /// ```rust,no_run
-/// # use octofhir_canonical_manager::package::ExtractedPackage;
+/// # use octofhir_canonical_core::package::ExtractedPackage;
 /// # fn example(package: ExtractedPackage) {
 /// println!("Package: {}@{}", package.name, package.version);
 /// println!("Contains {} resources", package.resources.len());
@@ -184,7 +184,7 @@ pub struct ExtractedPackage {
 /// # Example
 ///
 /// ```rust
-/// use octofhir_canonical_manager::package::PackageManifest;
+/// use octofhir_canonical_core::package::PackageManifest;
 /// use std::collections::HashMap;
 ///
 /// let manifest = PackageManifest {
@@ -223,7 +223,7 @@ pub struct PackageManifest {
 /// # Example
 ///
 /// ```rust,no_run
-/// # use octofhir_canonical_manager::package::FhirResource;
+/// # use octofhir_canonical_core::package::FhirResource;
 /// # use std::path::PathBuf;
 /// # fn example(resource: FhirResource) {
 /// println!("Resource: {} (ID: {})", resource.resource_type, resource.id);
@@ -250,7 +250,7 @@ pub struct FhirResource {
 /// # Example
 ///
 /// ```rust
-/// use octofhir_canonical_manager::package::PackageDependency;
+/// use octofhir_canonical_core::package::PackageDependency;
 ///
 /// let dependency = PackageDependency {
 ///     name: "hl7.fhir.r4.core".to_string(),
@@ -273,7 +273,7 @@ impl PackageExtractor {
     /// # Example
     ///
     /// ```rust
-    /// use octofhir_canonical_manager::package::PackageExtractor;
+    /// use octofhir_canonical_core::package::PackageExtractor;
     /// use std::path::PathBuf;
     ///
     /// let extractor = PackageExtractor::new(PathBuf::from("/tmp/fhir-cache"));
@@ -334,8 +334,8 @@ impl PackageExtractor {
     /// # Example
     ///
     /// ```text
-    /// # use octofhir_canonical_manager::package::PackageExtractor;
-    /// # use octofhir_canonical_manager::registry::PackageDownload;
+    /// # use octofhir_canonical_core::package::PackageExtractor;
+    /// # use octofhir_canonical_core::registry::PackageDownload;
     /// # use std::path::PathBuf;
     /// # async fn example(download: PackageDownload) -> Result<(), Box<dyn std::error::Error>> {
     /// let extractor = PackageExtractor::new(PathBuf::from("/tmp/cache"));
@@ -460,8 +460,8 @@ impl PackageExtractor {
     /// # Example
     ///
     /// ```text
-    /// # use octofhir_canonical_manager::package::PackageExtractor;
-    /// # use octofhir_canonical_manager::registry::PackageDownload;
+    /// # use octofhir_canonical_core::package::PackageExtractor;
+    /// # use octofhir_canonical_core::registry::PackageDownload;
     /// # use std::path::PathBuf;
     /// # async fn example(downloads: Vec<PackageDownload>) -> Result<(), Box<dyn std::error::Error>> {
     /// let extractor = PackageExtractor::new(PathBuf::from("/tmp/cache"));
@@ -560,7 +560,7 @@ impl PackageExtractor {
     /// # Example
     ///
     /// ```text
-    /// # use octofhir_canonical_manager::package::PackageExtractor;
+    /// # use octofhir_canonical_core::package::PackageExtractor;
     /// # use std::path::{Path, PathBuf};
     /// let extractor = PackageExtractor::new(PathBuf::from("/tmp"));
     ///
@@ -625,7 +625,7 @@ impl PackageExtractor {
     /// # Example
     ///
     /// ```text
-    /// # use octofhir_canonical_manager::package::PackageExtractor;
+    /// # use octofhir_canonical_core::package::PackageExtractor;
     /// # use std::path::{Path, PathBuf};
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let extractor = PackageExtractor::new(PathBuf::from("/tmp"));

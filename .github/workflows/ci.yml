@@ -114,6 +114,9 @@ jobs:
       - name: Check minimal and SQLite-only modes
         run: |
           cargo check --locked --lib --no-default-features
+          cargo check --locked -p octofhir-canonical-core --no-default-features
+          cargo test --locked -p octofhir-canonical-core --no-default-features --features sqlite
+          cargo clippy --locked -p octofhir-canonical-core --no-default-features --all-targets -- -D warnings
           cargo check --locked --no-default-features --features sqlite
       - name: Reject CLI support in library dependencies
         shell: bash
@@ -121,5 +124,14 @@ jobs:
           cargo tree --locked --no-default-features --features sqlite --edges normal,build --prefix none > library-deps.txt
           if grep -E '^(clap|human-panic|tracing-subscriber|colored) v' library-deps.txt; then
             echo "CLI dependencies leaked into the library"
+            exit 1
+          fi
+
+      - name: Reject HTTP and TLS in offline core
+        shell: bash
+        run: |
+          cargo tree --locked -p octofhir-canonical-core --no-default-features --edges normal,build --prefix none > offline-deps.txt
+          if grep -E '^(reqwest|hyper|hyper-util|rustls|native-tls|openssl|clap|human-panic) v' offline-deps.txt; then
+            echo "Transport or CLI dependencies leaked into offline core"
             exit 1
           fi

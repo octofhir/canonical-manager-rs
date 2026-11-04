@@ -24,9 +24,9 @@ use tracing::{debug, info};
 /// # Example
 ///
 /// ```rust,no_run
-/// use octofhir_canonical_manager::search::{SearchEngine, SearchQuery};
-/// use octofhir_canonical_manager::sqlite_storage::SqliteStorage;
-/// use octofhir_canonical_manager::config::StorageConfig;
+/// use octofhir_canonical_core::search::{SearchEngine, SearchQuery};
+/// use octofhir_canonical_core::sqlite_storage::SqliteStorage;
+/// use octofhir_canonical_core::config::StorageConfig;
 /// use std::sync::Arc;
 /// use std::path::PathBuf;
 ///
@@ -88,7 +88,7 @@ impl SearchEngine {
 /// # Example
 ///
 /// ```rust
-/// use octofhir_canonical_manager::search::TextIndex;
+/// use octofhir_canonical_core::search::TextIndex;
 ///
 /// let mut index = TextIndex::new();
 /// index.add_resource("http://example.com/Patient/1", "Patient John Doe");
@@ -124,7 +124,7 @@ pub struct FilterEngine {
 /// # Example
 ///
 /// ```rust,no_run
-/// # use octofhir_canonical_manager::search::SearchFacets;
+/// # use octofhir_canonical_core::search::SearchFacets;
 /// # fn example(facets: SearchFacets) {
 /// println!("Resource types:");
 /// for (resource_type, count) in facets.resource_types {
@@ -149,9 +149,9 @@ pub struct SearchFacets {
 /// # Example
 ///
 /// ```rust,no_run
-/// use octofhir_canonical_manager::search::SearchQueryBuilder;
-/// use octofhir_canonical_manager::sqlite_storage::SqliteStorage;
-/// use octofhir_canonical_manager::config::StorageConfig;
+/// use octofhir_canonical_core::search::SearchQueryBuilder;
+/// use octofhir_canonical_core::sqlite_storage::SqliteStorage;
+/// use octofhir_canonical_core::config::StorageConfig;
 /// use std::sync::Arc;
 /// use std::path::PathBuf;
 ///
@@ -191,7 +191,7 @@ pub struct SearchQueryBuilder {
 /// # Example
 ///
 /// ```rust
-/// use octofhir_canonical_manager::search::{SearchQuery, VersionConstraint};
+/// use octofhir_canonical_core::search::{SearchQuery, VersionConstraint};
 ///
 /// let query = SearchQuery {
 ///     text: Some("Patient demographics".to_string()),
@@ -223,7 +223,7 @@ pub struct SearchQuery {
 /// # Example
 ///
 /// ```rust
-/// use octofhir_canonical_manager::search::VersionConstraint;
+/// use octofhir_canonical_core::search::VersionConstraint;
 ///
 /// let constraint = VersionConstraint {
 ///     package: "hl7.fhir.us.core".to_string(),
@@ -245,7 +245,7 @@ pub struct VersionConstraint {
 /// # Example
 ///
 /// ```rust,no_run
-/// # use octofhir_canonical_manager::search::SearchResult;
+/// # use octofhir_canonical_core::search::SearchResult;
 /// # fn example(result: SearchResult) {
 /// println!("Found {} resources in {:?}", result.total_count, result.query_time);
 /// for resource_match in result.resources {
@@ -269,7 +269,7 @@ pub struct SearchResult {
 /// # Example
 ///
 /// ```rust,no_run
-/// # use octofhir_canonical_manager::search::ResourceMatch;
+/// # use octofhir_canonical_core::search::ResourceMatch;
 /// # fn example(resource_match: ResourceMatch) {
 /// println!("Resource: {} (score: {:.2})",
 ///          resource_match.resource.resource_type,
@@ -297,7 +297,7 @@ pub struct ResourceMatch {
 /// # Example
 ///
 /// ```rust
-/// use octofhir_canonical_manager::search::SearchHighlight;
+/// use octofhir_canonical_core::search::SearchHighlight;
 ///
 /// let highlight = SearchHighlight {
 ///     field: "canonical_url".to_string(),
@@ -337,7 +337,7 @@ impl TextIndex {
     /// # Example
     ///
     /// ```rust
-    /// use octofhir_canonical_manager::search::TextIndex;
+    /// use octofhir_canonical_core::search::TextIndex;
     ///
     /// let index = TextIndex::new();
     /// ```
@@ -376,7 +376,7 @@ impl TextIndex {
     /// # Example
     ///
     /// ```rust
-    /// use octofhir_canonical_manager::search::TextIndex;
+    /// use octofhir_canonical_core::search::TextIndex;
     ///
     /// let mut index = TextIndex::new();
     /// index.add_resource(
@@ -414,7 +414,7 @@ impl TextIndex {
     /// # Example
     ///
     /// ```rust
-    /// use octofhir_canonical_manager::search::TextIndex;
+    /// use octofhir_canonical_core::search::TextIndex;
     ///
     /// let mut index = TextIndex::new();
     /// index.add_resource("http://example.com/Patient/1", "Patient John Doe");
@@ -527,7 +527,7 @@ impl FilterEngine {
     /// # Example
     ///
     /// ```rust
-    /// use octofhir_canonical_manager::search::FilterEngine;
+    /// use octofhir_canonical_core::search::FilterEngine;
     ///
     /// let filter_engine = FilterEngine::new();
     /// ```
@@ -552,8 +552,8 @@ impl FilterEngine {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use octofhir_canonical_manager::search::{FilterEngine, SearchQuery};
-    /// use octofhir_canonical_manager::domain::ResourceIndex;
+    /// use octofhir_canonical_core::search::{FilterEngine, SearchQuery};
+    /// use octofhir_canonical_core::domain::ResourceIndex;
     ///
     /// # fn example(resources: Vec<ResourceIndex>) {
     /// let filter_engine = FilterEngine::new();
@@ -644,9 +644,9 @@ impl SearchEngine {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use octofhir_canonical_manager::search::SearchEngine;
-    /// use octofhir_canonical_manager::sqlite_storage::SqliteStorage;
-    /// use octofhir_canonical_manager::config::StorageConfig;
+    /// use octofhir_canonical_core::search::SearchEngine;
+    /// use octofhir_canonical_core::sqlite_storage::SqliteStorage;
+    /// use octofhir_canonical_core::config::StorageConfig;
     /// use std::sync::Arc;
     /// use std::path::PathBuf;
     ///
@@ -828,7 +828,7 @@ impl SearchEngine {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use octofhir_canonical_manager::search::{SearchEngine, SearchQuery};
+    /// # use octofhir_canonical_core::search::{SearchEngine, SearchQuery};
     /// # async fn example(engine: SearchEngine) -> Result<(), Box<dyn std::error::Error>> {
     /// let query = SearchQuery {
     ///     text: Some("Patient demographics".to_string()),
@@ -1115,7 +1115,7 @@ impl SearchEngine {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use octofhir_canonical_manager::search::SearchEngine;
+    /// # use octofhir_canonical_core::search::SearchEngine;
     /// # async fn example(engine: SearchEngine) {
     /// let suggestions = engine.suggest_completions("pat").await;
     /// for suggestion in suggestions {
@@ -1185,7 +1185,7 @@ impl SearchEngine {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use octofhir_canonical_manager::search::{SearchEngine, SearchQuery};
+    /// # use octofhir_canonical_core::search::{SearchEngine, SearchQuery};
     /// # async fn example(engine: SearchEngine) -> Result<(), Box<dyn std::error::Error>> {
     /// let query = SearchQuery {
     ///     text: Some("Patient".to_string()),
@@ -1245,9 +1245,9 @@ impl SearchQueryBuilder {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use octofhir_canonical_manager::search::SearchQueryBuilder;
-    /// use octofhir_canonical_manager::sqlite_storage::SqliteStorage;
-    /// use octofhir_canonical_manager::config::StorageConfig;
+    /// use octofhir_canonical_core::search::SearchQueryBuilder;
+    /// use octofhir_canonical_core::sqlite_storage::SqliteStorage;
+    /// use octofhir_canonical_core::config::StorageConfig;
     /// use std::sync::Arc;
     /// use std::path::PathBuf;
     ///
@@ -1292,7 +1292,7 @@ impl SearchQueryBuilder {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use octofhir_canonical_manager::search::SearchQueryBuilder;
+    /// # use octofhir_canonical_core::search::SearchQueryBuilder;
     /// # use std::sync::Arc;
     /// # fn example(builder: SearchQueryBuilder) {
     /// let builder = builder.text("Patient demographics");
@@ -1314,7 +1314,7 @@ impl SearchQueryBuilder {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use octofhir_canonical_manager::search::SearchQueryBuilder;
+    /// # use octofhir_canonical_core::search::SearchQueryBuilder;
     /// # fn example(builder: SearchQueryBuilder) {
     /// let builder = builder
     ///     .resource_type("Patient")
@@ -1338,7 +1338,7 @@ impl SearchQueryBuilder {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use octofhir_canonical_manager::search::SearchQueryBuilder;
+    /// # use octofhir_canonical_core::search::SearchQueryBuilder;
     /// # fn example(builder: SearchQueryBuilder) {
     /// let builder = builder
     ///     .package("hl7.fhir.us.core")
@@ -1361,7 +1361,7 @@ impl SearchQueryBuilder {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use octofhir_canonical_manager::search::SearchQueryBuilder;
+    /// # use octofhir_canonical_core::search::SearchQueryBuilder;
     /// # fn example(builder: SearchQueryBuilder) {
     /// let builder = builder.canonical_pattern(r"http://hl7\.org/fhir/.*Patient.*");
     /// # }
@@ -1380,7 +1380,7 @@ impl SearchQueryBuilder {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use octofhir_canonical_manager::search::SearchQueryBuilder;
+    /// # use octofhir_canonical_core::search::SearchQueryBuilder;
     /// # fn example(builder: SearchQueryBuilder) {
     /// let builder = builder.limit(50);
     /// # }
@@ -1402,7 +1402,7 @@ impl SearchQueryBuilder {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use octofhir_canonical_manager::search::SearchQueryBuilder;
+    /// # use octofhir_canonical_core::search::SearchQueryBuilder;
     /// # fn example(builder: SearchQueryBuilder) {
     /// let builder = builder.version_constraint("hl7.fhir.us.core", "6.1.0");
     /// # }
@@ -1424,7 +1424,7 @@ impl SearchQueryBuilder {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use octofhir_canonical_manager::search::SearchQueryBuilder;
+    /// # use octofhir_canonical_core::search::SearchQueryBuilder;
     /// # fn example(builder: SearchQueryBuilder) {
     /// let builder = builder.offset(20); // Skip first 20 results
     /// # }
@@ -1444,9 +1444,9 @@ impl SearchQueryBuilder {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use octofhir_canonical_manager::search::SearchQueryBuilder;
-    /// # use octofhir_canonical_manager::sqlite_storage::SqliteStorage;
-    /// # use octofhir_canonical_manager::config::StorageConfig;
+    /// # use octofhir_canonical_core::search::SearchQueryBuilder;
+    /// # use octofhir_canonical_core::sqlite_storage::SqliteStorage;
+    /// # use octofhir_canonical_core::config::StorageConfig;
     /// # use std::sync::Arc;
     /// # use std::path::PathBuf;
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -1483,10 +1483,14 @@ impl SearchQueryBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "sqlite")]
     use crate::config::StorageConfig;
+    #[cfg(feature = "sqlite")]
     use crate::sqlite_storage::SqliteStorage;
+    #[cfg(feature = "sqlite")]
     use tempfile::TempDir;
 
+    #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn test_search_engine_creation() {
         let temp_dir = TempDir::new().unwrap();
@@ -1511,6 +1515,7 @@ mod tests {
         assert_eq!(search_result.total_count, 0);
     }
 
+    #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn test_text_search() {
         let temp_dir = TempDir::new().unwrap();
@@ -1535,6 +1540,7 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn test_search_query_builder() {
         let temp_dir = TempDir::new().unwrap();
@@ -1653,6 +1659,7 @@ mod tests {
         assert_eq!(filtered[0].package_name, "hl7.fhir.r4.core");
     }
 
+    #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn test_search_suggestions() {
         let temp_dir = TempDir::new().unwrap();

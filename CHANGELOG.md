@@ -6,6 +6,26 @@ versioning follows [Semver](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.11] — 2026-11-04
+
+### Added
+
+- Publish `octofhir-canonical-core` with opt-in HTTP and SQLite support for local
+  package storage, canonical resolution and search without a network stack.
+- Add `CanonicalManager::new_with_storage` for caller-provided local storage.
+
+### Changed
+
+- Keep the existing manager package as a compatibility facade, preserving all
+  existing import paths, public error types, features and no-default HTTP behavior.
+- Separate registry DTOs and progress contracts from the optional HTTP adapters.
+
+### Fixed
+
+- Avoid creating a dummy HTTP client when a caller supplies a registry adapter.
+  Dispatch metadata requests through that adapter as well as downloads.
+- Check offline, SQLite-only and full feature profiles independently in CI.
+
 ## [0.2.10] — 2026-11-04
 
 ### Changed

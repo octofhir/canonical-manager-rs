@@ -11,7 +11,7 @@ use the new core package:
 
 ```toml
 [dependencies]
-octofhir-canonical-core = { version = "0.2.14", default-features = false }
+octofhir-canonical-core = { version = "0.2.15", default-features = false }
 ```
 
 The core has no HTTP or TLS dependencies in its normal/build dependency graph.

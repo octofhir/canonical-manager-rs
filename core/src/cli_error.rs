@@ -190,6 +190,15 @@ impl CliError for StorageError {
                 canonical_url.bright_white(),
                 "💡".yellow()
             )),
+            StorageError::UnsupportedSchemaVersion {
+                current, required, ..
+            } => Some(format!(
+                "{} Storage schema version {} is not supported (required {})\n{} Run 'fcm store reset' to rebuild the storage, then 'fcm install' to repopulate packages",
+                "💡".yellow(),
+                current,
+                required,
+                "💡".yellow()
+            )),
             _ => None,
         }
     }

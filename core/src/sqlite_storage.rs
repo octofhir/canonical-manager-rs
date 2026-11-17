@@ -19,9 +19,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
-// Schema-version mismatch is handled by dropping every table and
-// recreating it; packages then re-download on next install. The lockfile
-// (`fcm.lock`) is the only cross-version reproducibility contract.
+// Schema-version mismatch is an error, never a silent wipe: dropping the
+// tables destroys cached packages that offline consumers cannot re-fetch.
+// Rebuilding is opt-in via [`SqliteStorage::reset`] (`fcm store reset`);
+// packages then re-download on next install. The lockfile (`fcm.lock`) is
+// the only cross-version reproducibility contract.
 //
 // Tables `blobs`, `package_files`, `tarballs`, `package_provenance` are
 // SQLite-only; they are not surfaced on the `PackageStore` /
@@ -118,7 +120,39 @@ impl SqliteStorage {
     /// Like [`Self::new`] but lets the caller opt out of `fsync` on
     /// every blob write. See [`crate::config::OptimizationConfig::durable_writes`]
     /// for the durability trade-off.
+    ///
+    /// Fails with [`StorageError::UnsupportedSchemaVersion`] when the
+    /// on-disk schema version differs from [`SCHEMA_VERSION`]; existing
+    /// data is left untouched. Use [`Self::reset`] to rebuild explicitly.
     pub async fn new_with_durability(config: StorageConfig, durable: bool) -> Result<Self> {
+        let storage = Self::open(config, durable).await?;
+        storage.init_schema().await?;
+        info!(
+            "SQLite storage initialized with connection pool at {:?}",
+            storage.db_path
+        );
+        Ok(storage)
+    }
+
+    /// Explicitly drop and rebuild the storage schema (`fcm store reset`).
+    ///
+    /// This is the only path that discards cached packages on a schema
+    /// change — opening storage normally never wipes data. Re-run install
+    /// afterwards to repopulate.
+    pub async fn reset(config: StorageConfig) -> Result<Self> {
+        let storage = Self::open(config, true).await?;
+        storage.drop_all_tables().await?;
+        storage.create_schema().await?;
+        storage.write_schema_version().await?;
+        info!(
+            "SQLite storage reset to schema version {} at {:?}",
+            SCHEMA_VERSION, storage.db_path
+        );
+        Ok(storage)
+    }
+
+    /// Open the pool and CAS layers without touching the schema.
+    async fn open(config: StorageConfig, durable: bool) -> Result<Self> {
         tokio::fs::create_dir_all(&config.packages_dir).await?;
         let db_path = config.packages_dir.join("storage.db");
 
@@ -193,19 +227,12 @@ impl SqliteStorage {
         })?;
         let file_cas = Arc::new(FileCas::new_with_durability(store_paths, durable));
 
-        let storage = Self {
+        Ok(Self {
             pool,
-            db_path: db_path.clone(),
+            db_path,
             cas,
             file_cas,
-        };
-
-        storage.init_schema().await?;
-        info!(
-            "SQLite storage initialized with connection pool at {:?}",
-            db_path
-        );
-        Ok(storage)
+        })
     }
 
     async fn init_schema(&self) -> Result<()> {
@@ -235,22 +262,48 @@ impl SqliteStorage {
             .unwrap_or(0);
 
         if current_version == 0 {
+            // A fresh database has no tables yet. Tables without a version
+            // marker are a pre-versioning legacy schema we cannot trust.
+            let legacy = self
+                .with_connection(|conn| {
+                    conn.query_row(
+                        "SELECT name FROM sqlite_master \
+                         WHERE type = 'table' AND name = 'packages'",
+                        [],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()
+                })
+                .await?
+                .is_some();
+            if legacy {
+                return Err(Self::schema_mismatch_error(0));
+            }
             self.create_schema().await?;
         } else if current_version != SCHEMA_VERSION {
-            // Project policy: no migrations. On any version mismatch
-            // (older schema, newer schema downgraded, corrupted) drop
-            // every table and start fresh. Packages get re-downloaded
-            // from the configured registries on next install. The
-            // lockfile (`fcm.lock`) is the cross-version reproducibility
-            // contract — bytes on disk are disposable.
-            warn!(
-                "SQLite schema version mismatch (found {current_version}, want {SCHEMA_VERSION}); \
-                 nuking existing tables and recreating. Re-run install to repopulate."
-            );
-            self.drop_all_tables().await?;
-            self.create_schema().await?;
+            // Never wipe on open: offline consumers cannot re-fetch the
+            // packages a silent drop would destroy. Rebuilding is opt-in
+            // via `fcm store reset` ([`Self::reset`]).
+            return Err(Self::schema_mismatch_error(current_version));
         }
 
+        self.write_schema_version().await?;
+
+        debug!("SQLite schema initialized (version {})", SCHEMA_VERSION);
+        Ok(())
+    }
+
+    fn schema_mismatch_error(current: i32) -> FcmError {
+        FcmError::Storage(StorageError::UnsupportedSchemaVersion {
+            current,
+            required: SCHEMA_VERSION,
+            message: "Run 'fcm store reset' to rebuild the storage \
+                      (cached packages are dropped and re-downloaded on next install)."
+                .to_string(),
+        })
+    }
+
+    async fn write_schema_version(&self) -> Result<()> {
         self.with_connection(move |conn| {
             conn.execute(
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?1, ?2)",
@@ -258,10 +311,7 @@ impl SqliteStorage {
             )?;
             Ok(())
         })
-        .await?;
-
-        debug!("SQLite schema initialized (version {})", SCHEMA_VERSION);
-        Ok(())
+        .await
     }
 
     async fn create_schema(&self) -> Result<()> {
@@ -405,9 +455,9 @@ impl SqliteStorage {
     }
 
     /// Drop every table (data + schema) so [`Self::create_schema`] can
-    /// rebuild from scratch. Used when a version mismatch is detected at
-    /// startup. Indexes and views attached to the dropped tables are
-    /// removed automatically by SQLite.
+    /// rebuild from scratch. Only used by the explicit [`Self::reset`].
+    /// Indexes and views attached to the dropped tables are removed
+    /// automatically by SQLite.
     async fn drop_all_tables(&self) -> Result<()> {
         self.with_connection(move |conn| {
             conn.execute_batch(
@@ -425,16 +475,6 @@ impl SqliteStorage {
             Ok(())
         })
         .await?;
-        Ok(())
-    }
-
-    #[allow(dead_code)]
-    async fn migrate_schema(&self, from_version: i32) -> Result<()> {
-        info!(
-            "Migrating schema from version {} to {}",
-            from_version, SCHEMA_VERSION
-        );
-        // Migrations are intentionally unsupported for now.
         Ok(())
     }
 
@@ -2409,5 +2449,127 @@ impl crate::traits::PackageStore for SqliteStorage {
 
     async fn has_package(&self, name: &str, version: &str) -> Result<bool> {
         SqliteStorage::has_package(self, name, version).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn config(dir: &TempDir) -> StorageConfig {
+        StorageConfig {
+            cache_dir: dir.path().join("cache"),
+            packages_dir: dir.path().join("packages"),
+            max_cache_size: "100MB".to_string(),
+            connection_pool_size: 2,
+            fhir_cache_compat: false,
+        }
+    }
+
+    fn db_path(dir: &TempDir) -> PathBuf {
+        dir.path().join("packages").join("storage.db")
+    }
+
+    async fn schema_version(storage: &SqliteStorage) -> String {
+        storage
+            .with_connection(|conn| {
+                conn.query_row(
+                    "SELECT value FROM metadata WHERE key = 'schema_version'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn fresh_database_initializes_at_current_version() {
+        let dir = TempDir::new().unwrap();
+        let storage = SqliteStorage::new(config(&dir)).await.unwrap();
+        assert_eq!(schema_version(&storage).await, SCHEMA_VERSION.to_string());
+    }
+
+    #[tokio::test]
+    async fn version_mismatch_errors_and_preserves_data() {
+        let dir = TempDir::new().unwrap();
+        let cfg = config(&dir);
+        let storage = SqliteStorage::new(cfg.clone()).await.unwrap();
+        storage
+            .with_connection(|conn| {
+                conn.execute(
+                    "UPDATE metadata SET value = '1' WHERE key = 'schema_version'",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO packages \
+                     (name, version, manifest_hash, installed_at, resource_count) \
+                     VALUES ('test.pkg', '1.0.0', 'hash', '2026-01-01', 0)",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        drop(storage);
+
+        let err = SqliteStorage::new(cfg.clone())
+            .await
+            .err()
+            .expect("expected schema mismatch error");
+        assert!(matches!(
+            err,
+            FcmError::Storage(StorageError::UnsupportedSchemaVersion {
+                current: 1,
+                required: SCHEMA_VERSION,
+                ..
+            })
+        ));
+
+        // The failed open must not have touched the data.
+        let conn = rusqlite::Connection::open(db_path(&dir)).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM packages", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+        let version: String = conn
+            .query_row(
+                "SELECT value FROM metadata WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "1");
+        drop(conn);
+
+        // Explicit reset rebuilds the schema and repopulates the marker.
+        let storage = SqliteStorage::reset(cfg).await.unwrap();
+        assert_eq!(schema_version(&storage).await, SCHEMA_VERSION.to_string());
+        assert!(storage.list_packages().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn legacy_unversioned_database_errors() {
+        let dir = TempDir::new().unwrap();
+        let cfg = config(&dir);
+        std::fs::create_dir_all(cfg.packages_dir.clone()).unwrap();
+        let conn = rusqlite::Connection::open(db_path(&dir)).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE packages (rowid INTEGER PRIMARY KEY, name TEXT NOT NULL);",
+        )
+        .unwrap();
+        drop(conn);
+
+        let err = SqliteStorage::new(cfg.clone())
+            .await
+            .err()
+            .expect("expected legacy schema error");
+        assert!(matches!(
+            err,
+            FcmError::Storage(StorageError::UnsupportedSchemaVersion { current: 0, .. })
+        ));
+
+        SqliteStorage::reset(cfg).await.unwrap();
     }
 }

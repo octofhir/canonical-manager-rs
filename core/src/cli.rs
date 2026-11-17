@@ -194,6 +194,11 @@ pub enum StoreAction {
         #[arg(long, default_value = "text")]
         format: String,
     },
+    /// Drop and rebuild the SQLite storage schema. Cached packages are
+    /// removed; re-run install to repopulate. This is the explicit
+    /// recovery path after a schema-version mismatch error — opening
+    /// storage never wipes data on its own.
+    Reset,
 }
 
 /// Materialize command
@@ -1071,6 +1076,13 @@ fn print_search_params_json(params: &[SearchParameterInfo]) -> crate::Result<()>
 /// Handle `fcm store` subcommands.
 async fn handle_store(cli: &Cli, cmd: &StoreCommand) -> crate::Result<()> {
     let config = load_config(cli).await?;
+    // Reset must bypass CanonicalManager::new: opening storage with a
+    // mismatched schema is exactly the error reset exists to recover from.
+    if matches!(cmd.action, StoreAction::Reset) {
+        crate::sqlite_storage::SqliteStorage::reset(config.storage.clone()).await?;
+        Output::success("Storage reset — schema rebuilt. Re-run install to repopulate packages.");
+        return Ok(());
+    }
     let manager = CanonicalManager::new(config).await?;
     match &cmd.action {
         StoreAction::Path { format } => store_path(&manager, format).await,
@@ -1081,6 +1093,7 @@ async fn handle_store(cli: &Cli, cmd: &StoreCommand) -> crate::Result<()> {
             dry_run,
             format,
         } => store_gc(&manager, *dry_run, *days, format).await,
+        StoreAction::Reset => unreachable!("handled above"),
     }
 }
 

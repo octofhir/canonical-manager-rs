@@ -6,6 +6,22 @@ versioning follows [Semver](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.15] — 2026-11-17
+
+### Fixed
+
+- Opening SQLite storage no longer drops every table on a schema-version
+  mismatch. The silent wipe destroyed cached packages that offline
+  consumers cannot re-fetch. A mismatch now fails with
+  `StorageError::UnsupportedSchemaVersion` and leaves the data untouched;
+  legacy databases carrying tables but no version marker are detected too.
+
+### Added
+
+- `fcm store reset` (and `SqliteStorage::reset`) — the explicit, opt-in
+  path to drop and rebuild the storage schema after a version mismatch.
+  Re-run install afterwards to repopulate packages.
+
 ## [0.2.14] — 2026-11-17
 
 ### Added

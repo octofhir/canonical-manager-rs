@@ -6,6 +6,19 @@ versioning follows [Semver](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.14] — 2026-11-17
+
+### Added
+
+- `http` feature gating the core HTTP registry clients and TLS. Enabled by
+  default, so existing consumers keep their behavior.
+
+### Changed
+
+- The manager no longer hard-wires `octofhir-canonical-core/http`; with
+  `default-features = false, features = ["sqlite"]` the dependency graph drops
+  reqwest, rustls and hyper (219 → 166 crates).
+
 ## [0.2.13] — 2026-11-04
 
 ### Fixed

@@ -1,15 +1,17 @@
 # Offline canonical package management
 
-`octofhir-canonical-manager` keeps its existing imports and features, including
-HTTP support when default features are disabled. Existing downstream storage
-implementations do not need to change their trait implementations.
+`octofhir-canonical-manager` keeps its existing imports and features. HTTP
+support is now gated behind the `http` feature (enabled by default); with
+`default-features = false` the manager builds without HTTP and TLS. Existing
+downstream storage implementations do not need to change their trait
+implementations.
 
 For local package extraction, storage, indexing, search and canonical resolution,
 use the new core package:
 
 ```toml
 [dependencies]
-octofhir-canonical-core = { version = "0.2.13", default-features = false }
+octofhir-canonical-core = { version = "0.2.14", default-features = false }
 ```
 
 The core has no HTTP or TLS dependencies in its normal/build dependency graph.
